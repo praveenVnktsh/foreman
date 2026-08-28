@@ -69,6 +69,21 @@ LISTS = [
 # Defaults live here rather than in config.sh so a target that says nothing
 # still produces a full record. They are a CEILING per instance; the
 # installation's own ceiling is separate and lives in instance state.
+#
+# MIN_FREE_*/PROBE_*/QUICK_PROBE_MB used to be config.sh's own defaults --
+# constants shared by every target regardless of what it actually costs to
+# build. That is precisely the drift this table exists to prevent for every
+# other limit here: an operator raises `MAX_CONCURRENT` in board.toml and the
+# board keeps using config.sh's number, silently. preflight.py's probe sizes
+# had the identical bug, just never named it, so they move here with
+# everything else a target may need to declare about itself.
+#
+# The defaults below are sized for THIS repository's own suite -- a handful of
+# bash scripts that touch no meaningful disk -- not for the heavy Python test
+# suite they were originally calibrated against. A target whose build needs
+# gigabytes of scratch (pytest, a large `node_modules`, ...) raises its own
+# `[limits]` in board.toml; a cheap suite should never be required to reserve
+# a gigabyte before it is allowed to dispatch.
 LIMITS = {
     "MAX_CONCURRENT": 1,
     "MAX_BUILD_ATTEMPTS": 2,
@@ -76,6 +91,23 @@ LIMITS = {
     "REVIEWERS_PER_ROUND": 2,
     "STALL_MINUTES": 30,
     "MAX_FOLLOWUPS": 3,
+    # statvfs free-space floors. Necessary but not sufficient -- see
+    # preflight.py's module docstring for why the write probes below exist at
+    # all -- but still worth keeping comfortably above zero so a nearly-full
+    # disk is caught even when nothing gets as far as a probe.
+    "MIN_FREE_TMP_MB": 128,
+    "MIN_FREE_REPO_MB": 128,
+    # Written for real and then released. Large enough to actually exercise a
+    # quota (a 1-byte write can succeed where a real build's writes cannot),
+    # small enough that a cheap suite never waits on disk I/O to dispatch.
+    "PROBE_TMP_MB": 16,
+    "PROBE_REPO_MB": 8,
+    # `preflight.py --quick`'s probe, run on every heartbeat tick. Smaller
+    # again than the full-gate probes for the same reason QUICK_PROBE_MB was
+    # smaller than PROBE_TMP_MB before this table existed: a tick firing every
+    # couple of minutes must not pay a full probe's cost merely to prove a
+    # machine it is not about to build on is still healthy.
+    "QUICK_PROBE_MB": 4,
 }
 
 # Every top-level table this loader reads, and the keys it recognises inside

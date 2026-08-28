@@ -34,6 +34,7 @@ def _load_config() -> dict[str, str]:
     keys = (
         "REPO", "BOARD_HOME", "REQUIRED_CHECKS", "HIGH_RISK_PATHS",
         "DEPLOY_WORKFLOW", "DEPLOY_STEP", "CI_WORKFLOW", "INSTANCE",
+        "FOREMAN_HOME",
     )
     script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.sh")
     printf = 'printf "%s\\0" ' + " ".join(f'"${k}"' for k in keys)
@@ -65,6 +66,7 @@ DEPLOY_STEP = _CFG["DEPLOY_STEP"]
 # name makes every `main` CI lookup fail — which stands the whole board down on a
 # missing string rather than on anything about `main`. config.sh still overrides.
 CI_WORKFLOW = _CFG["CI_WORKFLOW"] or "CI"
+FOREMAN_HOME = _CFG["FOREMAN_HOME"]
 
 # An unreachable GitHub must not stall the whole tick.
 GH_TIMEOUT = 30
@@ -684,18 +686,16 @@ def main_ci_state(branch: str = "main") -> dict:
     return state
 
 
-def history(ticket: str) -> list[dict]:
-    """The card's append-only transition log, as written by config.sh:card_log.
+def _read_jsonl(path: str) -> list[dict]:
+    """Every well-formed line of a `history.jsonl`-shaped file, or `[]`.
 
-    This used to read a `state.json` that nothing in the skill has ever written,
-    so it returned null on every card and the tick fell back to guessing attempt
-    numbers from agent names. history.jsonl is the file that actually exists.
-
-    Still not authoritative: it is the record of what this skill DID, which is
-    why position is always re-derived from Linear, git and gh. It answers the one
-    question those cannot — how many times we have already tried.
+    Shared by `history()` (this instance's own cards) and `host_slots()`
+    (every instance's). An unreadable file (missing, a directory, permission
+    denied — `cards/<T>/` is a `mkdir -p`, not a guarantee `history.jsonl`
+    exists inside it) and a corrupt line are both silently absorbed: this is
+    a cache derived from `config.sh:card_log`, so a read that finds nothing
+    means there is nothing to report, not a system failure to raise on.
     """
-    path = os.path.join(BOARD_HOME, "cards", ticket, "history.jsonl")
     out = []
     try:
         with open(path) as fh:
@@ -710,6 +710,98 @@ def history(ticket: str) -> list[dict]:
     except OSError:
         return []
     return out
+
+
+def history(ticket: str) -> list[dict]:
+    """The card's append-only transition log, as written by config.sh:card_log.
+
+    This used to read a `state.json` that nothing in the skill has ever written,
+    so it returned null on every card and the tick fell back to guessing attempt
+    numbers from agent names. history.jsonl is the file that actually exists.
+
+    Still not authoritative: it is the record of what this skill DID, which is
+    why position is always re-derived from Linear, git and gh. It answers the one
+    question those cannot — how many times we have already tried.
+    """
+    return _read_jsonl(os.path.join(BOARD_HOME, "cards", ticket, "history.jsonl"))
+
+
+def card_holds_slot(history_path: str) -> bool:
+    """Does this card's own record say it is still occupying a build slot?
+
+    `--host-slots` cannot ask Linear or `claude agents` for every instance on
+    the machine the way a single tick asks about its own cards — that would be
+    a network or registry round trip per instance, on every dispatch, for a
+    ceiling that exists specifically to be cheap enough to check before every
+    one. `history.jsonl` is therefore the only signal: a card counts unless
+    its OWN log says it is done.
+
+    The convention: `config.sh:card_log` appends `{"action":"finished", ...}`
+    as the last event for a card that has left the board — reached `Done`,
+    `board-failed`, or otherwise stopped being in-flight work, the same way it
+    already appends `{"action":"void", ...}` for an attempt that didn't count.
+    Append-only means the LAST line is the most recent word on the card's own
+    status.
+
+    A card with no history at all — a `cards/<T>/` directory that exists for
+    some other reason, or was created but never logged to — holds no slot:
+    nothing was ever dispatched for it. That is the same "absence is not an
+    error, but it is also not evidence of anything in flight" reading
+    `_read_jsonl` already gives an unreadable file.
+    """
+    entries = _read_jsonl(history_path)
+    if not entries:
+        return False
+    event = entries[-1].get("event") or {}
+    return event.get("action") != "finished"
+
+
+def host_slots(foreman_home: str) -> dict:
+    """Cards holding a slot, counted across every instance on this machine.
+
+    `{"instances": {name: count, ...}, "total": N}`. This is the host-wide
+    ceiling's input: `HOST_MAX_CONCURRENT` bounds the total across every
+    instance sharing this machine's RAM and disk, the same way a single
+    instance's `MAX_CONCURRENT` bounds its own cards — see config.sh.
+
+    Reads only the local sidecar under `<foreman_home>/instances/*/cards/`.
+    No Linear, no `gh`, no `claude agents`: this has to be cheap enough to
+    check before every dispatch, for every instance, and none of those three
+    are namespaced by instance in a way that would make asking them once
+    cover the whole machine cheaply.
+
+    Tolerant by design, per its one caller (a tick deciding whether IT may
+    dispatch): an instance directory with no `cards/` at all, a `cards/` with
+    no entries, or one entry that cannot be read must never raise. This is
+    advisory input to a ceiling, not a fact the tick depends on being able to
+    fetch — failing to read one instance's slots must not take down the tick
+    that asked about all of them.
+    """
+    instances_dir = os.path.join(foreman_home, "instances")
+    result: dict = {"instances": {}, "total": 0}
+    try:
+        names = sorted(os.listdir(instances_dir))
+    except OSError:
+        return result
+    for name in names:
+        cards_dir = os.path.join(instances_dir, name, "cards")
+        try:
+            tickets = sorted(os.listdir(cards_dir))
+        except OSError:
+            # No cards/ at all -- a freshly-created instance that has never
+            # dispatched anything. Present in the report at 0, not absent:
+            # an absent key would be indistinguishable from a listing failure
+            # for `instances_dir` itself.
+            result["instances"][name] = 0
+            continue
+        count = 0
+        for ticket in tickets:
+            history_path = os.path.join(cards_dir, ticket, "history.jsonl")
+            if card_holds_slot(history_path):
+                count += 1
+        result["instances"][name] = count
+        result["total"] += count
+    return result
 
 
 def build_attempts(entries: list[dict]) -> int:
@@ -830,13 +922,21 @@ def reconcile(ticket: str, agents: list[dict]) -> dict:
 def main(argv: list[str]) -> int:
     if not argv:
         print("usage: reconcile.py <TICKET> [TICKET...]\n"
-              "       reconcile.py --main-ci [BRANCH]", file=sys.stderr)
+              "       reconcile.py --main-ci [BRANCH]\n"
+              "       reconcile.py --host-slots", file=sys.stderr)
         return 2
     if argv[0] == "--main-ci":
         # No agent registry, no Linear, no cards: this answers one question about
         # one branch, and step 0 asks it before any of that exists.
         json.dump(main_ci_state(argv[1] if len(argv) > 1 else "main"),
                   sys.stdout, indent=2)
+        print()
+        return 0
+    if argv[0] == "--host-slots":
+        # Same reasoning as --main-ci: this answers one question about the
+        # whole machine, over local files only, and must not require the
+        # agent registry (which is per-process, not per-instance) to answer it.
+        json.dump(host_slots(FOREMAN_HOME), sys.stdout, indent=2)
         print()
         return 0
     agents = load_agents()

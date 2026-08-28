@@ -90,47 +90,21 @@ rm -f "$_foreman_pairs_file"
 unset _foreman_skill_dir _foreman_contract _foreman_pairs_file _k _v
 export REPO INSTANCE INSTANCE_HOME BOARD_HOME FOREMAN_HOME
 
-# Raised to 10 at Praveen's request on 2026-08-02. It is a CEILING, not a target.
-#
-# Measured on mango that day, this machine cannot actually sustain 10 builds:
-#   - 14GB RAM total, and /tmp is a 7.3GB tmpfs, so tmpfs competes for the same RAM
-#   - ONE `just test-all` run held 2.2GB of /tmp — three concurrent runs exhaust it
-#   - each agent is ~410MB RSS before its test suite, and a card in review adds
-#     REVIEWERS_PER_ROUND more agents on top of its build agent
-#   - each worktree is ~740MB on disk (it carries its own backend/.venv)
-#
-# The binding constraint is /tmp, and preflight cannot save you from it: the probe
-# writes and RELEASES, so it is a point-in-time check and never a reservation. Ten
-# dispatches can each pass a probe in turn and then blow the quota collectively
-# once all ten reach their test suites — which is exactly the EDQUOT failure that
-# cost PRA-28 two attempts.
-#
-# Realistic ceiling here is 3-4. To actually use 10, give each agent its own
-# TMPDIR on disk (336GB free) instead of sharing the tmpfs.
 MAX_BUDGET_USD="${MAX_BUDGET_USD:-}"
 
 BUILD_MODEL="${BUILD_MODEL:-opus}"
 REVIEW_MODEL="${REVIEW_MODEL:-opus}"
 
-# Environment thresholds, enforced by preflight.py before anything is dispatched.
-#
-# PROBE_* are written for real and then released; MIN_FREE_* are read from
-# statvfs. Both exist because they fail differently: on 2026-08-02 `/tmp` was a
-# tmpfs mounted `usrquota` with the user over allowance, so `df` reported 1.5G
-# free while every write returned EDQUOT. A free-space check alone called that
-# machine healthy and the board dispatched two builds into it, losing both.
-#
-# The tmp probe is deliberately large. `just test-all` runs pytest, which wants
-# gigabytes; a quota can admit a 1MB probe and refuse the run that follows.
-MIN_FREE_TMP_MB="${MIN_FREE_TMP_MB:-2048}"
-MIN_FREE_REPO_MB="${MIN_FREE_REPO_MB:-5120}"
-PROBE_TMP_MB="${PROBE_TMP_MB:-1024}"
-PROBE_REPO_MB="${PROBE_REPO_MB:-64}"
-# `preflight.py --quick` probe, used by the heartbeat tick. Small on purpose: a
-# tick every couple of minutes must not write a gigabyte to prove a machine it is
-# not about to build on is healthy. dispatch.sh still runs the full gate, so
-# nothing is ever spawned on the strength of this one.
-QUICK_PROBE_MB="${QUICK_PROBE_MB:-16}"
+# The MACHINE's ceiling, across every instance sharing it -- not this
+# repository's `MAX_CONCURRENT`, which is a per-instance limit declared in
+# board.toml and has no idea another instance's cards exist. Two instances
+# each dispatching up to their own MAX_CONCURRENT can still jointly exceed
+# what one machine's RAM and /tmp can sustain, which is the same class of
+# failure PROBE_TMP_MB/MIN_FREE_TMP_MB guard against for a single instance.
+# `reconcile.py --host-slots` does the counting, across
+# `~/.foreman/instances/*/cards/`; this is the ceiling it is checked against
+# before a dispatch, in addition to the instance's own MAX_CONCURRENT.
+HOST_MAX_CONCURRENT="${HOST_MAX_CONCURRENT:-4}"
 
 # Dispatched agents run with --dangerously-skip-permissions, at Praveen's
 # explicit instruction on 2026-08-01.

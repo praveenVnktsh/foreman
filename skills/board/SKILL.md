@@ -52,22 +52,31 @@ table says what each knob *means* and `config.sh` says what it *is*:
   printf '%-22s %s\n' MAX_CONCURRENT "$MAX_CONCURRENT" \
     MAX_BUILD_ATTEMPTS "$MAX_BUILD_ATTEMPTS" MAX_REVIEW_ROUNDS "$MAX_REVIEW_ROUNDS" \
     REVIEWERS_PER_ROUND "$REVIEWERS_PER_ROUND" STALL_MINUTES "$STALL_MINUTES" \
-    MAX_FOLLOWUPS "$MAX_FOLLOWUPS" BOARD_DRY_RUN "${BOARD_DRY_RUN:-unset}" )
+    MAX_FOLLOWUPS "$MAX_FOLLOWUPS" HOST_MAX_CONCURRENT "$HOST_MAX_CONCURRENT" \
+    BOARD_DRY_RUN "${BOARD_DRY_RUN:-unset}" )
 ```
 
 | Key | Meaning |
 |---|---|
-| `MAX_CONCURRENT` | cards holding a slot |
+| `MAX_CONCURRENT` | cards holding a slot, for THIS instance |
 | `MAX_BUILD_ATTEMPTS` | build attempts before the card returns to `Backlog` |
 | `MAX_REVIEW_ROUNDS` | blocking rounds before the card returns to `Backlog` |
 | `REVIEWERS_PER_ROUND` | adversarial reviewers per round |
 | `STALL_MINUTES` | transcript silence before an agent is judged stalled |
 | `MAX_FOLLOWUPS` | follow-up cards per merged card |
-| `MIN_FREE_*`, `PROBE_*` | environment thresholds enforced by `preflight.py` |
+| `MIN_FREE_*`, `PROBE_*`, `QUICK_PROBE_MB` | environment thresholds enforced by `preflight.py` — declared per-target in `board.toml`'s `[limits]`, not here |
+| `HOST_MAX_CONCURRENT` | cards holding a slot, summed across **every** instance sharing this machine |
 | `BOARD_DRY_RUN` | print every mutation instead of performing it |
 
 `MAX_CONCURRENT` counts **cards, not processes** — a card in review adds up to
 `REVIEWERS_PER_ROUND` more agents on top of its build agent.
+
+`HOST_MAX_CONCURRENT` bounds the same thing across instances: two instances
+each dispatching up to their own `MAX_CONCURRENT` can still jointly exceed what
+one machine's RAM and disk can sustain. `$B/reconcile.py --host-slots` reads it
+across `~/.foreman/instances/*/cards/` and reports `{"instances": {...},
+"total": N}`; check it against `HOST_MAX_CONCURRENT` in step 6 alongside the
+instance's own free-slot count, before dispatching anything.
 
 ## Scope
 
@@ -816,6 +825,11 @@ exiting during the restart. Benign.
 and move the card to `Done` in this same tick once all three hold. The deploy is
 minutes away and it is the last thing between a merged card and its column.
 
+Also `card_log <T> '{"action":"finished","reason":"done"}'`. This is the
+signal `reconcile.py --host-slots` (step 6) reads to stop counting the card
+against `HOST_MAX_CONCURRENT` — without it, a card holds a slot in the host
+count forever, because `sweep.sh` deliberately never deletes `history.jsonl`.
+
 **That wait has three endings, not two.** For as long as it had two, a deploy
 that ran and failed came back `satisfied: true` carrying `verified: false`, and
 the tick had no name for the one outcome that means production is broken:
@@ -862,6 +876,16 @@ commit, and the wait keeps going until its budget runs out.
 
 Free slots = `MAX_CONCURRENT` − (cards in `In Progress`) − (cards in `In Review`
 with a live reviewer). Parked-for-Praveen cards do not count.
+
+**Then check the machine, not just this instance.** `$B/reconcile.py
+--host-slots` sums cards holding a slot across every instance under
+`~/.foreman/instances/*/cards/`. If `total >= HOST_MAX_CONCURRENT`, this
+machine is already at its own ceiling regardless of how much room this
+instance's `MAX_CONCURRENT` still has — do not dispatch, even into a free
+instance slot, until another instance's card releases one. This is the same
+reasoning as `MAX_CONCURRENT` itself, one level up: two instances each within
+their own limit can still jointly exceed what one machine's RAM and disk can
+sustain.
 
 **Recount here, after steps 2–5 have run.** A card that reached `Done` earlier in
 this same tick has already released its slot, and the whole point of running the

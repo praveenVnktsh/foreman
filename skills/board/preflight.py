@@ -21,6 +21,19 @@ a quota can admit a small write and refuse the gigabytes pytest wants.
 Nothing here is cached. A tick that ran ten minutes ago proves nothing about a
 disk that filled since.
 
+WHY THE WRITE PROBES ARE LOCKED. The check above is correct for one instance
+running alone and wrong for several: two instances probing `/tmp` at once both
+observe room that only one of them can have, because the probe writes and then
+RELEASES -- it is a point-in-time measurement, not a reservation, and "point in
+time" stops meaning anything the moment two processes measure the same point at
+once. `skills/board/withlock.py` serializes the probes across every instance on
+this machine, on `$FOREMAN_HOME/preflight.lock`. Held in-process (see
+`withlock.held()`) rather than delegated to a wrapper subprocess, specifically
+so that killing THIS process — the one thing a preflight that hangs invites —
+drops the fd and releases the lock immediately. A lock that survived a SIGKILL
+would wedge every future dispatch on the machine behind a probe that will never
+finish, which is worse than the race it exists to prevent.
+
 WHY IT NO LONGER MEASURES STALENESS. It used to report `behind_origin_main`,
 after a tick on 2026-08-03 refuted a `blocking` finding by grepping
 `ops/deploy-mango.sh` in this checkout, 169 commits behind, and merged a change
@@ -50,7 +63,18 @@ import subprocess
 import sys
 import tempfile
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import withlock  # noqa: E402  (see sys.path.insert above -- sibling module)
+
 CHUNK = 8 * 1024 * 1024
+
+# How long a probe waits for another instance's probe to finish before giving
+# up. Generous on purpose: a held lock means a probe is actually IN PROGRESS
+# somewhere on this machine (or, worst case, was killed and is about to be
+# reclaimed instantly -- see withlock.held()), never a process that will hold
+# it forever, so waiting here is always the right call. Bounded anyway so a
+# lock that somehow never clears cannot hang a tick past its own budget.
+PROBE_LOCK_TIMEOUT_SECONDS = 60
 
 
 def _load_config() -> dict[str, str]:
@@ -59,8 +83,8 @@ def _load_config() -> dict[str, str]:
     Same reasoning as reconcile.py: a second copy of a threshold in Python is a
     threshold that silently stops matching the one the operator edits.
     """
-    keys = ("REPO", "MIN_FREE_TMP_MB", "MIN_FREE_REPO_MB", "PROBE_TMP_MB",
-            "PROBE_REPO_MB", "QUICK_PROBE_MB")
+    keys = ("REPO", "FOREMAN_HOME", "MIN_FREE_TMP_MB", "MIN_FREE_REPO_MB",
+            "PROBE_TMP_MB", "PROBE_REPO_MB", "QUICK_PROBE_MB")
     script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.sh")
     printf = 'printf "%s\\0" ' + " ".join(f'"${k}"' for k in keys)
     out = subprocess.run(
@@ -161,6 +185,35 @@ def fetch_check(repo: str) -> dict:
     )
 
 
+def locked_write_probe(lockfile: str, directory: str, megabytes: int) -> dict:
+    """`write_probe`, serialized against every other instance probing this
+    machine at the same moment.
+
+    Two instances writing gigabyte probes concurrently both observe room that
+    only one of them can have — the write-and-release check is a point-in-time
+    measurement, and "point in time" stops meaning anything once two processes
+    measure the same point at once. `withlock.held()` is the same locking
+    primitive `withlock.py`'s CLI uses elsewhere in this skill, held here
+    in-process rather than around a subprocess, so a SIGKILL of THIS process
+    mid-probe drops the fd and releases the lock immediately — see the module
+    docstring and `withlock.held()`'s own docstring for why that matters.
+
+    A lock that could not be taken is reported as a failed check rather than
+    raised: preflight's whole contract is "every check here gates", and a
+    machine so contended that the probe lock itself cannot be acquired within
+    `PROBE_LOCK_TIMEOUT_SECONDS` is not fit to dispatch onto either.
+    """
+    try:
+        with withlock.held(lockfile, PROBE_LOCK_TIMEOUT_SECONDS):
+            return write_probe(directory, megabytes)
+    except TimeoutError as exc:
+        return {
+            "name": f"write {megabytes}MB to {directory}",
+            "ok": False,
+            "detail": f"could not take the probe lock: {exc}",
+        }
+
+
 def command_check(name: str, args: list[str], cwd: str | None = None) -> dict:
     check = {"name": name, "ok": False, "detail": ""}
     try:
@@ -188,6 +241,7 @@ def main() -> int:
     cfg = _load_config()
     repo = cfg["REPO"]
     tmpdir = os.environ.get("TMPDIR") or "/tmp"
+    lockfile = os.path.join(cfg["FOREMAN_HOME"], "preflight.lock")
 
     if args.quick:
         # A heartbeat tick runs every couple of minutes and almost always finds
@@ -206,16 +260,18 @@ def main() -> int:
         # `evidence.sh` runs its own fetch per read, which is the only thing
         # that stays true for a tick that merges pull requests while it runs.
         checks = [
-            write_probe(tmpdir, int(cfg["QUICK_PROBE_MB"])),
+            locked_write_probe(lockfile, tmpdir, int(cfg["QUICK_PROBE_MB"])),
             free_check(tmpdir, int(cfg["MIN_FREE_TMP_MB"])),
             free_check(repo, int(cfg["MIN_FREE_REPO_MB"])),
         ]
     else:
         checks = [
-            # A build's temp usage is dominated by pytest, which wants gigabytes.
-            write_probe(tmpdir, int(cfg["PROBE_TMP_MB"])),
+            # A build's temp usage is dominated by the target's own test suite;
+            # PROBE_TMP_MB is declared per-target in board.toml's [limits], not
+            # assumed here -- see bin/contract.py.
+            locked_write_probe(lockfile, tmpdir, int(cfg["PROBE_TMP_MB"])),
             free_check(tmpdir, int(cfg["MIN_FREE_TMP_MB"])),
-            write_probe(repo, int(cfg["PROBE_REPO_MB"])),
+            locked_write_probe(lockfile, repo, int(cfg["PROBE_REPO_MB"])),
             free_check(repo, int(cfg["MIN_FREE_REPO_MB"])),
         ]
         # A worktree cannot be created from a ref this machine cannot fetch, and
