@@ -30,6 +30,15 @@ import tomllib
 # `checks.required` is required because merging with nothing required merges a
 # diff that nothing tested. `test.command` is required because a build agent
 # with no test command reports success from having written code.
+#
+# LINEAR_TEAM_NAME and LINEAR_PROJECT_NAME are what the target repository
+# declares about itself -- names, not IDs, because a target is not trusted to
+# hand config.sh the ID it is later allowed to write state transitions into.
+# State IDs, never names, once past this file: a renamed column must not
+# silently change which column the orchestrator is allowed to write to. That
+# resolution belongs in bin/resolve-ids.py (Task 4), which does not exist yet;
+# this comment is parked here, next to the names it resolves from, until it
+# does.
 SCALARS = [
     ("LINEAR_TEAM_NAME", ("linear", "team"), None),
     ("LINEAR_PROJECT_NAME", ("linear", "project"), None),
@@ -45,6 +54,14 @@ SCALARS = [
 # REQUIRED_CHECKS joins on "|" and the path lists join on " " because that is
 # what the copied config.sh already splits on; changing the separator here
 # without changing every splitter is a silent empty list.
+#
+# risk.paths (HIGH_RISK_PATHS): paths whose presence in a diff park the PR for
+# the operator instead of merging it, read from the diff, never from the
+# ticket text. The distinction that decides what belongs in this list is
+# reversibility: a bad change in an ordinary path is a revert and a redeploy,
+# but a migration runs against live state and mutates it in place --
+# reverting the PR does not undo it. An empty list is a statement ("nothing is
+# high risk"), not an absence; see the empty-list handling below.
 LISTS = [
     ("REQUIRED_CHECKS", ("checks", "required"), "|", None),
     ("HIGH_RISK_PATHS", ("risk", "paths"), " ", []),

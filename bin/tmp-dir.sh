@@ -30,7 +30,7 @@
 
 set -euo pipefail
 
-root="${MURMR_TMP_ROOT:-${BOARD_HOME:-$HOME/.murmr-board}/tmp}"
+root="${FOREMAN_TMP_ROOT:-${BOARD_HOME:-$HOME/.foreman}/tmp}"
 
 case "${1:-}" in
   --root)
