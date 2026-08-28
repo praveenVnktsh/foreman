@@ -1,0 +1,3 @@
+.claude/worktrees/
+*.pyc
+__pycache__/
