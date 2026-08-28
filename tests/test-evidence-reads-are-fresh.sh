@@ -62,23 +62,26 @@
 #      Nothing else reaps that namespace, and the ref pins every object the
 #      fetch brought with it.
 #
-# Runs in CI's Operations job (which globs `ops/tests/*.sh`) against a full
-# checkout. Not part of `just test-all`, so the `.claude/` path it needs is
-# never asked of mango's live checkout, which deliberately has none.
+# Runs against a full checkout, via tests/run-all.sh (Task 9 wires this into
+# CI; see docs/plans/2026-08-27-foreman-layer-1.md).
 
 set -euo pipefail
 
-repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-board_dir="$repo_root/.claude/skills/board"
+repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+board_dir="$repo_root/skills/board"
 evidence="$board_dir/evidence.sh"
+
+# shellcheck source=lib/instance-fixture.sh
+source "$repo_root/tests/lib/instance-fixture.sh"
 
 [[ -x "$evidence" ]] || {
   echo "FAIL: $evidence is missing or not executable" >&2
   exit 1
 }
 
-# See design/build_system.md, invariant 10: scratch is asked of ops/tmp-dir.sh.
-tmp_root="$("$repo_root/ops/tmp-dir.sh")"
+# The scratch root is asked of bin/tmp-dir.sh, never worked out here -- see
+# bin/tmp-dir.sh's own header for why one derivation has to stay singular.
+tmp_root="$("$repo_root/bin/tmp-dir.sh")"
 mkdir -p "$tmp_root"
 export TMPDIR="$tmp_root"
 
@@ -87,10 +90,21 @@ trap 'rm -rf "$work_dir"' EXIT
 
 # `evidence.sh` buffers a PR diff in a file it unlinks immediately, under the
 # scratch root `config.sh` derives from BOARD_HOME. Pointed inside the work dir
-# so this test creates nothing under the real `~/.murmr-board`, and so case 6
-# can assert that nothing is left behind there. Set after TMPDIR above, which
-# deliberately asks the real derivation for the real path.
+# so this test creates nothing under a real installation's board home, and so
+# case 6 can assert that nothing is left behind there. Set after TMPDIR above,
+# which deliberately asks the real derivation for the real path.
 export BOARD_HOME="$work_dir/board-home"
+
+# `evidence.sh` sources config.sh, which since Task 2/3 requires a
+# FOREMAN_INSTANCE and an instance directory declaring a REPO whose
+# board.toml passes bin/contract.py -- regardless of what REPO is
+# subsequently overridden to per call below. AGENT_TMP_ROOT (what evidence.sh
+# actually buffers into) is derived from THIS installation's own
+# bin/tmp-dir.sh, never the target's, so the fixture repos below need no
+# tmp-dir.sh of their own.
+inst_home="$work_dir/foreman-home"
+fixture_add_instance "$inst_home" fixture
+export HOME="$inst_home" FOREMAN_INSTANCE=fixture
 
 fail() {
   echo "FAIL: $1" >&2
@@ -102,29 +116,18 @@ git_q() {
     -c commit.gpgsign=false -c init.defaultBranch=main "$@"
 }
 
-# `config.sh` asks `$REPO/ops/tmp-dir.sh` for the scratch root, so the fixture
-# has to be shaped enough like this repository to answer that. The real script
-# is copied in rather than stubbed, so this does not become a second derivation
-# of the path `ops/tests/test-tmp-dir.sh` exists to keep singular.
-plant_repo_shape() {
-  local root="$1"
-  mkdir -p "$root/ops"
-  cp "$repo_root/ops/tmp-dir.sh" "$root/ops/tmp-dir.sh"
-  chmod +x "$root/ops/tmp-dir.sh"
-}
-
 # The fixture is the #159 file, in miniature: a deploy script whose `.claude/`
 # exclusion lands *after* the tick's checkout was last fetched.
 origin="$work_dir/origin.git"
 seed="$work_dir/seed"
 git_q init -q --bare "$origin"
 git_q init -q -b main "$seed"
-plant_repo_shape "$seed"
+fixture_board_toml "$seed"
 cat > "$seed/deploy.sh" <<'EOF'
 #!/usr/bin/env bash
 rsync --archive --delete "$source/" "$target/"
 EOF
-git_q -C "$seed" add deploy.sh ops/tmp-dir.sh
+git_q -C "$seed" add deploy.sh board.toml
 git_q -C "$seed" commit -q -m "Deploy without the exclude"
 git_q -C "$seed" remote add origin "$origin"
 git_q -C "$seed" push -q origin main
