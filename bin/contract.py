@@ -34,11 +34,9 @@ import tomllib
 # LINEAR_TEAM_NAME and LINEAR_PROJECT_NAME are what the target repository
 # declares about itself -- names, not IDs, because a target is not trusted to
 # hand config.sh the ID it is later allowed to write state transitions into.
-# State IDs, never names, once past this file: a renamed column must not
-# silently change which column the orchestrator is allowed to write to. That
-# resolution belongs in bin/resolve-ids.py (Task 4), which does not exist yet;
-# this comment is parked here, next to the names it resolves from, until it
-# does.
+# bin/resolve-ids.py resolves these to ids once, at instance-creation time,
+# and pins them in ids.env; see that file for why ids and never names past
+# this point.
 SCALARS = [
     ("LINEAR_TEAM_NAME", ("linear", "team"), None),
     ("LINEAR_PROJECT_NAME", ("linear", "project"), None),
