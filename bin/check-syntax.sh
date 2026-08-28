@@ -7,8 +7,8 @@
 # this check named what to cover and was under-covering by the time anyone
 # looked:
 #
-#   1. A hand-listed file set, which omitted the test written for the WhatsApp
-#      outage, install-user-units.sh, and all of scripts/.
+#   1. A hand-listed file set, which omitted the regression test written for a
+#      real production outage, install-user-units.sh, and all of scripts/.
 #   2. A glob, which would have passed had it matched nothing at all.
 #   3. `find ops scripts -exec bash -n {} +`, which hands a batch to one `bash`
 #      -- and `bash -n a.sh b.sh` parses `a.sh` and takes `b.sh` as a positional

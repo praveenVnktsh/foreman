@@ -135,7 +135,8 @@ HOST_SLOT_STALE_MINUTES="${HOST_SLOT_STALE_MINUTES:-720}"
 # Bash, so an unattended agent blocks on its first git, gh or test command and
 # waits forever for an operator who is not there. The symptom is
 # `state: blocked, waitingFor: permission prompt` in `claude agents` — no error,
-# no transcript, no exit. That is exactly how the first PRA-28 build died.
+# no transcript, no exit. That is exactly how the first of two consecutive
+# attempts on one card died.
 #
 # What contains a dispatched agent is therefore NOT the permission prompt. It is:
 # the throwaway worktree it runs in, the fact that nothing merges without an
@@ -200,9 +201,9 @@ BOARD_DRY_RUN="${BOARD_DRY_RUN:-}"
 # The path is derived from the WORKTREE, never from the environment. Agents
 # inherit their env from the shared `claude daemon`, not from the dispatch.sh
 # that spawned them — measured 2026-08-02, when every live agent including a
-# reviewer and a different ticket's build all reported `TICKET=PRA-29
-# ROLE=build`. Anything per-agent keyed on that env is silently wrong for every
-# agent after the first.
+# reviewer and a different ticket's build all reported the same ticket and
+# role in their environment. Anything per-agent keyed on that env is silently
+# wrong for every agent after the first.
 #
 # Asked of bin/tmp-dir.sh rather than computed here, and no longer separately
 # overridable: the justfile's test recipes used to export the same path as

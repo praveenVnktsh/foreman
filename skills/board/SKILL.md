@@ -66,7 +66,7 @@ table says what each knob *means* and `config.sh` says what it *is*:
 | `REVIEWERS_PER_ROUND` | adversarial reviewers per round |
 | `STALL_MINUTES` | transcript silence before an agent is judged stalled |
 | `MAX_FOLLOWUPS` | follow-up cards per merged card |
-| `MIN_FREE_*`, `PROBE_*`, `QUICK_PROBE_MB` | environment thresholds enforced by `preflight.py` — declared per-target in `board.toml`'s `[limits]`, not here. **foreman's own defaults are sized for foreman's own cheap suite**; a target with a heavy build (a real test suite, a large `node_modules`, …) that declares no `[limits]` silently inherits them and can pass this preflight while still dying mid-build the way PRA-28 did on 2026-08-02 — see `bin/contract.py`. |
+| `MIN_FREE_*`, `PROBE_*`, `QUICK_PROBE_MB` | environment thresholds enforced by `preflight.py` — declared per-target in `board.toml`'s `[limits]`, not here. **foreman's own defaults are sized for foreman's own cheap suite**; a target with a heavy build (a real test suite, a large `node_modules`, …) that declares no `[limits]` silently inherits them and can pass this preflight while still dying mid-build the way two consecutive attempts on one card did on 2026-08-02 — see `bin/contract.py`. |
 | `HOST_MAX_CONCURRENT` | cards holding a slot, summed across **every** instance sharing this machine |
 | `HOST_SLOT_STALE_MINUTES` | how long a card may go without a fresh `history.jsonl` entry before `--host-slots` stops counting it even with no `released` marker — a backstop, not the primary release mechanism |
 | `BOARD_DRY_RUN` | print every mutation instead of performing it |
@@ -181,11 +181,15 @@ The board is level-triggered by design: every tick re-derives the whole picture
 from Linear, `gh` and `claude agents`. That is what makes a lost edge survivable,
 and it is why the fallback exists rather than being tuned away.
 
-**The heartbeat is 7 minutes, at the operator's instruction on 2026-08-02**, not
-the 1200–1800s the `/loop` skill suggests by default. Their reason: they add
-cards interactively and want them picked up reasonably quickly, and a card
-entering `Todo` is the one transition no event can report. They tried 2 minutes
-first and found it too frequent — do not tighten it back without being asked.
+**The heartbeat's pace is picked when you type the `/loop` invocation, not
+fixed by this skill** — there is no config knob for it, because it is a
+property of how you run the loop, not of the target. Pick something faster
+than the `/loop` skill's own 1200–1800s default if cards get added
+interactively and should be picked up reasonably quickly, since a card
+entering `Todo` is the one transition no agent completion can ever report.
+One operator settled on 7 minutes on 2026-08-02, after finding 2 minutes too
+frequent — do not tighten a working pace back down without a reason as
+concrete as that one.
 
 This is a *fallback*, not a cadence. Nothing waits on it that the Monitor
 reports: an agent finishing wakes the board instantly whatever this is set to.
@@ -800,9 +804,10 @@ The file was real, the path was right, and the answer was still false.
   merge path — one `gh` blip away from merging a migration nobody read.
 - **`risk: low`** and no blocking findings and `checks.passing` → merge it.
 
-Everything else merges autonomously, including health, finance, sensors, `ops/`
-and `.github/workflows/`. "Everything else" means every *low-risk* diff — it is
-not a catch-all for the two states above, both of which stop. That is
+Everything else merges autonomously: any path the target did not declare in
+`[risk]` is low-risk, whatever it is — this skill has no list of its own to
+consult, only the target's. "Everything else" means every *low-risk* diff — it
+is not a catch-all for the two states above, both of which stop. That is
 deliberate: a bad change on a low-risk path is a revert and a redeploy away,
 whereas the whole reason a path belongs in `[risk]` is that it may not be —
 a migration that already ran mutates the deploy host's live database in
@@ -821,7 +826,7 @@ Before merging, three things that make a green PR lie:
   information rather than a claim about readiness: run `gh pr ready <n>`, merge,
   and **say on the card that you did**. `brief.py` tells build agents not to open
   drafts, so one appearing means an agent ignored that — worth a line in the
-  comment either way. PRA-28 lost a merge to this on 2026-08-02.
+  comment either way. One card lost a merge to this on 2026-08-02.
 
 - **`needs_update: true`** (`mergeStateStatus == BEHIND`) — the `main` ruleset
   sets `strict: true`, so it will not merge however green it looks. Run

@@ -13,7 +13,7 @@
 # check proves "there is room" by actually using it and giving it back, which
 # means it is a POINT-IN-TIME measurement, not a reservation. Two instances
 # probing at the same point in time both observe room that only one of them
-# can have -- the same class of failure as the `/tmp` quota that cost PRA-28
+# can have -- the same class of failure as the `/tmp` quota that cost one card
 # two build attempts on 2026-08-02, scaled by the number of instances. Cases 4
 # and 5 below are why the lock exists at all; case 5 in particular, because a
 # lock that survives a SIGKILL wedges every future dispatch on the machine,

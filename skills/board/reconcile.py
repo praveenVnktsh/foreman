@@ -250,8 +250,8 @@ def pr_for(ticket: str) -> dict | None:
     # verifying its deploy. But taking the highest number regardless of state
     # meant a CLOSED pull request was reported as the card's — and a closed one
     # keeps its green checks, so step 2 would read "PR open and passing" and move
-    # the card to `In Review` on a branch nobody is working. Observed on PRA-30
-    # the moment its superseded #143 was closed.
+    # the card to `In Review` on a branch nobody is working. Observed on one
+    # card the moment its superseded #143 was closed.
     #
     # An OPEN pull request is always the live one. Fall back to the newest of
     # whatever else exists, which is what the merged-and-deployed path wants.
@@ -887,7 +887,7 @@ def death_report(path: str | None) -> dict | None:
     that finished cleanly from one that was killed mid-command. That difference
     decides whether the failure belongs to the ticket or to the machine, and
     getting it wrong spends a build attempt on an environment fault — which is
-    exactly what happened to PRA-28 twice on 2026-08-02.
+    exactly what happened to one card, twice, on 2026-08-02.
 
     The signal is a trailing tool_use with no matching tool_result: the agent
     asked for a command and no answer was ever recorded, so it did not stop of

@@ -4,8 +4,8 @@
     preflight.py            # JSON verdict on stdout, exit 0 ok / 1 unfit
     preflight.py --quiet    # same exit code, no output unless unfit
 
-The board lost two consecutive PRA-28 build attempts on 2026-08-02 to a `/tmp`
-that was over its user quota. Both agents died mid-test-run with no error
+The board lost two consecutive build attempts on one card on 2026-08-02 to a
+`/tmp` that was over its user quota. Both agents died mid-test-run with no error
 in the transcript, no pull request, and no branch. Each death consumed an attempt
 budget meant for a bad *ticket*, and the second attempt was dispatched into
 exactly the same broken environment as the first — because nothing checked.

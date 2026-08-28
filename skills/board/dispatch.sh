@@ -42,9 +42,10 @@ PROMPT="$(cat "$PROMPT_FILE")"
 [[ -n "${PROMPT//[[:space:]]/}" ]] || die "prompt file is empty"
 
 # Never spawn an agent into a machine that cannot build. On 2026-08-02 two
-# PRA-28 attempts were lost to a `/tmp` over its user quota: the first died
-# mid-test-run leaving no branch and no pull request, and the second was
-# dispatched into the identical broken environment because nothing looked. The
+# consecutive attempts on one card were lost to a `/tmp` over its user quota:
+# the first died mid-test-run leaving no branch and no pull request, and the
+# second was dispatched into the identical broken environment because nothing
+# looked. The
 # gate belongs here rather than only in SKILL.md so that it holds however the
 # script is called — by the tick, by a resume, or by hand.
 #
@@ -182,10 +183,11 @@ fi
 # TMPDIR here and must not be: a background agent inherits its environment from
 # the shared `claude daemon`, not from this script, so every agent after the
 # first would receive the first one's value. Measured 2026-08-02 — a reviewer
-# and an unrelated ticket's build both reported `TICKET=PRA-29 ROLE=build`.
-# The justfile's test recipes export the same path as TMPDIR, asking the same
-# ops/tmp-dir.sh this does, keyed on the worktree they are running in — the one
-# per-agent fact that cannot go stale. sweep.sh reaps it.
+# and an unrelated ticket's build both reported the same ticket and role in
+# their environment. The justfile's test recipes export the same path as
+# TMPDIR, asking the same ops/tmp-dir.sh this does, keyed on the worktree they
+# are running in — the one per-agent fact that cannot go stale. sweep.sh reaps
+# it.
 mkdir -p "$(agent_tmp_for "$WORKTREE")"
 
 cd "$WORKTREE"

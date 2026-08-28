@@ -27,8 +27,9 @@ source "$SKILL_DIR/config.sh"
 # Scratch lives beside the worktree and dies with it. It is reaped HERE, by the
 # sweep, and never by the agent itself: an agent only cleans up if it gets to
 # exit on its own terms, and the ones that most need cleaning are the ones
-# killed mid-command — a full disk, a quota, an OOM. Tonight's two dead PRA-28
-# builds would each have cleaned up nothing.
+# killed mid-command — a full disk, a quota, an OOM. Two build attempts killed
+# mid-command by a full-disk incident on one card would each have cleaned up
+# nothing.
 remove_agent_tmp() {
   local tmp="$1"
   [[ -d "$tmp" ]] || return 0

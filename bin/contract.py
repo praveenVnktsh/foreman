@@ -90,8 +90,8 @@ LISTS = [
 # silently inherits foreman's own tiny numbers instead of failing to load. A
 # heavy build that would have exhausted a 1024MB/64MB probe or a 2048MB/5120MB
 # free-space floor now instead PASSES this cheap preflight and dies mid-build
-# on the real thing: the exact EDQUOT failure that cost PRA-28 two attempts on
-# 2026-08-02, reintroduced by under-provisioning rather than by no check
+# on the real thing: the exact EDQUOT failure that cost one card two attempts
+# on 2026-08-02, reintroduced by under-provisioning rather than by no check
 # existing at all. If your target's build writes real gigabytes of scratch --
 # a Python test suite, a large `node_modules`, a media pipeline -- say so in
 # `board.toml`'s `[limits]`; this table cannot tell a cheap repo from an
