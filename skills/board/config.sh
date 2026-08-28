@@ -20,6 +20,20 @@ if [[ -z "$INSTANCE" ]]; then
   # a `return` so a stray `. config.sh` does not close the terminal.
   if [[ $- == *i* ]]; then return 1; else exit 1; fi
 fi
+# No hyphen, no slash. worktree_path and every worktree/scratch glob in
+# sweep.sh join the instance and the ticket with a HYPHEN
+# (foreman-<instance>-<ticket>), which an unconstrained instance name can
+# absorb: INSTANCE=alpha-x makes "foreman-alpha-x-PRA-1" match the glob
+# "foreman-alpha-*", so alpha's sweep would reap alpha-x's worktrees on a
+# shared REPO. agent_name/branch_name/evidence_ref are `/`-delimited and safe
+# regardless, but the name is constrained here rather than changing the
+# worktree delimiter -- any separator can be absorbed by an unconstrained
+# name, so the name is what actually has to be closed. Underscores stay legal
+# so `murmr_staging` is still sayable.
+if [[ ! "$INSTANCE" =~ ^[A-Za-z0-9_]+$ ]]; then
+  printf 'foreman: instance name %s is invalid; only letters, digits and underscore are allowed (no hyphen, no slash)\n' "$INSTANCE" >&2
+  if [[ $- == *i* ]]; then return 1; else exit 1; fi
+fi
 INSTANCE_HOME="$FOREMAN_HOME/instances/$INSTANCE"
 if [[ ! -d "$INSTANCE_HOME" ]]; then
   printf 'foreman: no instance %s at %s\n' "$INSTANCE" "$INSTANCE_HOME" >&2

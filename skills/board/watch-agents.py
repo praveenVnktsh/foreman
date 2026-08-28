@@ -41,24 +41,18 @@ import time
 
 POLL_SECONDS = int(os.environ.get("WATCH_POLL_SECONDS", "15"))
 
+# INSTANCE, reused from reconcile.py's own `_load_config` rather than a second
+# reader shelling out to config.sh on its own -- two readers of the same
+# setting is exactly the drift `_load_config`'s docstring warns about, and this
+# process already needs reconcile.py's other machinery for nothing here, so
+# there is no cost to sharing its one subprocess call instead of paying for a
+# second.
+_SKILL_DIR = os.path.dirname(os.path.abspath(__file__))
+if _SKILL_DIR not in sys.path:
+    sys.path.insert(0, _SKILL_DIR)
+import reconcile  # noqa: E402
 
-def _load_instance() -> str:
-    """INSTANCE, read from config.sh -- not from os.environ directly, so this
-    always matches what the rest of the board resolved rather than keeping a
-    second copy that can drift from it. Same reasoning as reconcile.py's own
-    `_load_config`.
-    """
-    script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.sh")
-    out = subprocess.run(
-        ["bash", "-c", f". {script!r} >/dev/null; printf '%s' \"$INSTANCE\""],
-        capture_output=True, text=True, timeout=15,
-    )
-    if out.returncode != 0 or not out.stdout:
-        raise SystemExit(f"watch-agents: could not read INSTANCE from {script}: {out.stderr.strip()}")
-    return out.stdout
-
-
-INSTANCE = _load_instance()
+INSTANCE = reconcile.INSTANCE
 
 # foreman/<instance>/<TICKET>/<role>-<attempt>. The tick is foreman/<instance>/tick,
 # which has no fourth segment and therefore never matches.

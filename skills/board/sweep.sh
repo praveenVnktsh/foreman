@@ -4,7 +4,7 @@
 #   sweep.sh MUR-42 MUR-43        # tickets that are terminal; their trees go
 #   sweep.sh --orphans            # board-* trees with no live agent
 #
-# Either way it also reaps `refs/board/evidence/<pid>` refs left behind by an
+# Either way it also reaps `refs/foreman/<instance>/evidence/<pid>` refs left behind by an
 # `evidence.sh` that was killed mid-read. Nothing else in the board touches that
 # namespace, and a leaked ref pins every object its fetch brought with it. A
 # sweep that could not enumerate or could not delete there exits non-zero and
@@ -66,7 +66,7 @@ remove_tree() {
   printf 'removed %s\n' "$path"
 }
 
-# Leaked `refs/board/evidence/<pid>` refs, from `evidence.sh` invocations that
+# Leaked `refs/foreman/<instance>/evidence/<pid>` refs, from `evidence.sh` invocations that
 # were killed between their fetch and their `update-ref -d`.
 #
 # `evidence.sh` traps HUP, INT and TERM and deletes its own ref, so this exists
@@ -98,7 +98,7 @@ remove_tree() {
 reap_evidence_refs() {
   local ref pid refs failed=0
   if ! refs="$(git -C "$REPO" for-each-ref --format='%(refname)' "refs/foreman/$INSTANCE/evidence/*")"; then
-    printf 'board: could not list refs/foreman/%s/evidence/* in %s; leaked evidence refs went unchecked\n' \
+    printf 'foreman: could not list refs/foreman/%s/evidence/* in %s; leaked evidence refs went unchecked\n' \
       "$INSTANCE" "$REPO" >&2
     return 1
   fi
@@ -115,7 +115,7 @@ reap_evidence_refs() {
     if git -C "$REPO" update-ref -d "$ref"; then
       printf 'removed leaked evidence ref %s\n' "$ref"
     else
-      printf 'board: could not delete leaked evidence ref %s; it still pins every object its fetch brought\n' \
+      printf 'foreman: could not delete leaked evidence ref %s; it still pins every object its fetch brought\n' \
         "$ref" >&2
       failed=1
     fi

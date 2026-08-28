@@ -74,6 +74,59 @@ if env HOME="$home" bash -c ". '$root/skills/board/config.sh'" 2>/dev/null; then
   printf 'FAIL unset FOREMAN_INSTANCE must fail\n'; fail=1
 else printf 'ok   unset FOREMAN_INSTANCE fails closed\n'; fi
 
+# A hyphenated instance name is refused, and names itself. worktree_path and
+# every worktree/scratch glob in sweep.sh join INSTANCE and the ticket with a
+# HYPHEN (foreman-<instance>-<ticket>), which an unconstrained name can
+# absorb: FOREMAN_INSTANCE=alpha-x would make "foreman-alpha-x-PRA-1" match
+# the glob "foreman-alpha-*", so instance "alpha"'s sweep would reap instance
+# "alpha-x"'s worktrees on a shared REPO. This never gets that far -- an
+# invalid instance name is refused before INSTANCE_HOME, board.toml, or
+# anything downstream is even reached.
+# "invalid" is required, not just the instance name in the message: a
+# NONEXISTENT instance directory also names the instance in its own error
+# ("no instance %s at %s"), so a substring-only check on the name would still
+# pass if this regex guard were deleted entirely and alpha-x fell through to
+# THAT check instead. This caught exactly that when first written.
+if err="$(env HOME="$home" FOREMAN_INSTANCE="alpha-x" bash -c \
+     ". '$root/skills/board/config.sh'" 2>&1)"; then
+  printf 'FAIL a hyphenated instance name must fail\n'; fail=1
+elif [[ "$err" == *alpha-x* && "$err" == *invalid* ]]; then
+  printf 'ok   hyphenated instance name is refused and names itself\n'
+else
+  printf 'FAIL error was not the invalid-name refusal: %s\n' "$err"; fail=1
+fi
+
+# The reviewer's collision, reproduced directly and shown unreachable: without
+# this guard, "alpha" and "alpha-x" would both resolve a worktree_path, and
+# alpha's "foreman-alpha-*" glob would match alpha-x's worktrees too. With the
+# guard, alpha-x is refused before worktree_path is ever called for it, so the
+# case that used to match never gets a worktree_path to match against.
+if err="$(env HOME="$home" FOREMAN_INSTANCE="alpha-x" bash -c \
+     ". '$root/skills/board/config.sh'; worktree_path PRA-1" 2>&1)"; then
+  printf 'FAIL alpha-x reached worktree_path: %s\n' "$err"; fail=1
+elif [[ "$err" == *alpha-x* && "$err" == *invalid* ]]; then
+  printf 'ok   the alpha/alpha-x worktree-glob collision cannot reproduce: alpha-x never reaches worktree_path\n'
+else
+  printf 'FAIL error was not the invalid-name refusal: %s\n' "$err"; fail=1
+fi
+
+# A slash is refused too, for the same reason -- and underscores stay legal,
+# so an operator can still write `murmr_staging`.
+if err="$(env HOME="$home" FOREMAN_INSTANCE="alpha/x" bash -c \
+     ". '$root/skills/board/config.sh'" 2>&1)"; then
+  printf 'FAIL an instance name containing a slash must fail\n'; fail=1
+elif [[ "$err" == *invalid* ]]; then
+  printf 'ok   an instance name with a slash is refused\n'
+else
+  printf 'FAIL error was not the invalid-name refusal: %s\n' "$err"; fail=1
+fi
+
+staging_inst="$home/.foreman/instances/murmr_staging"; mkdir -p "$staging_inst"
+printf 'REPO=%s\n' "$target" >"$staging_inst/instance.env"
+check "an underscore in the instance name is legal" "murmr_staging" \
+  "$(env HOME="$home" FOREMAN_INSTANCE=murmr_staging bash -c \
+       ". '$root/skills/board/config.sh' >/dev/null; printf '%s' \"\$INSTANCE\"")"
+
 # A contract that does not load must fail the SOURCE too, loudly -- not
 # silently continue with an empty TEST_COMMAND and REQUIRED_CHECKS. This is
 # exactly the failure bash 3.2's `$(...)` NUL-eating bug would otherwise hide:
