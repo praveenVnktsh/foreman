@@ -16,8 +16,8 @@
 
 set -euo pipefail
 
-repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-checker="$repo_root/ops/check-syntax.sh"
+repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+checker="$repo_root/bin/check-syntax.sh"
 
 work_dir="$(mktemp -d)"
 trap 'rm -rf "$work_dir"' EXIT
