@@ -1,0 +1,10 @@
+[linear]
+team = "PRA"
+project = "foreman"
+
+[checks]
+required = ["Tests"]
+ci_workflow = "CI"
+
+[test]
+command = "tests/run-all.sh"
