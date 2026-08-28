@@ -29,24 +29,26 @@
 #   6. a reap that cannot DELETE one ref says which, reaps the rest anyway, and
 #      still exits non-zero
 #
-# Runs in CI's Operations job, which globs `ops/tests/*.sh` against a full
-# checkout. Not part of `just test-all`, so the `.claude/` path it needs is
-# never asked of mango's live checkout, which deliberately has none.
+# Runs against a full checkout, via tests/run-all.sh (Task 9 wires this into
+# CI; see docs/plans/2026-08-27-foreman-layer-1.md).
 
 set -euo pipefail
 
-repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-board_dir="$repo_root/.claude/skills/board"
-sweep_stem="sweep"
-sweep="$board_dir/$sweep_stem.sh"
+repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+board_dir="$repo_root/skills/board"
+sweep="$board_dir/sweep.sh"
+
+# shellcheck source=lib/instance-fixture.sh
+source "$repo_root/tests/lib/instance-fixture.sh"
 
 [[ -x "$sweep" ]] || {
   echo "FAIL: $sweep is missing or not executable" >&2
   exit 1
 }
 
-# See design/build_system.md, invariant 10: scratch is asked of ops/tmp-dir.sh.
-tmp_root="$("$repo_root/ops/tmp-dir.sh")"
+# The scratch root is asked of bin/tmp-dir.sh, never worked out here -- see
+# bin/tmp-dir.sh's own header for why one derivation has to stay singular.
+tmp_root="$("$repo_root/bin/tmp-dir.sh")"
 mkdir -p "$tmp_root"
 export TMPDIR="$tmp_root"
 
@@ -63,17 +65,24 @@ git_q() {
     -c commit.gpgsign=false -c init.defaultBranch=main "$@"
 }
 
-# `config.sh` asks `$REPO/ops/tmp-dir.sh` for the scratch root, so the fixture
-# has to be shaped enough like this repository to answer that. The real script
-# is copied in rather than stubbed, so this does not become a second derivation
-# of the path `ops/tests/test-tmp-dir.sh` exists to keep singular.
+# `sweep.sh` sources config.sh, which since Task 2/3 requires a
+# FOREMAN_INSTANCE and an instance directory declaring a REPO whose
+# board.toml passes bin/contract.py -- regardless of what REPO is overridden
+# to below. AGENT_TMP_ROOT is derived from THIS installation's own
+# bin/tmp-dir.sh, never the target's, and `--orphans` here never visits an
+# existing worktree or scratch dir (there are none), so agent_tmp_for() --
+# which still asks "$REPO/ops/tmp-dir.sh" pending Task 5, per
+# tests/test-tmp-dir.sh's own note -- is never called; the fixture needs no
+# tmp-dir.sh of its own.
+inst_home="$work_dir/foreman-home"
+fixture_add_instance "$inst_home" fixture
+export HOME="$inst_home" FOREMAN_INSTANCE=fixture
+
 fixture="$work_dir/repo"
 git_q init -q -b main "$fixture"
-mkdir -p "$fixture/ops"
-cp "$repo_root/ops/tmp-dir.sh" "$fixture/ops/tmp-dir.sh"
-chmod +x "$fixture/ops/tmp-dir.sh"
+fixture_board_toml "$fixture"
 echo "seed" > "$fixture/file.txt"
-git_q -C "$fixture" add file.txt ops/tmp-dir.sh
+git_q -C "$fixture" add file.txt board.toml
 git_q -C "$fixture" commit -q -m "Seed"
 sha="$(git -C "$fixture" rev-parse HEAD)"
 
@@ -142,7 +151,7 @@ out="$(BOARD_DRY_RUN=1 run_sweep)"
 [[ "$out" == *"would delete leaked evidence ref refs/board/evidence/$dead_pid"* ]] || {
   fail "a dry run did not name the ref it would reap: [$out]"
 }
-[[ "$(surviving_refs | wc -l)" == "3" ]] || {
+[[ "$(surviving_refs | wc -l)" -eq 3 ]] || {
   fail "a dry run deleted something:
 $(surviving_refs)"
 }
@@ -204,7 +213,7 @@ $out"
 [[ "$out" == *"could not list refs/board/evidence/*"* ]] || {
   fail "the sweep did not say the listing failed: [$out]"
 }
-[[ "$(surviving_refs | wc -l)" == "3" ]] || {
+[[ "$(surviving_refs | wc -l)" -eq 3 ]] || {
   fail "a sweep that could not list the namespace deleted something in it:
 $(surviving_refs)"
 }
