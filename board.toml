@@ -1,3 +1,6 @@
+# foreman builds itself. This is instance #1 and the only proof the contract is
+# right: until a card walks from Todo to merged on a repository that is not the
+# one this code grew up in, the seam is a hypothesis.
 [linear]
 team = "PRA"
 project = "foreman"
@@ -6,5 +9,28 @@ project = "foreman"
 required = ["Tests"]
 ci_workflow = "CI"
 
+# No [deploy]. foreman deploys nowhere; merged is done. This is deliberate
+# coverage of the optional path -- the code that reads deploy evidence must
+# tolerate a target that has none, and a target that exercises it is better
+# than a test that mocks it.
+
+[risk]
+# Reversibility decides what belongs here. A bad change anywhere else is a
+# revert; these two are different in kind, not just severity:
+#   - skills/board/config.sh mis-deriving a path or a limit misdirects every
+#     tick that reads it, silently, for every card in flight.
+#   - bin/resolve-ids.py mis-resolving a name pins the wrong id into ids.env,
+#     and everything downstream trusts that id forever -- a board that
+#     mis-resolves its own ids moves cards in a project nobody is watching.
+# Neither failure is a revert-and-redeploy; both are worth a human's eyes
+# before they merge.
+paths = ["skills/board/config.sh", "bin/resolve-ids.py"]
+
 [test]
 command = "tests/run-all.sh"
+
+[docs]
+required = ["docs/specs/2026-08-27-autonomous-board-runner-design.md"]
+
+[limits]
+max_concurrent = 1
