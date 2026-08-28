@@ -140,7 +140,7 @@ AGENT_SKIP_PERMISSIONS="${AGENT_SKIP_PERMISSIONS:-1}"
 # that agent exists and is healthy. Keeping dispatch out of cron is deliberate:
 # a watchdog that could also dispatch would double-dispatch the moment it
 # misjudged liveness.
-TICK_AGENT_NAME="${TICK_AGENT_NAME:-board/tick}"
+TICK_AGENT_NAME="${TICK_AGENT_NAME:-foreman/$INSTANCE/tick}"
 TICK_INTERVAL_MINUTES="${TICK_INTERVAL_MINUTES:-20}"
 TICK_MODEL="${TICK_MODEL:-fable}"
 
@@ -212,8 +212,14 @@ card_dir() { printf '%s/cards/%s\n' "$BOARD_HOME" "$1"; }
 # The scratch dir paired with a worktree path. Same basename, so a sweep that
 # reaps the worktree can reap the scratch without tracking anything.
 agent_tmp_for() { BOARD_HOME="$BOARD_HOME" "$REPO/ops/tmp-dir.sh" "$1"; }
-agent_name() { printf 'board/%s/%s-%s\n' "$1" "$2" "$3"; }
-worktree_path() { printf '%s/.claude/worktrees/board-%s\n' "$REPO" "$1"; }
+# Every name carries the instance. `claude agents` is one flat registry shared
+# by every installation on this machine, matched by prefix in reconcile.py and
+# by regex in watch-agents.py; without this segment two instances reap each
+# other's agents, and two projects may legitimately both use the team key PRA.
+agent_name() { printf 'foreman/%s/%s/%s-%s\n' "$INSTANCE" "$1" "$2" "$3"; }
+worktree_path() { printf '%s/.claude/worktrees/foreman-%s-%s\n' "$REPO" "$INSTANCE" "$1"; }
+branch_name() { printf 'foreman/%s/%s\n' "$INSTANCE" "$1"; }
+evidence_ref() { printf 'refs/foreman/%s/evidence/%s\n' "$INSTANCE" "$1"; }
 
 # Append one line to a card's transition log. Never rewritten, only appended.
 card_log() {
@@ -225,4 +231,4 @@ card_log() {
     "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$event" >>"$dir/history.jsonl"
 }
 
-die() { printf 'board: %s\n' "$*" >&2; exit 1; }
+die() { printf 'foreman: %s\n' "$*" >&2; exit 1; }

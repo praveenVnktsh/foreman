@@ -109,13 +109,13 @@ usage() {
 # the slow part -- so the leak is not a rare interleaving, it is the common way
 # this script is killed. Nothing else reaps that namespace: sweep.sh handles
 # worktrees and board branches, dispatch.sh prunes worktrees, and
-# `git fetch --prune` does not touch `refs/board/`. A leaked ref is permanent,
+# `git fetch --prune` does not touch `refs/foreman/`. A leaked ref is permanent,
 # and it pins every object the fetch brought with it -- `git gc --prune=now`
 # keeps the lot.
 #
 # SIGKILL cannot be trapped, so this is half the fix. The other half is
-# `sweep.sh`, which reaps `refs/board/evidence/<pid>` for any pid that is no
-# longer alive.
+# `sweep.sh`, which reaps `refs/foreman/<instance>/evidence/<pid>` for any pid
+# that is no longer alive.
 EVIDENCE_REF=""
 # The read buffer, for the microseconds in which it still has a name. See
 # `open_buffer`: once it is unlinked the kernel owns its lifetime and this is
@@ -259,7 +259,7 @@ attest_and_emit() {
 # yes. Measured 15 out of 15 parallel pairs before this was a private ref.
 fetch_and_show() {
   local refspec="$1" label="$2" path="$3" sha
-  EVIDENCE_REF="refs/board/evidence/$$"
+  EVIDENCE_REF="$(evidence_ref "$$")"
 
   # `+` to force, since a re-run in the same shell would otherwise refuse a
   # non-fast-forward onto its own leftover ref.

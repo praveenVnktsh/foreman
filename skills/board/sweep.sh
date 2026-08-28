@@ -33,7 +33,7 @@ remove_agent_tmp() {
   local tmp="$1"
   [[ -d "$tmp" ]] || return 0
   case "$tmp" in
-    "$AGENT_TMP_ROOT"/board-*) ;;
+    "$AGENT_TMP_ROOT"/foreman-"$INSTANCE"-*) ;;
     *) die "refusing to remove $tmp — not an agent scratch dir" ;;
   esac
   if [[ -n "$BOARD_DRY_RUN" ]]; then
@@ -49,8 +49,8 @@ remove_tree() {
   [[ -d "$path" ]] || remove_agent_tmp "$(agent_tmp_for "$path")"
   [[ -d "$path" ]] || return 0
   case "$path" in
-    "$REPO"/.claude/worktrees/board-*) ;;
-    *) die "refusing to remove $path — not a board worktree" ;;
+    "$REPO"/.claude/worktrees/foreman-"$INSTANCE"-*) ;;
+    *) die "refusing to remove $path — not a foreman worktree" ;;
   esac
   remove_agent_tmp "$(agent_tmp_for "$path")"
   branch="$(git -C "$path" rev-parse --abbrev-ref HEAD 2>/dev/null || true)"
@@ -61,7 +61,7 @@ remove_tree() {
   git -C "$REPO" worktree remove -f -f "$path" 2>/dev/null || rm -rf "$path"
   # Only ever delete a local branch this skill created.
   case "$branch" in
-    board/*) git -C "$REPO" branch -D "$branch" 2>/dev/null || true ;;
+    foreman/"$INSTANCE"/*) git -C "$REPO" branch -D "$branch" 2>/dev/null || true ;;
   esac
   printf 'removed %s\n' "$path"
 }
@@ -97,9 +97,9 @@ remove_tree() {
 # worth reaping — it is recorded and reported at the end.
 reap_evidence_refs() {
   local ref pid refs failed=0
-  if ! refs="$(git -C "$REPO" for-each-ref --format='%(refname)' 'refs/board/evidence/*')"; then
-    printf 'board: could not list refs/board/evidence/* in %s; leaked evidence refs went unchecked\n' \
-      "$REPO" >&2
+  if ! refs="$(git -C "$REPO" for-each-ref --format='%(refname)' "refs/foreman/$INSTANCE/evidence/*")"; then
+    printf 'board: could not list refs/foreman/%s/evidence/* in %s; leaked evidence refs went unchecked\n' \
+      "$INSTANCE" "$REPO" >&2
     return 1
   fi
   while read -r ref; do
@@ -156,7 +156,7 @@ if [[ "${1:-}" == "--orphans" ]]; then
   if ! live_worktrees >"$LIVE_FILE"; then
     die "could not read live agents; refusing to sweep orphans"
   fi
-  for path in "$REPO"/.claude/worktrees/board-*/; do
+  for path in "$REPO"/.claude/worktrees/foreman-"$INSTANCE"-*/; do
     [[ -d "$path" ]] || continue
     path="${path%/}"
     grep -Fxq "$path" "$LIVE_FILE" || remove_tree "$path"
@@ -166,7 +166,7 @@ if [[ "${1:-}" == "--orphans" ]]; then
   # scratch behind forever — which is precisely the accumulation this exists to
   # stop. Keyed on the worktree the scratch is named for, and still refusing to
   # act when that worktree is a live agent's cwd.
-  for tmp in "$AGENT_TMP_ROOT"/board-*/; do
+  for tmp in "$AGENT_TMP_ROOT"/foreman-"$INSTANCE"-*/; do
     [[ -d "$tmp" ]] || continue
     tmp="${tmp%/}"
     wt="$REPO/.claude/worktrees/$(basename "$tmp")"
@@ -178,7 +178,7 @@ else
   [[ $# -gt 0 ]] || die "usage: sweep.sh <TICKET...> | --orphans"
   for ticket in "$@"; do
     remove_tree "$(worktree_path "$ticket")"
-    for extra in "$REPO"/.claude/worktrees/board-"$ticket"-*/; do
+    for extra in "$REPO"/.claude/worktrees/foreman-"$INSTANCE"-"$ticket"-*/; do
       [[ -d "$extra" ]] && remove_tree "${extra%/}"
     done
   done
@@ -196,4 +196,4 @@ reap_evidence_refs || reap_status=$?
 find "$BOARD_HOME"/cards/*/reviews -type f -mtime +30 -delete 2>/dev/null || true
 
 [[ "$reap_status" -eq 0 ]] \
-  || die "could not reap leaked evidence refs (see above); refs/board/evidence/* is unswept"
+  || die "could not reap leaked evidence refs (see above); refs/foreman/$INSTANCE/evidence/* is unswept"

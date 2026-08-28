@@ -126,6 +126,11 @@ fi
 [[ "$ROLE" == "build" || -n "$REF" ]] || die "--ref is required for a review agent"
 mkdir -p "$(dirname "$WORKTREE")"
 export REPO TICKET WORKTREE ROLE REF
+# `branch_name` has to be exported as a FUNCTION, not just called before this
+# block and stashed in a variable, because the withlock.py-wrapped script below
+# runs in its own bash -c subshell that inherits the environment but not this
+# process's shell functions.
+export -f branch_name
 "$SKILL_DIR/withlock.py" "$REPO/.git/board-worktree.lock" 120 -- bash -c '
   set -euo pipefail
   git -C "$REPO" fetch --quiet origin
@@ -134,7 +139,7 @@ export REPO TICKET WORKTREE ROLE REF
   fi
   git -C "$REPO" worktree prune
   if [[ "$ROLE" == "build" ]]; then
-    git -C "$REPO" worktree add --quiet -B "board/$TICKET" "$WORKTREE" origin/main
+    git -C "$REPO" worktree add --quiet -B "$(branch_name "$TICKET")" "$WORKTREE" origin/main
   else
     git -C "$REPO" worktree add --quiet --detach "$WORKTREE" "$REF"
   fi

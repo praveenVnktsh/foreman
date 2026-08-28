@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# `sweep.sh` reaps the `refs/board/evidence/<pid>` refs nothing else touches.
+# `sweep.sh` reaps the `refs/foreman/fixture/evidence/<pid>` refs nothing else touches.
 #
 # `evidence.sh` fetches into a ref private to its own process and deletes it
 # before it reads the blob, so the happy path leaves nothing. The gap is a kill
@@ -110,11 +110,11 @@ real_git="$(command -v git)"
 cat > "$stub_dir/git" <<STUB
 #!/usr/bin/env bash
 args="\$*"
-if [[ "\${SWEEP_TEST_FAIL:-}" == enumerate && "\$args" == *"for-each-ref"*"refs/board/evidence/"* ]]; then
-  echo "fatal: simulated failure listing refs/board/evidence" >&2
+if [[ "\${SWEEP_TEST_FAIL:-}" == enumerate && "\$args" == *"for-each-ref"*"refs/foreman/fixture/evidence/"* ]]; then
+  echo "fatal: simulated failure listing refs/foreman/fixture/evidence" >&2
   exit 128
 fi
-if [[ "\${SWEEP_TEST_FAIL:-}" == delete && "\$args" == *"update-ref -d refs/board/evidence/$wedged_ref"* ]]; then
+if [[ "\${SWEEP_TEST_FAIL:-}" == delete && "\$args" == *"update-ref -d refs/foreman/fixture/evidence/$wedged_ref"* ]]; then
   echo "fatal: simulated failure deleting $wedged_ref" >&2
   exit 128
 fi
@@ -130,13 +130,13 @@ wait "$dead_pid" 2>/dev/null || true
 live_pid=$$
 
 plant_refs() {
-  git -C "$fixture" update-ref "refs/board/evidence/$dead_pid" "$sha"
-  git -C "$fixture" update-ref "refs/board/evidence/$live_pid" "$sha"
-  git -C "$fixture" update-ref "refs/board/evidence/not-a-pid" "$sha"
+  git -C "$fixture" update-ref "refs/foreman/fixture/evidence/$dead_pid" "$sha"
+  git -C "$fixture" update-ref "refs/foreman/fixture/evidence/$live_pid" "$sha"
+  git -C "$fixture" update-ref "refs/foreman/fixture/evidence/not-a-pid" "$sha"
 }
 
 surviving_refs() {
-  git -C "$fixture" for-each-ref --format='%(refname)' 'refs/board/evidence/*'
+  git -C "$fixture" for-each-ref --format='%(refname)' 'refs/foreman/fixture/evidence/*'
 }
 
 run_sweep() {
@@ -148,7 +148,7 @@ run_sweep() {
 
 plant_refs
 out="$(BOARD_DRY_RUN=1 run_sweep)"
-[[ "$out" == *"would delete leaked evidence ref refs/board/evidence/$dead_pid"* ]] || {
+[[ "$out" == *"would delete leaked evidence ref refs/foreman/fixture/evidence/$dead_pid"* ]] || {
   fail "a dry run did not name the ref it would reap: [$out]"
 }
 [[ "$(surviving_refs | wc -l)" -eq 3 ]] || {
@@ -162,13 +162,13 @@ echo "  ok: BOARD_DRY_RUN names the leaked ref and deletes nothing"
 out="$(run_sweep)"
 survivors="$(surviving_refs)"
 
-[[ "$survivors" == *"refs/board/evidence/$live_pid"* ]] || {
+[[ "$survivors" == *"refs/foreman/fixture/evidence/$live_pid"* ]] || {
   fail "the sweep deleted the ref of a LIVE read. That read is mid-fetch and
   about to answer a question about the code; taking its ref out from under it
   is worse than the leak this reaper exists for.
 survivors: [$survivors]"
 }
-[[ "$survivors" != *"refs/board/evidence/$dead_pid"* ]] || {
+[[ "$survivors" != *"refs/foreman/fixture/evidence/$dead_pid"* ]] || {
   fail "the leaked ref of a dead read survived the sweep:
 $survivors"
 }
@@ -177,7 +177,7 @@ $survivors"
   nothing will ever reap it either:
 $survivors"
 }
-[[ "$out" == *"removed leaked evidence ref refs/board/evidence/$dead_pid"* ]] || {
+[[ "$out" == *"removed leaked evidence ref refs/foreman/fixture/evidence/$dead_pid"* ]] || {
   fail "the sweep did not say what it reaped: [$out]"
 }
 echo "  ok: a dead read's ref is reaped, a live one's is left alone"
@@ -185,7 +185,7 @@ echo "  ok: a dead read's ref is reaped, a live one's is left alone"
 # --- 3. and it is idempotent -------------------------------------------------
 
 run_sweep >/dev/null
-[[ "$(surviving_refs)" == "refs/board/evidence/$live_pid" ]] || {
+[[ "$(surviving_refs)" == "refs/foreman/fixture/evidence/$live_pid" ]] || {
   fail "a second sweep changed the answer:
 $(surviving_refs)"
 }
@@ -205,12 +205,12 @@ status=$?
 set -e
 
 [[ "$status" -ne 0 ]] || {
-  fail "a sweep that could not list refs/board/evidence/* exited 0. The tick
+  fail "a sweep that could not list refs/foreman/fixture/evidence/* exited 0. The tick
   reads that as a clean namespace, so the leak it could not see is never
   reported and never reaped:
 $out"
 }
-[[ "$out" == *"could not list refs/board/evidence/*"* ]] || {
+[[ "$out" == *"could not list refs/foreman/fixture/evidence/*"* ]] || {
   fail "the sweep did not say the listing failed: [$out]"
 }
 [[ "$(surviving_refs | wc -l)" -eq 3 ]] || {
@@ -236,7 +236,7 @@ echo "  ok: a namespace that cannot be listed exits non-zero, dry run included"
 # follows, which is unrelated and would otherwise stop running for as long as
 # the ref problem lasts.
 
-git -C "$fixture" update-ref "refs/board/evidence/$wedged_ref" "$sha"
+git -C "$fixture" update-ref "refs/foreman/fixture/evidence/$wedged_ref" "$sha"
 plant_refs
 
 stale_review="$work_dir/board-home/cards/PRA-1/reviews/round-1.json"
@@ -255,15 +255,15 @@ survivors="$(surviving_refs)"
   object its fetch brought with it, and nothing will ever say so:
 $out"
 }
-[[ "$out" == *"could not delete leaked evidence ref refs/board/evidence/$wedged_ref"* ]] || {
+[[ "$out" == *"could not delete leaked evidence ref refs/foreman/fixture/evidence/$wedged_ref"* ]] || {
   fail "the sweep did not name the ref it failed to delete: [$out]"
 }
-[[ "$survivors" == *"refs/board/evidence/$wedged_ref"* ]] || {
+[[ "$survivors" == *"refs/foreman/fixture/evidence/$wedged_ref"* ]] || {
   fail "the ref the delete failed on is gone, so the failure was not real and
   this section proves nothing:
 $survivors"
 }
-[[ "$survivors" != *"refs/board/evidence/$dead_pid"* ]] || {
+[[ "$survivors" != *"refs/foreman/fixture/evidence/$dead_pid"* ]] || {
   fail "one undeletable ref stopped the reap. Every other leak in the namespace
   survives a problem that has nothing to do with it:
 $survivors"
@@ -274,7 +274,7 @@ $survivors"
 }
 echo "  ok: an undeletable ref is named, the rest are reaped, the sweep still fails"
 
-git -C "$fixture" update-ref -d "refs/board/evidence/$live_pid"
-git -C "$fixture" update-ref -d "refs/board/evidence/$wedged_ref"
+git -C "$fixture" update-ref -d "refs/foreman/fixture/evidence/$live_pid"
+git -C "$fixture" update-ref -d "refs/foreman/fixture/evidence/$wedged_ref"
 
 echo "PASS: the sweep reaps leaked evidence refs, spares reads in flight, and says so when it cannot"

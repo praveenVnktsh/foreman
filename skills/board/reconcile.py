@@ -33,7 +33,7 @@ def _load_config() -> dict[str, str]:
     """
     keys = (
         "REPO", "BOARD_HOME", "REQUIRED_CHECKS", "HIGH_RISK_PATHS",
-        "DEPLOY_WORKFLOW", "DEPLOY_STEP", "CI_WORKFLOW",
+        "DEPLOY_WORKFLOW", "DEPLOY_STEP", "CI_WORKFLOW", "INSTANCE",
     )
     script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.sh")
     printf = 'printf "%s\\0" ' + " ".join(f'"${k}"' for k in keys)
@@ -53,6 +53,7 @@ def _load_config() -> dict[str, str]:
 
 _CFG = _load_config()
 REPO = _CFG["REPO"]
+INSTANCE = _CFG["INSTANCE"]
 BOARD_HOME = _CFG["BOARD_HOME"]
 REQUIRED_CHECKS = set(c for c in _CFG["REQUIRED_CHECKS"].split("|") if c)
 HIGH_RISK_PATHS = _CFG["HIGH_RISK_PATHS"].split()
@@ -126,7 +127,10 @@ PHASE = {
 
 
 def agents_for(agents: list[dict], ticket: str) -> list[dict]:
-    prefix = f"board/{ticket}/"
+    # The trailing slash is load-bearing: without it "PRA-1" is a PREFIX MATCH
+    # for "PRA-10", "PRA-11", "PRA-100"... and one card would reap another's
+    # agents.
+    prefix = f"foreman/{INSTANCE}/{ticket}/"
     out = []
     for a in agents:
         name = a.get("name") or ""
@@ -215,7 +219,7 @@ def check_rollup(pr: dict) -> dict:
 
 
 def pr_for(ticket: str) -> dict | None:
-    branch = f"board/{ticket}"
+    branch = f"foreman/{INSTANCE}/{ticket}"
     prs = run_json(
         [
             "gh", "pr", "list", "--head", branch, "--state", "all",
@@ -797,7 +801,7 @@ def death_report(path: str | None) -> dict | None:
 
 def reconcile(ticket: str, agents: list[dict]) -> dict:
     pr = pr_for(ticket)
-    worktree = os.path.join(REPO, ".claude", "worktrees", f"board-{ticket}")
+    worktree = os.path.join(REPO, ".claude", "worktrees", f"foreman-{INSTANCE}-{ticket}")
     entries = history(ticket)
     mine = agents_for(agents, ticket)
     # Diagnose only the agents that have stopped. A running agent's transcript

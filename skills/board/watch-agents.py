@@ -10,10 +10,12 @@ several minutes later.
 
 TWO RULES MAKE THIS SAFE.
 
-**It never reports the tick agent.** `board/tick` runs `/board` itself, so its
-turn ending is the board finishing work, not work arriving. Emitting that would
-wake the loop with news of itself and spin forever. Any name that is not
-`board/<TICKET>/<role>-<attempt>` is ignored for the same reason.
+**It never reports the tick agent.** `foreman/<instance>/tick` runs the loop
+itself, so its turn ending is the board finishing work, not work arriving.
+Emitting that would wake the loop with news of itself and spin forever. Any
+name that is not `foreman/<instance>/<TICKET>/<role>-<attempt>` for THIS
+instance is ignored for the same reason -- including another instance's
+agents, which would otherwise wake this one on work that is not its own.
 
 **It emits transitions, not states.** A line is written when an agent moves from
 working into a finished phase — once, on the edge. Re-reporting a finished agent
@@ -39,13 +41,47 @@ import time
 
 POLL_SECONDS = int(os.environ.get("WATCH_POLL_SECONDS", "15"))
 
-# board/<TICKET>/<role>-<attempt>. The tick agent is board/tick, which has no
-# third segment and therefore never matches.
-DISPATCHED = re.compile(r"^board/([A-Z]+-\d+)/(build|review)-(\w+)$")
+
+def _load_instance() -> str:
+    """INSTANCE, read from config.sh -- not from os.environ directly, so this
+    always matches what the rest of the board resolved rather than keeping a
+    second copy that can drift from it. Same reasoning as reconcile.py's own
+    `_load_config`.
+    """
+    script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.sh")
+    out = subprocess.run(
+        ["bash", "-c", f". {script!r} >/dev/null; printf '%s' \"$INSTANCE\""],
+        capture_output=True, text=True, timeout=15,
+    )
+    if out.returncode != 0 or not out.stdout:
+        raise SystemExit(f"watch-agents: could not read INSTANCE from {script}: {out.stderr.strip()}")
+    return out.stdout
+
+
+INSTANCE = _load_instance()
+
+# foreman/<instance>/<TICKET>/<role>-<attempt>. The tick is foreman/<instance>/tick,
+# which has no fourth segment and therefore never matches.
+DISPATCHED = re.compile(r"^foreman/([^/]+)/([A-Z]+-\d+)/(build|review)-(\w+)$")
 
 # Phases that mean "this agent is no longer working". `done` is a completed turn;
 # `stopped` covers both a deliberate stop and a death.
 FINISHED = {"done", "stopped"}
+
+
+def _dispatched(name: str) -> tuple[str, str, str] | None:
+    """(ticket, role, attempt) if `name` is a build/review agent dispatched by
+    THIS instance, else None.
+
+    A capture group on the instance segment is not enough on its own -- it
+    would still let one instance's Monitor wake on another instance's agents.
+    This is what actually compares the captured instance against INSTANCE and
+    skips everything that does not match.
+    """
+    m = DISPATCHED.match(name)
+    if not m or m.group(1) != INSTANCE:
+        return None
+    return m.group(2), m.group(3), m.group(4)
 
 
 def poll() -> dict[str, str]:
@@ -69,7 +105,7 @@ def poll() -> dict[str, str]:
         if not isinstance(a, dict):
             continue
         name = a.get("name") or ""
-        if not DISPATCHED.match(name):
+        if _dispatched(name) is None:
             continue
         prev = newest.get(name)
         if prev is None or (a.get("startedAt") or 0) >= (prev.get("startedAt") or 0):
@@ -87,7 +123,7 @@ def main() -> int:
         for name, state in sorted(now.items()):
             was = seen.get(name)
             if state in FINISHED and was not in FINISHED:
-                ticket = DISPATCHED.match(name).group(1)
+                ticket, _, _ = _dispatched(name)
                 print(f"{name} finished ({state}) — {ticket} has work for the board",
                       flush=True)
         # Replace, do not merge. `seen = {**seen, **now}` remembered every name
