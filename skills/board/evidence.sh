@@ -190,7 +190,14 @@ open_buffer() {
   buffer="$(mktemp "$AGENT_TMP_ROOT/evidence-buffer.$$.XXXXXX")" \
     || die "could not open a buffer for this read under $AGENT_TMP_ROOT"
   EVIDENCE_BUFFER="$buffer"
-  exec {BUF_W}>"$buffer" {BUF_SCAN}<"$buffer" {BUF_R}<"$buffer"
+  # bash 3.2 has no `{VAR}>` fd-allocation syntax -- that is a bash 4.1+
+  # feature and the dev host's only bash is 3.2.57. The descriptors are fixed
+  # literal numbers instead of dynamically allocated ones; 8/9/10 are free
+  # because nothing else in this script (or anything it execs) opens a
+  # descriptor above 2. The variables still carry the numbers so every other
+  # use site below (`>&"$BUF_W"`, `<&"$BUF_SCAN"`, `<&"$BUF_R"`) is unchanged.
+  BUF_W=8 BUF_SCAN=9 BUF_R=10
+  exec 8>"$buffer" 9<"$buffer" 10<"$buffer"
   rm -f "$buffer"
   EVIDENCE_BUFFER=""
 }
@@ -203,12 +210,14 @@ open_buffer() {
 # single pass over the scan descriptor.
 attest_and_emit() {
   local provenance="$1" what="$2" nuls
-  exec {BUF_W}>&-
+  # Literal fd 8, matching the literal 8 that opened it in open_buffer -- see
+  # the note there on why this is not `{BUF_W}<&-` (bash 3.2).
+  exec 8>&-
   BUF_W=""
 
   nuls="$(tr -dc '\000' <&"$BUF_SCAN" | wc -c)" \
     || die "could not scan the buffered $what before printing it"
-  exec {BUF_SCAN}<&-
+  exec 9<&-
   BUF_SCAN=""
 
   if (( nuls > 0 )) && (( ! ALLOW_BINARY )); then
@@ -227,7 +236,7 @@ attest_and_emit() {
   read this as binary and report no match. Use grep -a.\n' "$nuls" >&2
   fi
   cat <&"$BUF_R"
-  exec {BUF_R}<&-
+  exec 10<&-
   BUF_R=""
 }
 
@@ -298,13 +307,19 @@ show_pr_diff() {
   # here is anchored with `git -C "$REPO"`. Without this, an agent that had cd'd
   # elsewhere would be told "could not read pull request N from GitHub" for what
   # is really "you are not standing in a checkout".
-  local -a in_repo=(env "--chdir=$REPO" gh)
+  #
+  # GNU `env --chdir` (and its `-C` short form) is not available on the BSD
+  # `env` this runs under on the dev host, and even on Linux `-C` was only
+  # added to coreutils in 2018 -- older GNU env doesn't have it either. A
+  # subshell that cd's before running gh needs no flag from either userland,
+  # so it is anchored the same way on every platform this has to run on.
+  in_repo() ( cd "$REPO" && gh "$@" )
 
-  head="$("${in_repo[@]}" pr view "$number" --json headRefOid -q .headRefOid)" \
+  head="$(in_repo pr view "$number" --json headRefOid -q .headRefOid)" \
     || die "could not read pull request $number from GitHub"
 
   open_buffer
-  "${in_repo[@]}" pr diff "$number" >&"$BUF_W" \
+  in_repo pr diff "$number" >&"$BUF_W" \
     || die "could not read the diff of PR $number"
 
   # Two calls, so the head could have moved between them and the provenance line
@@ -312,7 +327,7 @@ show_pr_diff() {
   # rather than sign for bytes nobody can check -- and say it having printed
   # nothing, so a caller that only reads stdout gets no answer rather than an
   # unattributable one.
-  after="$("${in_repo[@]}" pr view "$number" --json headRefOid -q .headRefOid)" \
+  after="$(in_repo pr view "$number" --json headRefOid -q .headRefOid)" \
     || die "could not re-read pull request $number to confirm its head"
   [[ "$head" == "$after" ]] \
     || die "PR $number was pushed to while this ran ($head -> $after); the diff
