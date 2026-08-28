@@ -29,15 +29,34 @@
 # whose infrastructure this was -- kept in a one-line file of their own so the
 # exclusion covers only them, and the 370-odd other lines of that test stay
 # covered by this scan.
+#
+# `whatsapp` and `baileys` are banned case-insensitively, separately from the
+# case-sensitive list above: they identify the origin project's messaging
+# integration the way `mango` identifies its host, but unlike `mango` they
+# show up capitalized in ordinary prose ("WhatsApp", "a Baileys runtime") as
+# often as not. tests/lib/curl-stub.sh carried both (`WHATSAPP_STATUS`, "a
+# Baileys runtime") and this scan never caught it -- it was dead code, deleted
+# rather than generalised, but the class it represents can come back in a
+# comment this scan does catch.
 set -euo pipefail
 here="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 root="$(dirname -- "$here")"
 self="$(basename -- "${BASH_SOURCE[0]}")"
 banned='murmr|mango|Praveen|MURMR_|just test-all|deploy-mango|\.murmr-|backend/|design/build_system|test_design_invariants'
-if hits="$(grep -rInE "$banned" "$root/skills" "$root/bin" "$root/tests" \
+banned_ci='whatsapp|baileys'
+hits=""
+if part="$(grep -rInE "$banned" "$root/skills" "$root/bin" "$root/tests" \
      --exclude-dir=__pycache__ --exclude="$self" \
      --exclude="legacy-strings.sh" 2>/dev/null)"; then
-  printf 'FAIL target-specific identifiers survive generalisation:\n%s\n' "$hits"
+  hits="$hits$part"$'\n'
+fi
+if part="$(grep -rInEi "$banned_ci" "$root/skills" "$root/bin" "$root/tests" \
+     --exclude-dir=__pycache__ --exclude="$self" \
+     --exclude="legacy-strings.sh" 2>/dev/null)"; then
+  hits="$hits$part"$'\n'
+fi
+if [[ -n "$hits" ]]; then
+  printf 'FAIL target-specific identifiers survive generalisation:\n%s' "$hits"
   exit 1
 fi
 printf 'ok   no target-specific identifiers outside docs/\n'
