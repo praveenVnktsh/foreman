@@ -145,6 +145,28 @@ export -f branch_name
   fi
 ' || die "could not create worktree $WORKTREE (exit $?)"
 
+# The target's own setup step -- `uv sync`, `npm ci`, whatever a fresh checkout
+# needs before its test command can run at all -- against the worktree just cut
+# from origin/main, before any agent sees it. Build only: a review worktree
+# never builds anything, it reads a diff with `gh pr diff`, so paying a second
+# `bootstrap.command` per reviewer would buy nothing.
+#
+# This gates instead of warning, same as the preflight check above and for the
+# same reason. An agent dropped into a worktree whose dependencies never
+# installed spends its whole attempt discovering that and reports it as a
+# problem with the code -- the exact failure this whole script exists to keep
+# off the ticket's attempt budget. `BOOTSTRAP_COMMAND` is empty for a target
+# that declares no `[bootstrap]` table (bin/contract.py's default), and an
+# empty command is nothing to run, not a command that trivially "succeeds".
+if [[ "$ROLE" == "build" && -n "$BOOTSTRAP_COMMAND" ]]; then
+  if ! BOOTSTRAP_OUT="$(cd "$WORKTREE" && bash -c "$BOOTSTRAP_COMMAND" 2>&1)"; then
+    printf '%s\n' "$BOOTSTRAP_OUT" >&2
+    die "bootstrap command \`$BOOTSTRAP_COMMAND\` failed in $WORKTREE; refusing to dispatch $NAME.
+This is NOT a failure of ticket $TICKET and must not consume its attempt budget.
+Repair the environment, then dispatch again at the same attempt number."
+  fi
+fi
+
 # bash 3.2 + `set -u`: "${arr[@]}" on an EMPTY array is an unbound-variable
 # error, not an empty expansion. The `+` form is the portable way to say
 # "expand only if set".

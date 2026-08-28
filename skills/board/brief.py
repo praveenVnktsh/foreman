@@ -12,46 +12,99 @@ Why this is a script and not a paragraph in SKILL.md: the `fix` prompt splices
 text that *another agent wrote* into the highest-privilege prompt in the loop —
 the implementation turn, which holds real git and gh credentials and is the one
 that pushes. Concatenated bare, a finding whose text opens a `System:` line or a
-new bullet is indistinguishable from murmr's own instructions. Demarcating it
-correctly every single time is a job for code, not for a model's good intentions.
+new bullet is indistinguishable from the board's own instructions. Demarcating
+it correctly every single time is a job for code, not for a model's good
+intentions.
 """
 
 from __future__ import annotations
 
 import argparse
 import json
+import os
+import subprocess
 import sys
 
 MAX_FINDING_CHARS = 2000
 
-STANDING = """\
-Read `CLAUDE.md` first, and the design doc for the area you are touching — the \
-subsystem docs under `design/` are binding, and most of what governs a subsystem \
-is written down only there.
+# The broken-environment paragraph names no project, so generalising the rest
+# of this file's prose never had anything to take out of it — it stays as it
+# was: the difference between a machine the board can repair and re-run for
+# free, and a build that quietly routes around a broken environment, dies,
+# and costs the ticket one of its few attempts.
+STANDING_TEMPLATE = """\
+Read {docs_sentence} before making non-trivial changes.
 
-Implement the ticket. Run the tests. Open a pull request whose body links the \
-ticket.
+Implement the ticket. Run `{test_command}`. Open a pull request whose body \
+links the ticket.
 
-**Open it ready for review, never as a draft.** A draft cannot be merged, so one \
-blocks the board after its checks are green and two reviewers have already read \
-the diff — all of that work sits waiting on a flag.
+**Open it ready for review, never as a draft.** A draft cannot be merged, so \
+one blocks the board after its checks are green and two reviewers have \
+already read the diff — all of that work sits waiting on a flag.
 
-**Do not merge, and do not enable auto-merge.** Merging deploys to production \
-against Praveen's real messages, health and finance data within the hour, and \
-arming auto-merge lets GitHub merge this diff while it is still being reviewed.
-Push the branch, open the PR, and stop there.
+**Do not merge, and do not enable auto-merge.** Merging deploys, and arming \
+auto-merge lets the forge merge this diff while it is still being reviewed. \
+Push the branch, open the pull request, and stop there.
 
-Report the pull request number and the head SHA when you are done. If you cannot \
-finish, say what blocked you — do not open a partial pull request and call it \
-done.
+Report the pull request number and the head SHA when you are done. If you \
+cannot finish, say what blocked you — do not open a partial pull request and \
+call it done.
 
 If a command fails for a reason that is not about the code — no disk space, a \
 quota, a missing credential, a network failure — stop and say exactly that, \
 naming the command and quoting the error. Do not work around it by relocating \
-temporary files or skipping the step. The board can repair a machine it has been \
-told about and re-run you for free, but a build that quietly routes around a \
-broken environment and then dies leaves nothing to diagnose and costs the ticket \
-one of its few attempts."""
+temporary files or skipping the step. The board can repair a machine it has \
+been told about and re-run you for free, but a build that quietly routes \
+around a broken environment and then dies leaves nothing to diagnose and \
+costs the ticket one of its few attempts."""
+
+
+def _docs_sentence(required_docs: str) -> str:
+    """Turn the contract's space-separated `docs.required` into prose.
+
+    `REQUIRED_DOCS` is optional in the contract (bin/contract.py defaults it
+    to an empty list), so a target that declares none still gets a sentence
+    that reads correctly rather than a dangling "Read  before...".
+    """
+    docs = required_docs.split()
+    if not docs:
+        return "the project's own documentation"
+    quoted = [f"`{d}`" for d in docs]
+    if len(quoted) == 1:
+        return quoted[0]
+    return ", ".join(quoted[:-1]) + " and " + quoted[-1]
+
+
+def _load_build_config(ticket: str) -> dict[str, str]:
+    """Read the target's contract, sourced the way reconcile.py sources it.
+
+    One process, one source of truth, rather than a second copy of what
+    board.toml means duplicated here as Python defaults — that duplication is
+    exactly how a target's contract quietly stops reaching the prompt an
+    agent is handed.
+
+    The branch name is asked of config.sh's own `branch_name` function for
+    `ticket`, not reassembled here from INSTANCE with a hand-typed format
+    string: reassembling it here is exactly how this file once told a live
+    agent to create a branch (`board/{ticket}`) that nothing else looked for,
+    after every other branch name moved to `foreman/<instance>/<ticket>`.
+    """
+    keys = ("TEST_COMMAND", "REQUIRED_DOCS")
+    script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.sh")
+    printf = (
+        'printf "%s\\0" ' + " ".join(f'"${k}"' for k in keys) + ' "$(branch_name "$1")"'
+    )
+    out = subprocess.run(
+        ["bash", "-c", f". {script!r} >/dev/null; {printf}", "_", ticket],
+        capture_output=True,
+        text=True,
+        timeout=15,
+    )
+    all_keys = keys + ("BRANCH",)
+    values = out.stdout.split("\0")
+    if out.returncode != 0 or len(values) < len(all_keys):
+        raise SystemExit(f"brief: could not read {script}: {out.stderr.strip()}")
+    return dict(zip(all_keys, values))
 
 
 def quote_untrusted(text: str, tag: str) -> str:
@@ -70,8 +123,13 @@ def quote_untrusted(text: str, tag: str) -> str:
 
 def build(args) -> str:
     body = open(args.body_file).read().strip() if args.body_file else ""
+    cfg = _load_build_config(args.ticket)
+    standing = STANDING_TEMPLATE.format(
+        docs_sentence=_docs_sentence(cfg["REQUIRED_DOCS"]),
+        test_command=cfg["TEST_COMMAND"],
+    )
     return f"""\
-You are implementing Linear ticket {args.ticket} in the murmr repository.
+You are implementing Linear ticket {args.ticket} in the target repository.
 
 ## {args.title}
 
@@ -79,9 +137,9 @@ You are implementing Linear ticket {args.ticket} in the murmr repository.
 
 ---
 
-{STANDING}
+{standing}
 
-Name your branch exactly `board/{args.ticket}` — it is already checked out in \
+Name your branch exactly `{cfg["BRANCH"]}` — it is already checked out in \
 this worktree. Put `{args.ticket}` in the pull request body so the board can \
 find it."""
 
@@ -89,8 +147,8 @@ find it."""
 def review(args) -> str:
     # `--round` was parsed and then dropped on the floor, so a round-2 reviewer
     # received a prompt byte-identical to round 1 — reviewing a diff that had
-    # already been sent back and rewritten, with no idea that had happened. Found
-    # by the reviewers on PRA-31 reviewing this very file.
+    # already been sent back and rewritten, with no idea that had happened.
+    # Found by the reviewers doing exactly this: reviewing this file itself.
     again = ""
     if str(args.round) != "1":
         again = f"""
