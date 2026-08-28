@@ -26,7 +26,8 @@
 # already gone. Nor does it require its argument to exist: `sweep.sh` asks for
 # the scratch belonging to a worktree precisely when that worktree is missing.
 #
-# See design/build_system.md.
+# See docs/specs/2026-08-27-autonomous-board-runner-design.md ("The scratch
+# root and the halt file").
 
 set -euo pipefail
 

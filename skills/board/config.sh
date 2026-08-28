@@ -190,11 +190,12 @@ BOARD_DRY_RUN="${BOARD_DRY_RUN:-}"
 
 # Scratch root for dispatched agents, paired one-to-one with worktrees.
 #
-# Deliberately OUTSIDE the repo. `backend/tests/test_design_invariants.py`
-# rglobs the checkout, and its own comment records being burned by sibling
-# worktrees inflating a basename set to 15,934 names; a scratch tree full of
-# test vaults would feed exactly that. It is also on the nvme rather than the
-# /tmp tmpfs, which is 50% of RAM and quota-capped near 5.5G per user.
+# Deliberately OUTSIDE the repo. A target's own test suite may rglob the
+# checkout looking for source files -- one such test's own comment records
+# being burned by sibling worktrees inflating a basename set to 15,934 names;
+# a scratch tree full of test vaults would feed exactly that. It is also on
+# the nvme rather than the /tmp tmpfs, which is 50% of RAM and quota-capped
+# near 5.5G per user.
 #
 # The path is derived from the WORKTREE, never from the environment. Agents
 # inherit their env from the shared `claude daemon`, not from the dispatch.sh

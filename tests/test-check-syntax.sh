@@ -175,12 +175,12 @@ echo "==> untracked files are not read"
 repo="$(new_repo untracked)"
 mkdir -p "$repo/.claude/skills/board" "$repo/.claude/worktrees/other-agent"
 # Named for what they are rather than after real board scripts, which is not
-# fussiness: `design/build_system.md` invariant 11 names `reconcile.py`, and
-# `backend/tests/test_design_invariants.py` resolves that against any non-comment
-# occurrence under `ops/`. While these fixtures wore those names, the invariant
-# resolved against this test rather than against the board -- and renaming the
-# real file would have gone unnoticed. What is under test here is the path, not
-# the filename.
+# fussiness: a target's own design-invariant tests can name a specific source
+# file (e.g. `reconcile.py`) and check that name against every non-comment
+# occurrence in the tree. While these fixtures wore those names, such an
+# invariant resolved against this test rather than against the board -- and
+# renaming the real file would have gone unnoticed. What is under test here is
+# the path, not the filename.
 good_shell "$repo/.claude/skills/board/fixture.sh"
 good_python "$repo/.claude/skills/board/fixture.py"
 printf '.claude/worktrees/\n' > "$repo/.gitignore"

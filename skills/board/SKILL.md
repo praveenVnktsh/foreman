@@ -785,10 +785,12 @@ The file was real, the path was right, and the answer was still false.
 `reconcile.py` already computed `pr.risk` from `gh pr diff --name-only` — the
 **diff**, never the ticket text.
 
-- **`risk: high`** — currently **migrations only**
-  (`backend/app/events/migrations/`) → leave the card in `In Review`, add
-  `needs-merge`, comment naming the files, and say the operator decides. A
-  parked card does **not** hold a concurrency slot.
+- **`risk: high`** — the diff touches a path the target declared under
+  `board.toml`'s `[risk] paths` (`HIGH_RISK_PATHS` in `reconcile.py`, via
+  `bin/contract.py`) → leave the card in `In Review`, add `needs-merge`,
+  comment naming the files, and say the operator decides. Absent `[risk]`
+  means the target has declared nothing high-risk, and everything low-risk
+  merges autonomously. A parked card does **not** hold a concurrency slot.
 - **`risk: unknown`** — `gh pr diff` failed, so **the diff was never read** and
   nothing is known about what it touches. Merge nothing. Leave the card where it
   is, say the diff could not be read, and look again next tick; it usually reads
@@ -800,9 +802,11 @@ The file was real, the path was right, and the answer was still false.
 
 Everything else merges autonomously, including health, finance, sensors, `ops/`
 and `.github/workflows/`. "Everything else" means every *low-risk* diff — it is
-not a catch-all for the two states above, both of which stop. That is deliberate: those are a revert and a redeploy
-away, whereas a migration runs against the deploy host's live database and
-mutates the ledger in place, so reverting the pull request does not undo it.
+not a catch-all for the two states above, both of which stop. That is
+deliberate: a bad change on a low-risk path is a revert and a redeploy away,
+whereas the whole reason a path belongs in `[risk]` is that it may not be —
+a migration that already ran mutates the deploy host's live database in
+place, so reverting the pull request does not undo it.
 
 When you merge something that touches a sensitive area, **say so on the card** —
 name the paths in the comment even though you merged. The operator should be
@@ -823,9 +827,11 @@ Before merging, three things that make a green PR lie:
   sets `strict: true`, so it will not merge however green it looks. Run
   `gh pr update-branch <n>`, then wait for checks to re-run on the new SHA.
   Do not merge on the old SHA's green.
-- **A branch older than a day touching `backend/app/events/migrations/`** — it
-  can be green forever while `main` claims its numbers underneath it. That is a
-  high-risk path anyway, so it parks; mention the collision if you see one.
+- **A branch older than a day touching a sequentially-numbered high-risk
+  path** (a migrations directory like `db/migrations/` is the usual case) —
+  it can be green forever while `main` claims the next number underneath it.
+  That path is high-risk anyway, so it parks; mention the collision if you
+  see one.
 
 Merge with `gh pr merge <n> --squash`. Never enable auto-merge.
 
@@ -1045,10 +1051,12 @@ Nothing else. A tick that changed nothing says so in one line and stops.
   way, and the overrule goes on the card with the command and the `evidence:` SHA
   that produced it — a search that found nothing is a failed search, not a
   refutation.
-- **Migrations park.** A diff touching `backend/app/events/migrations/` is the
-  operator's to merge however green it is, because applying it to the live
-  ledger is not reversible. `config.sh` holds the list; do not widen or narrow
-  it yourself.
+- **High-risk paths park.** A diff touching one of the target's declared
+  `[risk] paths` (`board.toml`, e.g. a migrations directory) is the operator's
+  to merge however green it is, because an irreversible change — one already
+  applied to production data — cannot be undone by reverting the pull
+  request. `board.toml` holds the list, relayed through `config.sh` via
+  `bin/contract.py`; do not widen or narrow it yourself.
 - **A failing card goes back to `Backlog` with `board-failed`, never into a dead
   end.** The operator re-triages it; that is what stops a card looping. If you
   are about to send back a card that already carries `board-failed`, say so

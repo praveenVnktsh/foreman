@@ -17,10 +17,11 @@
 # names. A passing test here proves the prompt reflects THIS contract, not a
 # hardcoded string that happens to resemble a real one -- including the
 # specific strings that used to leak from the project this tool grew up in,
-# checked by name below (`banned`) as a standing regression guard, which is
-# also why this one file is exempted from tests/test-no-target-specifics.sh's
-# scan rather than rewritten: the words in `banned` are the check, not leftover
-# prose.
+# named in lib/legacy-strings.sh (sourced below as `LEGACY_LEAKED_STRINGS`)
+# and checked for absence as a standing regression guard. That one-line file,
+# not this one, is what tests/test-no-target-specifics.sh's scan excludes:
+# those words are the check, not leftover prose, but everything else in this
+# file is ordinary prose and stays covered by that scan.
 set -euo pipefail
 
 here="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
@@ -30,6 +31,8 @@ brief="$board_dir/brief.py"
 
 # shellcheck source=lib/instance-fixture.sh
 source "$here/lib/instance-fixture.sh"
+# shellcheck source=lib/legacy-strings.sh
+source "$here/lib/legacy-strings.sh"
 
 work="$(mktemp -d)"; trap 'rm -rf "$work"' EXIT
 fail=0
@@ -120,7 +123,7 @@ else
 $prompt"
 fi
 
-banned=("murmr" "mango" "Praveen" "PRA-" "just test-all")
+banned=("${LEGACY_LEAKED_STRINGS[@]}")
 clean=1
 for b in "${banned[@]}"; do
   if [[ "$prompt" == *"$b"* ]]; then
@@ -128,7 +131,8 @@ for b in "${banned[@]}"; do
     clean=0
   fi
 done
-[[ "$clean" == 1 ]] && ok "the prompt contains none of: murmr, mango, Praveen, PRA-, just test-all"
+banned_joined="$(IFS=', '; echo "${banned[*]}")"
+[[ "$clean" == 1 ]] && ok "the prompt contains none of the legacy leaked strings: $banned_joined"
 
 # The broken-environment paragraph must survive the rewrite: an agent that
 # hits a disk/quota/credential failure must stop and report it, not work
