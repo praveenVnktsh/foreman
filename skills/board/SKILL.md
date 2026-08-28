@@ -53,6 +53,7 @@ table says what each knob *means* and `config.sh` says what it *is*:
     MAX_BUILD_ATTEMPTS "$MAX_BUILD_ATTEMPTS" MAX_REVIEW_ROUNDS "$MAX_REVIEW_ROUNDS" \
     REVIEWERS_PER_ROUND "$REVIEWERS_PER_ROUND" STALL_MINUTES "$STALL_MINUTES" \
     MAX_FOLLOWUPS "$MAX_FOLLOWUPS" HOST_MAX_CONCURRENT "$HOST_MAX_CONCURRENT" \
+    HOST_SLOT_STALE_MINUTES "$HOST_SLOT_STALE_MINUTES" \
     BOARD_DRY_RUN "${BOARD_DRY_RUN:-unset}" )
 ```
 
@@ -64,8 +65,9 @@ table says what each knob *means* and `config.sh` says what it *is*:
 | `REVIEWERS_PER_ROUND` | adversarial reviewers per round |
 | `STALL_MINUTES` | transcript silence before an agent is judged stalled |
 | `MAX_FOLLOWUPS` | follow-up cards per merged card |
-| `MIN_FREE_*`, `PROBE_*`, `QUICK_PROBE_MB` | environment thresholds enforced by `preflight.py` — declared per-target in `board.toml`'s `[limits]`, not here |
+| `MIN_FREE_*`, `PROBE_*`, `QUICK_PROBE_MB` | environment thresholds enforced by `preflight.py` — declared per-target in `board.toml`'s `[limits]`, not here. **foreman's own defaults are sized for foreman's own cheap suite**; a target with a heavy build (a real test suite, a large `node_modules`, …) that declares no `[limits]` silently inherits them and can pass this preflight while still dying mid-build the way PRA-28 did on 2026-08-02 — see `bin/contract.py`. |
 | `HOST_MAX_CONCURRENT` | cards holding a slot, summed across **every** instance sharing this machine |
+| `HOST_SLOT_STALE_MINUTES` | how long a card may go without a fresh `history.jsonl` entry before `--host-slots` stops counting it even with no `released` marker — a backstop, not the primary release mechanism |
 | `BOARD_DRY_RUN` | print every mutation instead of performing it |
 
 `MAX_CONCURRENT` counts **cards, not processes** — a card in review adds up to
@@ -76,7 +78,12 @@ each dispatching up to their own `MAX_CONCURRENT` can still jointly exceed what
 one machine's RAM and disk can sustain. `$B/reconcile.py --host-slots` reads it
 across `~/.foreman/instances/*/cards/` and reports `{"instances": {...},
 "total": N}`; check it against `HOST_MAX_CONCURRENT` in step 6 alongside the
-instance's own free-slot count, before dispatching anything.
+instance's own free-slot count, before dispatching anything. A card stops
+counting when its history's last entry is `{"action":"released",...}` — logged
+at `Done` and at both `board-failed` exits, see steps 2, 3 and 5 — or, failing
+that, once `HOST_SLOT_STALE_MINUTES` has passed with no new entry at all. The
+marker is what should release a slot; the timer is what keeps a missed marker
+from wedging every instance on the machine forever.
 
 ## Scope
 
@@ -590,7 +597,10 @@ Then, for an agent whose turn has ended:
   network blip.
 - **no PR** → the attempt failed. Classify it first, as above. If it was the
   ticket's fault, resume once with what the transcript ends on; past
-  `MAX_BUILD_ATTEMPTS`, send the card back to `Backlog` with the reason.
+  `MAX_BUILD_ATTEMPTS`, send the card back to `Backlog` with the reason and
+  `card_log <T> '{"action":"released","reason":"board-failed: attempts exhausted"}'`
+  — this card no longer holds a slot, and `--host-slots` (step 6) only knows
+  that if you say so.
 
 **Resume needs its worktree, and sometimes it is gone.** `dispatch.sh --resume`
 refuses outright when the working directory has vanished, which is correct —
@@ -623,7 +633,10 @@ unshippable builds.
 - **no blocking findings** → go to step 4 **in this tick**. A clean review that
   waits five minutes for a merge is the exact delay this design removes.
 - **`MAX_REVIEW_ROUNDS` reached with blocking findings still open** → back to
-  `Backlog` with the findings attached.
+  `Backlog` with the findings attached, and
+  `card_log <T> '{"action":"released","reason":"board-failed: review rounds exhausted"}'`
+  — same reasoning as the build-attempts exit above: `board-failed` releases
+  the slot exactly as much as `Done` does.
 - **a reviewer produced no readable file** → that is not a clean review. Re-run
   it. Never treat an unreadable review as "found nothing".
 
@@ -825,10 +838,14 @@ exiting during the restart. Benign.
 and move the card to `Done` in this same tick once all three hold. The deploy is
 minutes away and it is the last thing between a merged card and its column.
 
-Also `card_log <T> '{"action":"finished","reason":"done"}'`. This is the
+Also `card_log <T> '{"action":"released","reason":"done"}'`. This is the
 signal `reconcile.py --host-slots` (step 6) reads to stop counting the card
-against `HOST_MAX_CONCURRENT` — without it, a card holds a slot in the host
-count forever, because `sweep.sh` deliberately never deletes `history.jsonl`.
+against `HOST_MAX_CONCURRENT`. Named `released`, not `finished` — the meaning
+is "this card no longer holds a slot", not "this card succeeded", and the two
+`board-failed` exits below release a slot exactly as much as this one does.
+Without it, a card holds a slot in the host count until
+`HOST_SLOT_STALE_MINUTES` passes (`config.sh`) — a backstop for a marker some
+future terminal exit forgets to write, not a substitute for writing it here.
 
 **That wait has three endings, not two.** For as long as it had two, a deploy
 that ran and failed came back `satisfied: true` carrying `verified: false`, and
@@ -877,6 +894,12 @@ commit, and the wait keeps going until its budget runs out.
 Free slots = `MAX_CONCURRENT` − (cards in `In Progress`) − (cards in `In Review`
 with a live reviewer). Parked-for-Praveen cards do not count.
 
+**Recount here, after steps 2–5 have run.** A card that reached `Done` earlier in
+this same tick has already released its slot, and the whole point of running the
+phases in this order is that the next card starts now rather than five minutes
+from now. Recounting is also what makes a converging tick safe: on a second pass
+the slot arithmetic reflects everything the first pass did.
+
 **Then check the machine, not just this instance.** `$B/reconcile.py
 --host-slots` sums cards holding a slot across every instance under
 `~/.foreman/instances/*/cards/`. If `total >= HOST_MAX_CONCURRENT`, this
@@ -886,12 +909,6 @@ instance slot, until another instance's card releases one. This is the same
 reasoning as `MAX_CONCURRENT` itself, one level up: two instances each within
 their own limit can still jointly exceed what one machine's RAM and disk can
 sustain.
-
-**Recount here, after steps 2–5 have run.** A card that reached `Done` earlier in
-this same tick has already released its slot, and the whole point of running the
-phases in this order is that the next card starts now rather than five minutes
-from now. Recounting is also what makes a converging tick safe: on a second pass
-the slot arithmetic reflects everything the first pass did.
 
 **Check dependencies before taking anything.** Read each `Todo` card with
 `get_issue(includeRelations: true)` — `list_issues` cannot return relations, so

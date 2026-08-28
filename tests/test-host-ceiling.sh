@@ -129,8 +129,20 @@ write_history() { # instance ticket line...
   for line in "$@"; do printf '%s\n' "$line" >> "$dir/history.jsonl"; done
 }
 
-SPAWN='{"at":"2026-08-27T00:00:00Z","event":{"action":"spawn","role":"build","attempt":"1"}}'
-FINISHED='{"at":"2026-08-27T00:05:00Z","event":{"action":"finished","reason":"merged"}}'
+expect() {
+  local want="$1" got="$2" what="$3"
+  [[ "$got" == "$want" ]] || fail "$what: expected [$want], got [$got]"
+}
+
+# Timestamped at RUN time, not a hardcoded date -- a hardcoded past date is
+# exactly what HOST_SLOT_STALE_MINUTES's backstop (added in review round 1)
+# now treats as a leaked slot to reclaim, which made a fixed "2026-08-27"
+# literal silently go stale and fail this very suite the day after it was
+# written. These cases are about the `released` MARKER, not about staleness
+# -- see the dedicated backstop case further down -- so every timestamp here
+# must stay fresh no matter when the suite runs.
+SPAWN="{\"at\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\",\"event\":{\"action\":\"spawn\",\"role\":\"build\",\"attempt\":\"1\"}}"
+RELEASED="{\"at\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\",\"event\":{\"action\":\"released\",\"reason\":\"merged\"}}"
 
 # alpha: one card still in flight.
 write_history alpha PRA-1 "$SPAWN"
@@ -138,38 +150,134 @@ write_history alpha PRA-1 "$SPAWN"
 # --host-slots only read the CURRENT instance's cards (the bug this exists to
 # catch), beta's card would never be counted.
 write_history beta PRA-9 "$SPAWN"
-# delta: one card that was dispatched and has since finished. Isolated in its
-# own instance so its zero cannot be explained by anything but the trailing
-# `finished` entry.
-write_history delta PRA-2 "$SPAWN" "$FINISHED"
+# delta: one card that was dispatched and has since released its slot.
+# Isolated in its own instance so its zero cannot be explained by anything but
+# the trailing `released` entry.
+write_history delta PRA-2 "$SPAWN" "$RELEASED"
 # gamma: an instance directory that exists but has never dispatched anything,
 # so it has no cards/ subdirectory at all.
 mkdir -p "$slots_home/.foreman/instances/gamma"
+# epsilon: a ticket directory that exists (e.g. created for some other reason)
+# but was never actually logged to -- no history.jsonl at all.
+mkdir -p "$slots_home/.foreman/instances/epsilon/cards/PRA-NOHIST"
+# zeta: a history.jsonl whose LAST line is corrupt -- not valid JSON at all.
+# `_read_jsonl` must skip it rather than raise, falling back to the last line
+# that DID parse (a spawn, so this still counts).
+zeta_dir="$slots_home/.foreman/instances/zeta/cards/PRA-BAD"
+mkdir -p "$zeta_dir"
+printf '%s\n{not json at all\n' "$SPAWN" > "$zeta_dir/history.jsonl"
 
 host_json="$(HOME="$slots_home" FOREMAN_INSTANCE=current "$reconcile" --host-slots)"
-
-expect() {
-  local want="$1" got="$2" what="$3"
-  [[ "$got" == "$want" ]] || fail "$what: expected [$want], got [$got]"
-}
 
 expect "1" "$(verdict_field "$host_json" 'v["instances"]["alpha"]')" \
   "alpha's in-flight card is counted"
 expect "1" "$(verdict_field "$host_json" 'v["instances"]["beta"]')" \
   "beta's card is counted even though beta is not the current instance"
-expect "5" "$(verdict_field "$host_json" 'len(v["instances"])')" \
+expect "7" "$(verdict_field "$host_json" 'len(v["instances"])')" \
   "every instance directory appears in the report, including empty ones"
 echo "ok  --host-slots counts cards across every instance, not just this one"
 
 expect "0" "$(verdict_field "$host_json" 'v["instances"]["delta"]')" \
-  "a card whose history's last line is a finished event must not count"
+  "a card whose history's last line is a released event must not count"
 echo "ok  --host-slots ignores a card whose history says it finished"
 
 expect "0" "$(verdict_field "$host_json" 'v["instances"]["gamma"]')" \
   "an instance with no cards/ at all must read as zero, not raise"
-expect "2" "$(verdict_field "$host_json" 'v["total"]')" \
-  "the total is alpha (1) + beta (1) + delta (0) + gamma (0) + current (0)"
+expect "3" "$(verdict_field "$host_json" 'v["total"]')" \
+  "the total is alpha (1) + beta (1) + delta (0) + gamma (0) + current (0) + epsilon (0) + zeta (1)"
 echo "ok  --host-slots survives an instance directory with no cards/ at all"
+
+expect "0" "$(verdict_field "$host_json" 'v["instances"]["epsilon"]')" \
+  "a card directory with no history.jsonl at all must not count, and must not raise"
+echo "ok  --host-slots survives a card directory with no history.jsonl"
+
+expect "1" "$(verdict_field "$host_json" 'v["instances"]["zeta"]')" \
+  "a corrupt trailing line must not crash the read -- it falls back to the last line that DID parse"
+echo "ok  --host-slots survives a malformed trailing line in history.jsonl"
+
+# ============================================================================
+# Regression coverage added in review round 1: the CRITICAL finding
+# ============================================================================
+#
+# card_holds_slot() originally counted a card unless its history's last line
+# said `{"action":"finished",...}` -- and NOTHING in the codebase ever wrote
+# that action except the `Done` path. Both `board-failed` exits (attempts
+# exhausted, review rounds exhausted) left a card counting FOREVER, because
+# sweep.sh deliberately never deletes history.jsonl. Four cumulative
+# board-failed cards -- ever, not concurrently -- pins HOST_MAX_CONCURRENT's
+# default of 4 and wedges dispatch across EVERY instance on the machine,
+# unrecoverable without hand-editing history.jsonl. The fix is two mechanisms,
+# and this section proves both independently:
+#
+#   1. THE MARKER, renamed `released` and now written at both `board-failed`
+#      exits too (SKILL.md steps 2 and 3), not just `Done`.
+#   2. THE BACKSTOP, `HOST_SLOT_STALE_MINUTES`: a card whose last entry is
+#      older than the bound stops counting even with no marker at all -- so a
+#      THIRD terminal exit someone adds later and forgets to wire self-heals
+#      instead of wedging forever.
+
+wedge_home="$work_dir/wedge-home"
+wedge_target="$work_dir/wedge-target"
+mkdir -p "$wedge_target"
+git_q init -q -b main "$wedge_target"
+fixture_board_toml "$wedge_target"
+git_q -C "$wedge_target" add board.toml
+git_q -C "$wedge_target" commit -q -m "Seed"
+fixture_add_instance "$wedge_home" current "$wedge_target"
+
+write_wedge_history() { # instance ticket line...
+  local inst="$1" ticket="$2"; shift 2
+  local dir="$wedge_home/.foreman/instances/$inst/cards/$ticket"
+  mkdir -p "$dir"
+  local line
+  for line in "$@"; do printf '%s\n' "$line" >> "$dir/history.jsonl"; done
+}
+
+# --- the exact scenario the reviewer reproduced: 4 cumulative failed cards --
+
+# "lambda": four cards, each with only a fresh, unreleased spawn -- exactly
+# what a board-failed card looked like before this fix, and exactly
+# HOST_MAX_CONCURRENT's shipped default. If this reads as 4, dispatch is
+# wedged on this machine from this moment forward.
+for n in 1 2 3 4; do
+  write_wedge_history lambda "PRA-L$n" "$SPAWN"
+done
+# "kappa": the same four cards, but with `released` appended -- the fix,
+# applied. This is what SKILL.md now does at both board-failed exits.
+for n in 1 2 3 4; do
+  write_wedge_history kappa "PRA-K$n" "$SPAWN" "$RELEASED"
+done
+
+wedge_json="$(HOME="$wedge_home" FOREMAN_INSTANCE=current "$reconcile" --host-slots)"
+
+expect "4" "$(verdict_field "$wedge_json" 'v["instances"]["lambda"]')" \
+  "four unreleased cards read as 4 -- confirmed AT the shipped HOST_MAX_CONCURRENT default, this is a real deadlock shape, not a hypothetical one"
+expect "0" "$(verdict_field "$wedge_json" 'v["instances"]["kappa"]')" \
+  "the same four cards, released at both board-failed exits (as SKILL.md now instructs), do not accumulate -- dispatch is never wedged by them"
+echo "ok  cumulative board-failed cards release their slots once released (no permanent deadlock)"
+
+# --- the backstop: a stale, unreleased card self-heals with no marker at all
+
+past='2000-01-01T00:00:00Z'                      # always older than any bound below
+now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"              # always fresher than any bound below
+STALE_SPAWN="{\"at\":\"$past\",\"event\":{\"action\":\"spawn\",\"role\":\"build\",\"attempt\":\"1\"}}"
+FRESH_SPAWN="{\"at\":\"$now\",\"event\":{\"action\":\"spawn\",\"role\":\"build\",\"attempt\":\"1\"}}"
+# "mu": a card dispatched in the year 2000 and never released -- imagine a
+# terminal exit that forgot to write the marker at all.
+write_wedge_history mu PRA-M1 "$STALE_SPAWN"
+# "nu": a card dispatched moments ago, also unreleased -- real, active work
+# that the backstop must NOT mistake for a leak.
+write_wedge_history nu PRA-N1 "$FRESH_SPAWN"
+
+# A 5-minute bound: `$past` is a quarter century old and `$now` is seconds
+# old, so which side of 5 minutes each falls on cannot be timing-flaky.
+backstop_json="$(HOME="$wedge_home" FOREMAN_INSTANCE=current HOST_SLOT_STALE_MINUTES=5 "$reconcile" --host-slots)"
+
+expect "0" "$(verdict_field "$backstop_json" 'v["instances"]["mu"]')" \
+  "a card with no released marker but a 26-year-old last entry must stop counting -- this is the self-heal for a marker nobody wrote"
+expect "1" "$(verdict_field "$backstop_json" 'v["instances"]["nu"]')" \
+  "a card with no released marker but a SECONDS-old last entry must still count -- the backstop must not mistake live work for a leak"
+echo "ok  a stale, unreleased card self-heals past HOST_SLOT_STALE_MINUTES (backstop)"
 
 # ============================================================================
 # Cases 4-6: preflight.py's probe lock

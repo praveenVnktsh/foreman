@@ -22,6 +22,7 @@ import re
 import subprocess
 import sys
 import time
+from datetime import datetime, timezone
 
 def _load_config() -> dict[str, str]:
     """Read settings from config.sh — the single source of truth.
@@ -34,7 +35,7 @@ def _load_config() -> dict[str, str]:
     keys = (
         "REPO", "BOARD_HOME", "REQUIRED_CHECKS", "HIGH_RISK_PATHS",
         "DEPLOY_WORKFLOW", "DEPLOY_STEP", "CI_WORKFLOW", "INSTANCE",
-        "FOREMAN_HOME",
+        "FOREMAN_HOME", "HOST_SLOT_STALE_MINUTES",
     )
     script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.sh")
     printf = 'printf "%s\\0" ' + " ".join(f'"${k}"' for k in keys)
@@ -67,6 +68,11 @@ DEPLOY_STEP = _CFG["DEPLOY_STEP"]
 # missing string rather than on anything about `main`. config.sh still overrides.
 CI_WORKFLOW = _CFG["CI_WORKFLOW"] or "CI"
 FOREMAN_HOME = _CFG["FOREMAN_HOME"]
+# Empty means "disabled" -- see host_slots()'s docstring for why that is a
+# real, supported value and not just an unset-variable accident.
+HOST_SLOT_STALE_MINUTES = (
+    float(_CFG["HOST_SLOT_STALE_MINUTES"]) if _CFG["HOST_SLOT_STALE_MINUTES"] else None
+)
 
 # An unreachable GitHub must not stall the whole tick.
 GH_TIMEOUT = 30
@@ -726,22 +732,59 @@ def history(ticket: str) -> list[dict]:
     return _read_jsonl(os.path.join(BOARD_HOME, "cards", ticket, "history.jsonl"))
 
 
-def card_holds_slot(history_path: str) -> bool:
+def _entry_age_minutes(entry: dict) -> float | None:
+    """Minutes since `entry["at"]`, or None if it is missing or unparseable.
+
+    `at` is stamped by `config.sh:card_log` as `date -u +%Y-%m-%dT%H:%M:%SZ`
+    -- always this one format, always UTC. `None` on anything else (a hand-
+    edited line, a future format change) rather than raising, and the caller
+    treats `None` as "cannot judge staleness" and falls back to NOT stale --
+    the safe direction, because the failure mode this guards against is a
+    slot that never gets released, not one released a little early.
+    """
+    at = entry.get("at")
+    if not isinstance(at, str):
+        return None
+    try:
+        stamp = datetime.strptime(at, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+    except ValueError:
+        return None
+    return (datetime.now(timezone.utc) - stamp).total_seconds() / 60
+
+
+def card_holds_slot(history_path: str, stale_minutes: float | None) -> bool:
     """Does this card's own record say it is still occupying a build slot?
 
     `--host-slots` cannot ask Linear or `claude agents` for every instance on
     the machine the way a single tick asks about its own cards — that would be
     a network or registry round trip per instance, on every dispatch, for a
     ceiling that exists specifically to be cheap enough to check before every
-    one. `history.jsonl` is therefore the only signal: a card counts unless
-    its OWN log says it is done.
+    one. `history.jsonl` is therefore the only signal, read two ways:
 
-    The convention: `config.sh:card_log` appends `{"action":"finished", ...}`
-    as the last event for a card that has left the board — reached `Done`,
-    `board-failed`, or otherwise stopped being in-flight work, the same way it
-    already appends `{"action":"void", ...}` for an attempt that didn't count.
-    Append-only means the LAST line is the most recent word on the card's own
-    status.
+    1. THE MARKER. `config.sh:card_log` appends `{"action":"released", ...}`
+       as the last event for a card that has left the board and no longer
+       occupies a slot — `Done`, `board-failed` from either exhausted
+       attempts or exhausted review rounds — the same way it already appends
+       `{"action":"void", ...}` for an attempt that didn't count. Named
+       `released` and not `finished`: the meaning is "this card no longer
+       holds a slot", which is true of a `board-failed` card too, and a name
+       that reads as "succeeded" is the name most likely to be typo'd into
+       only the happy path. Append-only means the LAST line is the most
+       recent word on the card's own status.
+
+    2. THE BACKSTOP. SKILL.md documents the sidecar as "a cache, never truth
+       — delete it and the next tick must still reconstruct every card's
+       position." A slot releasable ONLY by an LLM remembering to append one
+       specific line violates that -- the marker is written by hand-followed
+       prose, not enforced by any type checker, and a THIRD terminal exit
+       someone adds later and forgets to wire produces the exact permanent
+       deadlock this function exists to prevent: every instance on the
+       machine wedged behind `HOST_MAX_CONCURRENT` by cards nobody is
+       working on, unrecoverable without hand-editing `history.jsonl`. So a
+       card whose last entry is older than `stale_minutes` also stops
+       counting, regardless of what it says: no activity for that long means
+       nothing is actually using the slot, marker or not. `stale_minutes` of
+       `None` disables this (see `HOST_SLOT_STALE_MINUTES=` in config.sh).
 
     A card with no history at all — a `cards/<T>/` directory that exists for
     some other reason, or was created but never logged to — holds no slot:
@@ -752,11 +795,18 @@ def card_holds_slot(history_path: str) -> bool:
     entries = _read_jsonl(history_path)
     if not entries:
         return False
-    event = entries[-1].get("event") or {}
-    return event.get("action") != "finished"
+    last = entries[-1]
+    event = last.get("event") or {}
+    if event.get("action") == "released":
+        return False
+    if stale_minutes is not None:
+        age = _entry_age_minutes(last)
+        if age is not None and age >= stale_minutes:
+            return False
+    return True
 
 
-def host_slots(foreman_home: str) -> dict:
+def host_slots(foreman_home: str, stale_minutes: float | None = HOST_SLOT_STALE_MINUTES) -> dict:
     """Cards holding a slot, counted across every instance on this machine.
 
     `{"instances": {name: count, ...}, "total": N}`. This is the host-wide
@@ -772,10 +822,10 @@ def host_slots(foreman_home: str) -> dict:
 
     Tolerant by design, per its one caller (a tick deciding whether IT may
     dispatch): an instance directory with no `cards/` at all, a `cards/` with
-    no entries, or one entry that cannot be read must never raise. This is
-    advisory input to a ceiling, not a fact the tick depends on being able to
-    fetch — failing to read one instance's slots must not take down the tick
-    that asked about all of them.
+    no entries, a card with no `history.jsonl`, or a `history.jsonl` holding
+    unparseable lines must never raise. This is advisory input to a ceiling,
+    not a fact the tick depends on being able to fetch — failing to read one
+    instance's slots must not take down the tick that asked about all of them.
     """
     instances_dir = os.path.join(foreman_home, "instances")
     result: dict = {"instances": {}, "total": 0}
@@ -797,7 +847,7 @@ def host_slots(foreman_home: str) -> dict:
         count = 0
         for ticket in tickets:
             history_path = os.path.join(cards_dir, ticket, "history.jsonl")
-            if card_holds_slot(history_path):
+            if card_holds_slot(history_path, stale_minutes):
                 count += 1
         result["instances"][name] = count
         result["total"] += count

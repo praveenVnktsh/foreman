@@ -106,6 +106,28 @@ REVIEW_MODEL="${REVIEW_MODEL:-opus}"
 # before a dispatch, in addition to the instance's own MAX_CONCURRENT.
 HOST_MAX_CONCURRENT="${HOST_MAX_CONCURRENT:-4}"
 
+# How stale a card's LAST history.jsonl entry may be before --host-slots stops
+# counting it, even without an explicit `{"action":"released",...}`.
+#
+# The marker is the primary mechanism -- SKILL.md logs it when a card reaches
+# `Done` or `board-failed` -- but it is written by hand-followed prose, not
+# enforced by any type checker, and this sidecar is documented elsewhere as "a
+# cache, never truth: delete it and the next tick must still reconstruct every
+# card's position." A slot releasable ONLY by an LLM remembering one specific
+# line violates that. A THIRD terminal exit added later and never wired to the
+# marker -- the exact failure a reviewer caught in this feature's first round
+# -- would otherwise wedge dispatch on EVERY instance on this machine forever,
+# recoverable only by hand-editing history.jsonl: four cumulative board-failed
+# cards is enough to pin HOST_MAX_CONCURRENT's default of 4, and nothing ever
+# reclaims it, because sweep.sh deliberately never deletes history.jsonl.
+#
+# 12 hours is long enough that it should never fire during a card's ordinary
+# lifecycle -- ticks run every TICK_INTERVAL_MINUTES and a card usually
+# resolves in a handful of them -- and short enough to self-heal a leaked slot
+# same-day rather than needing an operator to notice and hand-edit a file.
+# Empty disables the backstop entirely, relying on the marker alone.
+HOST_SLOT_STALE_MINUTES="${HOST_SLOT_STALE_MINUTES:-720}"
+
 # Dispatched agents run with --dangerously-skip-permissions, at Praveen's
 # explicit instruction on 2026-08-01.
 #

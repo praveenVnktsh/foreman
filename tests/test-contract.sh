@@ -47,6 +47,43 @@ check "test command"                    "make test" "$(read_key "$work/full.toml
 check "limits are upper-cased"          "2" "$(read_key "$work/full.toml" MAX_CONCURRENT)"
 check "unset limit falls back"          "2" "$(read_key "$work/full.toml" MAX_REVIEW_ROUNDS)"
 
+# Task 6 (decisions §2): MIN_FREE_TMP_MB, MIN_FREE_REPO_MB, PROBE_TMP_MB,
+# PROBE_REPO_MB and QUICK_PROBE_MB were added to LIMITS alongside the
+# originals above -- but the review round 1 that shipped them only ever
+# exercised quick_probe_mb (through test-host-ceiling.sh, indirectly, via
+# preflight.py). Setting all five together, distinctly, is what proves each
+# one individually reaches config.sh's shell variable of the same name rather
+# than one of the five silently aliasing another or falling back to its
+# default while the test happened to not notice.
+cat >"$work/allprobes.toml" <<'TOML'
+[linear]
+team = "PRA"
+project = "foreman"
+[checks]
+required = ["Tests"]
+ci_workflow = "CI"
+[test]
+command = "make test"
+[limits]
+min_free_tmp_mb = 111
+min_free_repo_mb = 222
+probe_tmp_mb = 333
+probe_repo_mb = 444
+quick_probe_mb = 555
+TOML
+check "min_free_tmp_mb round-trips"  "111" "$(read_key "$work/allprobes.toml" MIN_FREE_TMP_MB)"
+check "min_free_repo_mb round-trips" "222" "$(read_key "$work/allprobes.toml" MIN_FREE_REPO_MB)"
+check "probe_tmp_mb round-trips"     "333" "$(read_key "$work/allprobes.toml" PROBE_TMP_MB)"
+check "probe_repo_mb round-trips"    "444" "$(read_key "$work/allprobes.toml" PROBE_REPO_MB)"
+check "quick_probe_mb round-trips"   "555" "$(read_key "$work/allprobes.toml" QUICK_PROBE_MB)"
+# And the contract must still load at all with every one of the five set --
+# decisions §2's literal ask ("a test that a contract setting every one of
+# the five loads successfully").
+"$root/bin/contract.py" "$work/allprobes.toml" >/dev/null ||
+  { printf 'FAIL a contract setting all five new limit keys failed to load\n'; fail=1; }
+check "unset limits (min_free_tmp_mb etc) still fall back to their own defaults" \
+  "128" "$(read_key "$work/full.toml" MIN_FREE_TMP_MB)"
+
 # A target with no deployment. `deploy` absent means merged is done, and the
 # keys must still be EMITTED empty -- a consumer detects failure by counting
 # fields, so an omitted key reads as a config that would not load.
