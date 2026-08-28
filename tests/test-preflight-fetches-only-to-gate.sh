@@ -32,46 +32,27 @@
 #      checkout against `origin/main`. Re-adding either is re-adding a fetch
 #      nobody reads; if a consumer ever appears, this case is where to argue it.
 #
-# This runs in CI's Operations job, which globs `ops/tests/*.sh` against a full
-# checkout. It is not part of `just test-all`, so the `.claude/` path it needs
-# is never asked of mango's live checkout, which deliberately has none.
+# This runs against a full checkout, via tests/run-all.sh (Task 9 wires this
+# into CI; see docs/plans/2026-08-27-foreman-layer-1.md).
 
 set -euo pipefail
 
-repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
-# Assembled from a stem rather than written as one literal, and that is not
-# fussiness. `backend/tests/test_design_invariants.py` exempts `preflight.py`
-# from its symbol check because the file is tracked under `.claude/`, which
-# `ops/deploy-mango.sh` strips from the live checkout -- so the symbol genuinely
-# does not resolve on the tree the deploy gate runs against. A literal in this
-# file, which lives under `ops/` and is inside that suite's search roots, would
-# resolve it anyway and retire the exemption: the invariant would then be
-# satisfied by this harness *mentioning* the script, on a tree with no copy of
-# it. `ops/tests/test-design-invariants-without-claude.sh` catches exactly that,
-# and did catch it here.
-#
-# The nearest precedent is `reconcile.py`, which resolved against a synthetic
-# fixture name in `ops/tests/test-check-syntax.sh` -- see the BOARD_FILES
-# comment in `backend/tests/test_design_invariants.py`. That one was repaired by
-# renaming the fixture to `fixture.sh`, because the string there named nothing
-# in particular. This one cannot be: the harness genuinely needs to run that
-# script, so the reference has to survive and only its spelling can move.
-#
-# Do not "simplify" this back to a literal. Two checks will go red if you do,
-# and the second one will go red on the mango deploy.
-board_dir="$repo_root/.claude/skills/board"
-preflight_stem="preflight"
-preflight="$board_dir/$preflight_stem.py"
+board_dir="$repo_root/skills/board"
+preflight="$board_dir/preflight.py"
+
+# shellcheck source=lib/instance-fixture.sh
+source "$repo_root/tests/lib/instance-fixture.sh"
 
 [[ -x "$preflight" ]] || {
   echo "FAIL: $preflight is missing or not executable" >&2
   exit 1
 }
 
-# Scratch goes outside `/tmp`, and the path is asked of `ops/tmp-dir.sh` rather
-# than worked out here. See design/build_system.md, invariant 10.
-tmp_root="$("$repo_root/ops/tmp-dir.sh")"
+# The scratch root is asked of bin/tmp-dir.sh, never worked out here -- see
+# bin/tmp-dir.sh's own header for why one derivation has to stay singular.
+tmp_root="$("$repo_root/bin/tmp-dir.sh")"
 mkdir -p "$tmp_root"
 export TMPDIR="$tmp_root"
 
@@ -88,25 +69,20 @@ git_q() {
     -c commit.gpgsign=false -c init.defaultBranch=main "$@"
 }
 
-# `config.sh` asks `$REPO/ops/tmp-dir.sh` for the scratch root, so a fixture
-# checkout is not just a git repo -- it has to be shaped enough like this one to
-# answer that. The real script is copied in rather than stubbed: a stub is a
-# second derivation of the very path `ops/tests/test-tmp-dir.sh` exists to keep
-# singular.
-plant_repo_shape() {
-  local root="$1"
-  mkdir -p "$root/ops"
-  cp "$repo_root/ops/tmp-dir.sh" "$root/ops/tmp-dir.sh"
-  chmod +x "$root/ops/tmp-dir.sh"
-}
+# `preflight.py` shells out to config.sh, which since Task 2/3 requires a
+# FOREMAN_INSTANCE and an instance directory declaring a REPO whose board.toml
+# passes bin/contract.py -- regardless of what REPO is overridden to per call
+# below. One fixture instance, reused for every fixture checkout in this file.
+inst_home="$work_dir/foreman-home"
+fixture_add_instance "$inst_home" fixture
 
 origin="$work_dir/origin.git"
 seed="$work_dir/seed"
 git_q init -q --bare "$origin"
 git_q init -q -b main "$seed"
 echo "first" > "$seed/file.txt"
-plant_repo_shape "$seed"
-git_q -C "$seed" add file.txt ops/tmp-dir.sh
+fixture_board_toml "$seed"
+git_q -C "$seed" add file.txt board.toml
 git_q -C "$seed" commit -q -m "Seed"
 git_q -C "$seed" remote add origin "$origin"
 git_q -C "$seed" push -q origin main
@@ -139,11 +115,11 @@ run_preflight() {
   [[ -z "$mode" ]] || flags=("$mode")
   : > "$work_dir/git.log"
   out="$(
-    REPO="$repo" \
+    REPO="$repo" HOME="$inst_home" FOREMAN_INSTANCE=fixture \
     PATH="$shim_dir:$PATH" GIT_SHIM_LOG="$work_dir/git.log" \
     QUICK_PROBE_MB=1 PROBE_TMP_MB=1 PROBE_REPO_MB=1 \
     MIN_FREE_TMP_MB=1 MIN_FREE_REPO_MB=1 \
-    "$preflight" "${flags[@]}" 2>"$work_dir/preflight.err"
+    "$preflight" ${flags[@]+"${flags[@]}"} 2>"$work_dir/preflight.err"
   )" || status=$?
   [[ -n "$out" ]] || {
     echo "  preflight stderr:" >&2
