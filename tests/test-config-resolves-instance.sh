@@ -41,6 +41,17 @@ check "contract limits reach config"     "3"           "$(ask MAX_CONCURRENT)"
 check "ids reach config"                 "team-uuid"   "$(ask LINEAR_TEAM_ID)"
 check "env beats contract"               "make fast"   "$(ask TEST_COMMAND TEST_COMMAND='make fast')"
 check "env beats ids"                    "other"       "$(ask LINEAR_TEAM_ID LINEAR_TEAM_ID=other)"
+
+# `-` and not `:-`, in BOTH loaders. `env VAR=` sets VAR in the environment to
+# the empty string -- it is SET, just empty. `${VAR-x}` leaves a set-but-empty
+# VAR alone; `${VAR:-x}` treats set-but-empty the same as unset and falls back
+# to x. Get this wrong and an operator's explicit "nothing is high risk"
+# silently reinstates whatever instance.env/ids.env or the contract said
+# instead -- for HIGH_RISK_PATHS specifically, the difference between merging
+# autonomously and parking every PR for a human. These two cases fail loudly
+# under `:-` and pass under `-`; see task-3-decisions.md section 5.
+check "explicit empty env beats ids (not :-)"      ""  "$(ask LINEAR_TEAM_ID LINEAR_TEAM_ID=)"
+check "explicit empty env beats contract (not :-)" ""  "$(ask TEST_COMMAND TEST_COMMAND=)"
 check "instance name is exported"        "demo"        "$(ask INSTANCE)"
 
 # REPO must NOT be the foreman checkout. This is the bug the change exists to
