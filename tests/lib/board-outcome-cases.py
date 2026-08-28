@@ -1,11 +1,16 @@
 #!/usr/bin/env python3
 """What the board concludes from `gh`, without asking `gh` anything.
 
-Run by `ops/tests/test-board-deploy-outcomes.sh`, which owns the description of
+Run by `tests/test-board-deploy-outcomes.sh`, which owns the description of
 why these cases exist. Every case replaces `reconcile.run` and
 `reconcile.run_json` outright, so nothing here touches the network, a checkout,
 or GitHub — the subject is the *reasoning*, and the reasoning is what has been
 wrong. Each defect below shipped and was found by a reviewer or by production.
+
+Importing `reconcile` shells out to `config.sh`, which since Task 2/3 refuses
+to load without a FOREMAN_INSTANCE and an instance directory declaring a
+REPO whose board.toml passes `bin/contract.py`. The caller sets that up
+(see tests/lib/instance-fixture.sh) before running this file.
 """
 
 from __future__ import annotations
@@ -16,9 +21,9 @@ import os
 import sys
 from contextlib import redirect_stdout
 
-HERE = os.path.dirname(os.path.abspath(__file__))          # ops/tests/lib
-REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(HERE)))
-BOARD = os.path.join(REPO_ROOT, ".claude", "skills", "board")
+HERE = os.path.dirname(os.path.abspath(__file__))          # tests/lib
+REPO_ROOT = os.path.dirname(os.path.dirname(HERE))
+BOARD = os.path.join(REPO_ROOT, "skills", "board")
 sys.path.insert(0, BOARD)
 
 import reconcile  # noqa: E402

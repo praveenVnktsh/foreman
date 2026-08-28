@@ -21,8 +21,11 @@
 
 set -euo pipefail
 
-repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# shellcheck source=lib/instance-fixture.sh
+source "$here/lib/instance-fixture.sh"
 
 work_dir="$(mktemp -d)"
 trap 'rm -rf "$work_dir"' EXIT
@@ -32,8 +35,21 @@ fail() {
   exit 1
 }
 
+# `reconcile` (imported by both board-outcome-cases.py and waitfor.py) shells
+# out to config.sh at import time, which since Task 2/3 requires a
+# FOREMAN_INSTANCE and an instance declaring a REPO whose board.toml loads.
+# Nothing below reads REPO or the contract's values -- every gh/git call is
+# stubbed -- so one fixture target and one instance, reused everywhere in this
+# file, is enough.
+fixture_repo="$work_dir/target"
+mkdir -p "$fixture_repo"
+fixture_board_toml "$fixture_repo"
+py_home="$work_dir/py-home"
+fixture_add_instance "$py_home" demo "$fixture_repo"
+
 echo "==> what the board concludes from gh, without asking gh"
-python3 "$here/lib/board-outcome-cases.py" || fail "board-outcome-cases.py"
+HOME="$py_home" FOREMAN_INSTANCE=demo python3 "$here/lib/board-outcome-cases.py" \
+  || fail "board-outcome-cases.py"
 
 # --- waitfor's exit codes at the command line --------------------------------
 #
@@ -42,17 +58,18 @@ python3 "$here/lib/board-outcome-cases.py" || fail "board-outcome-cases.py"
 # 2 as "the deploy failed" would report a broken production, with a run URL from
 # a verdict that was never printed, on nothing worse than a typo.
 
-waitfor="$repo_root/.claude/skills/board/waitfor.py"
+waitfor="$repo_root/skills/board/waitfor.py"
+ask_waitfor() { HOME="$py_home" FOREMAN_INSTANCE=demo "$waitfor" "$@"; }
 
 echo "==> an empty --sha is a bad invocation, not a settled outcome"
 status=0
-out="$("$waitfor" deploy --sha "" 2>/dev/null)" || status=$?
+out="$(ask_waitfor deploy --sha "" 2>/dev/null)" || status=$?
 [[ "$status" -eq 2 ]] || fail "empty --sha: expected exit 2, got $status"
 [[ -z "$out" ]] || fail "empty --sha printed a verdict: $out"
 
 echo "==> so is a missing --sha"
 status=0
-out="$("$waitfor" deploy --timeout 5 2>/dev/null)" || status=$?
+out="$(ask_waitfor deploy --timeout 5 2>/dev/null)" || status=$?
 [[ "$status" -eq 2 ]] || fail "missing --sha: expected exit 2, got $status"
 [[ -z "$out" ]] || fail "missing --sha printed a verdict: $out"
 
@@ -82,14 +99,19 @@ stub_claude() {
     echo 'exit 0'
   } >"$home/.local/bin/claude"
   chmod +x "$home/.local/bin/claude"
+  # supervise.sh sources config.sh too, so this HOME needs the same instance
+  # scaffolding as the python cases above -- reusing the same fixture target,
+  # since supervise.sh's config.sh load doesn't care what REPO points to
+  # either (DRY RUN never reaches it beyond the log line).
+  fixture_add_instance "$home" demo "$fixture_repo"
   echo "$home"
 }
 
 supervise() {
   # DRY RUN so a misjudgement prints instead of spawning a real agent, and a
   # BOARD_HOME of its own so a lock file never lands in the real one.
-  HOME="$1" BOARD_DRY_RUN=1 BOARD_HOME="$work_dir/board-home" \
-    "$repo_root/.claude/skills/board/supervise.sh" 2>&1 || true
+  HOME="$1" FOREMAN_INSTANCE=demo BOARD_DRY_RUN=1 BOARD_HOME="$work_dir/board-home" \
+    "$repo_root/skills/board/supervise.sh" 2>&1 || true
 }
 
 echo "==> a registry that is a JSON object is unreadable, not empty"
