@@ -21,8 +21,8 @@ WHY 3 AND NOT 2. Exit 2 is argparse's own code for a usage error, and this file
 returns it for an unusable invocation too. Both of those print NOTHING on
 stdout, so a settled-and-failed code of 2 would let a mistyped command — an
 empty shell variable that got word-split away is enough — read as "the deploy
-failed", reported to Praveen as a broken production with a run URL that does not
-exist. Every exit this file owns is: 0 satisfied, 1 budget expired, 3 settled
+failed", reported to the operator as a broken production with a run URL that
+does not exist. Every exit this file owns is: 0 satisfied, 1 budget expired, 3 settled
 and unsatisfied, 2 you called it wrong. Only 0, 1 and 3 print a verdict.
 
 WHY THIS EXISTS. A tick used to end the instant it dispatched something, so a
@@ -128,7 +128,7 @@ def deploy_state(sha: str) -> dict:
     What stops the wait is `terminal` on the verdict, and `done` is reserved for
     the one outcome that means the commit is live. A deploy that ran and BROKE is
     neither: `skipped` is the stand-down this waits through, `failure` is
-    ops/deploy-mango.sh failing on mango, and reporting the second as satisfied
+    the deploy script failing on the deploy host, and reporting the second as satisfied
     said "deployed" about a production that is broken. reconcile now sees that on
     a DESCENDANT's run too, which is where it always actually appears — the
     overtaken merge's own run stands down, and the failure belongs to whoever
@@ -251,7 +251,7 @@ def main() -> int:
         # so the tick that just merged can reconcile with `merge_commit: ""` and
         # pass it straight through here — and `deploy_verdict("")` is terminal,
         # which would have exited "settled and not deployed" and had the tick
-        # report a perfectly healthy deploy to Praveen as a broken production.
+        # report a perfectly healthy deploy to the operator as a broken production.
         # Refused as a usage error: reconcile again next pass, by which time the
         # merge commit exists.
         if not args.sha.strip():

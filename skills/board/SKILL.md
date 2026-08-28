@@ -1,15 +1,16 @@
 ---
 name: board
-description: Run the Linear board — dispatch coding agents for cards Praveen has picked up, review their diffs adversarially, merge what is safe, and move the cards. Use when asked to run the board, work the backlog, or when fired on a schedule.
+description: Run the Linear board — dispatch coding agents for cards the operator has picked up, review their diffs adversarially, merge what is safe, and move the cards. Use when asked to run the board, work the backlog, or when fired on a schedule.
 ---
 
 # Board
 
-Linear is the control plane. **Praveen decides what gets built** by moving a card
-from `Backlog` into `Todo`. That move is the dispatch authorisation. This
-skill does everything after it.
+Linear is the control plane. **The operator decides what gets built** by moving
+a card from `Backlog` into `Todo`. That move is the dispatch authorisation.
+This skill does everything after it.
 
-He is usually not present when this runs. Nothing here may wait for him.
+The operator is usually not present when this runs. Nothing here may wait for
+them.
 
 You are the tick. You hold no state. Everything you need, you re-derive:
 
@@ -19,7 +20,7 @@ You are the tick. You hold no state. Everything you need, you re-derive:
 | Does the code exist, is it green, is it merged? | `gh`, `git` |
 | Is an agent still alive? | `claude agents --json --all` |
 | Why did a dead agent die? | `reconcile.py` → `death` |
-| What happened on earlier ticks? | `~/.murmr-board/cards/<T>/history.jsonl` |
+| What happened on earlier ticks? | `$BOARD_HOME/cards/<T>/history.jsonl` |
 | Can this machine build at all? | `preflight.py` |
 | What does the code actually say? | `evidence.sh main <path>` / `evidence.sh pr <n> …` |
 
@@ -32,7 +33,7 @@ to be right about. Never answer it by reading a file in `$REPO`, and never by
 guaranteed to have refreshed since the tick's own last merge. `evidence.sh`
 fetches, then answers. See [Refuting a blocking finding](#refuting-a-blocking-finding).
 
-**The sidecar under `~/.murmr-board/` is a cache, never truth.** Delete it and the
+**The sidecar under `$BOARD_HOME` is a cache, never truth.** Delete it and the
 next tick must still reconstruct every card's position from Linear + `gh` +
 `claude agents`. If you ever find yourself needing a fact that exists *only* in
 the sidecar, the design has drifted — say so in the report.
@@ -87,38 +88,44 @@ from wedging every instance on the machine forever.
 
 ## Scope
 
-Team **PRA** (`Praveenvnktsh`) `76b6d7f6-2d25-4566-9429-0273a80398d9`, project
-**`murmr.`** `f76b8de2-663a-4a10-8fa0-107f8ee0a695` — the trailing period is part
-of the name.
+Team and project come from `board.toml`'s `[linear]` table, by name — never
+hardcoded here. `resolve-ids.py` resolves those names to ids once, at
+instance-creation time, and writes them to `$INSTANCE_HOME/ids.env` as
+`LINEAR_TEAM_ID` and `LINEAR_PROJECT_ID`; `config.sh` reads them from there.
 
-**Every read and every write is filtered to that project.** A card in team PRA
-but outside `murmr.` is none of your business: do not list it, dispatch it,
-comment on it or move it.
+**Every read and every write is filtered to that project.** A card in the
+configured team but outside the configured project is none of your business:
+do not list it, dispatch it, comment on it or move it.
 
 ## Labels
 
-| Label | ID | Who sets it | Means |
+| Label | Env var (`ids.env`) | Who sets it | Means |
 |---|---|---|---|
-| `follow-up` | `db821df7-…` | you | you wrote this card, he didn't |
-| `follow-ups-written` | `59b8152f-…` | you | already emitted follow-ups; never again |
-| `needs-merge` | `5aeb4ffd-…` | you | green and reviewed, high-risk — **his** merge |
-| `board-failed` | `e17b86be-…` | you | out of attempts, back in `Backlog`, needs re-triage |
+| `follow-up` | `LABEL_FOLLOW_UP` | you | you wrote this card, the operator didn't |
+| `follow-ups-written` | `LABEL_FOLLOW_UPS_WRITTEN` | you | already emitted follow-ups; never again |
+| `needs-merge` | `LABEL_NEEDS_MERGE` | you | green and reviewed, high-risk — **the operator's** merge |
+| `board-failed` | `LABEL_BOARD_FAILED` | you | out of attempts, back in `Backlog`, needs re-triage |
 
-`Bug` / `Feature` / `Improvement` are his taxonomy. Copy the parent card's one
-onto a follow-up when it still applies; never invent one.
+These four are the ones the board owns and writes itself; `resolve-ids.py`
+creates any that do not already exist on the team, and writes their ids into
+`ids.env` alongside the state ids below. Whatever other labels the target's own
+team uses for its own taxonomy belong to the operator — copy the parent card's
+one onto a follow-up when it still applies, never invent one.
 
 ## States
 
-These are the real state IDs — pass them to Linear MCP directly, never match on
-name.
+These are resolved by NAME once, at instance-creation time (`resolve-ids.py`),
+and moved by ID forever after — pass the id from `ids.env` to Linear MCP
+directly, never match on name. Renaming a column in Linear must not silently
+change which column the board is allowed to write to.
 
-| Role | Linear state | State ID | May move **in** | May move **out** |
+| Role | Env var (`ids.env`) | Linear state (by name, at resolve time) | May move **in** | May move **out** |
 |---|---|---|---|---|
-| planned | `Backlog` | `d1f37faa-caef-4607-9dbe-f456c7d8354b` | yes | **never** |
-| to-pick-up | `Todo` | `b6b17231-255c-4a11-b60b-9ff3d732daf7` | **never** | yes |
-| in-progress | `In Progress` | `4fb2fe32-5969-4a4d-9daa-f6d2d33f606f` | yes | yes |
-| in-review | `In Review` | `e72d079d-174c-4606-ab20-39024cd94cef` | yes | yes |
-| merged | `Done` | `d0e547b6-5314-4294-9c36-d356715a435e` | yes | never |
+| planned | `STATE_PLANNED` | `Backlog` | yes | **never** |
+| to-pick-up | `STATE_TO_PICK_UP` | `Todo` | **never** | yes |
+| in-progress | `STATE_IN_PROGRESS` | `In Progress` | yes | yes |
+| in-review | `STATE_IN_REVIEW` | `In Review` | yes | yes |
+| merged | `STATE_MERGED` | `Done` | yes | never |
 
 Those two **never**s are the whole design. You cannot put work into `Todo` and
 you cannot take work out of `Backlog`, so you can never authorise yourself.
@@ -165,7 +172,7 @@ must not be a dead agent's only output.
 **Why there is still a heartbeat.** Edge-triggering alone would strand cards.
 Some things no agent completion can ever report:
 
-- **Praveen moving a card `Backlog` → `Todo`.** That is the dispatch
+- **The operator moving a card `Backlog` → `Todo`.** That is the dispatch
   authorisation and no agent is involved in it.
 - **An agent killed `-9`, a reboot, a missed poll** — the edge is simply lost,
   and nothing would ever come back to say so.
@@ -174,11 +181,11 @@ The board is level-triggered by design: every tick re-derives the whole picture
 from Linear, `gh` and `claude agents`. That is what makes a lost edge survivable,
 and it is why the fallback exists rather than being tuned away.
 
-**The heartbeat is 7 minutes, at Praveen's instruction on 2026-08-02**, not the
-1200–1800s the `/loop` skill suggests by default. His reason: he adds cards
-interactively and wants them picked up reasonably quickly, and a card entering
-`Todo` is the one transition no event can report. He tried 2 minutes first and
-found it too frequent — do not tighten it back without being asked.
+**The heartbeat is 7 minutes, at the operator's instruction on 2026-08-02**, not
+the 1200–1800s the `/loop` skill suggests by default. Their reason: they add
+cards interactively and want them picked up reasonably quickly, and a card
+entering `Todo` is the one transition no event can report. They tried 2 minutes
+first and found it too frequent — do not tighten it back without being asked.
 
 This is a *fallback*, not a cadence. Nothing waits on it that the Monitor
 reports: an agent finishing wakes the board instantly whatever this is set to.
@@ -221,17 +228,17 @@ cron watchdog below instead of a session loop.
 Cron runs a watchdog — never a tick:
 
 ```bash
-*/10 * * * * $HOME/.claude/skills/board/supervise.sh >> $HOME/.murmr-board/supervise.log 2>&1
+*/10 * * * * FOREMAN_INSTANCE=<instance> $HOME/.claude/skills/board/supervise.sh >> $HOME/.foreman/instances/<instance>/supervise.log 2>&1
 ```
 
 **The redirect is the fragile part of that line, not the script.** `>>` is
 performed by the shell *before* `supervise.sh` runs, so on a machine where
-`~/.murmr-board/` does not exist yet the redirect fails and the script never
+`$INSTANCE_HOME` does not exist yet the redirect fails and the script never
 executes — defeating the `mkdir -p "$BOARD_HOME"` inside it, which was added for
 exactly this case. Create the directory once when installing the entry:
 
 ```bash
-mkdir -p "$HOME/.murmr-board"
+mkdir -p "$HOME/.foreman/instances/<instance>"
 ```
 
 Or drop the redirect and let cron mail the output. What must not happen is a
@@ -460,7 +467,7 @@ gh run rerun <run_id>        # exactly what `--main-ci` prints as `rerun`
   already passed" and start dispatching into the `main` this tick just judged
   broken. The board is stood down from the failure until the re-run concludes.
 - **`gh run rerun`, never `gh workflow run CI --ref main`.** A dispatched run
-  carries `event: workflow_dispatch`, and `deploy-mango.yml` gates its job on
+  carries `event: workflow_dispatch`, and the deploy workflow gates its job on
   `workflow_run.event == 'push'` — so that run would go green and deploy
   nothing, leaving `main` tested and production still on the old revision. A
   re-run keeps the original push event, so a recovered `main` deploys itself.
@@ -469,8 +476,8 @@ gh run rerun <run_id>        # exactly what `--main-ci` prints as `rerun`
 
 Both halves matter, and they cost more the wider the board fans out:
 
-- **Merging into a red `main`** produces a red merge commit. `deploy-mango` only
-  runs when CI on `main` concludes success, so the deploy is *skipped* — not
+- **Merging into a red `main`** produces a red merge commit. The deploy workflow
+  only runs when CI on `main` concludes success, so the deploy is *skipped* — not
   failed — and the card can never reach `Done` however green its own PR was.
 - **Dispatching onto a red `main`** hands an agent a branch that fails CI for a
   reason with nothing to do with its ticket. Step 2 reads a failing required
@@ -486,11 +493,12 @@ the conflict was semantic rather than textual — so nothing GitHub reports woul
 have caught it. Only reading `main`'s own CI does.
 
 This exists because of 2026-08-02. `/tmp` was a tmpfs mounted `usrquota` and the
-user was over allowance. Two PRA-28 build attempts died mid-`just test-all` with
-no branch, no pull request and nothing in the transcript but a command that never
-returned — and the second was dispatched into the identical broken environment,
-because a tick that only looks at Linear and `gh` cannot see a full disk. The
-card was one tick from `board-failed` for a fault that had nothing to do with it.
+user was over allowance. Two consecutive build attempts on one card died
+mid-test-run with no branch, no pull request and nothing in the transcript but a
+command that never returned — and the second was dispatched into the identical
+broken environment, because a tick that only looks at Linear and `gh` cannot see
+a full disk. The card was one tick from `board-failed` for a fault that had
+nothing to do with it.
 
 **`df` would not have caught it.** It reported 1.5G available while every write
 returned `EDQUOT`: the filesystem had room, the user did not. `preflight.py`
@@ -499,8 +507,8 @@ whether you may use a disk is to use it.
 
 ### 1. Adopt
 
-Read every card in `Todo`, `In Progress`, `In Review` **in project `murmr.`**
-from Linear — filter by project ID, not by scanning the team. For anything in
+Read every card in `Todo`, `In Progress`, `In Review` **in the configured
+project** from Linear — filter by project ID, not by scanning the team. For anything in
 `Todo` you might dispatch, read it again with `includeRelations: true`; step 6
 gates on `blockedBy` and `list_issues` cannot return it. Then:
 
@@ -612,7 +620,7 @@ recreate the worktree by hand to save a resume.
 
 ### 3. Reconcile `In Review`
 
-Each reviewer writes `~/.murmr-board/cards/<T>/reviews/<round><slot>.json`:
+Each reviewer writes `$BOARD_HOME/cards/<T>/reviews/<round><slot>.json`:
 
 ```json
 {"findings":[{"severity":"blocking|warning|note","file":"…","summary":"…","failure":"…"}]}
@@ -658,7 +666,7 @@ command for this, and it fetches before it answers:
 
 ```bash
 B=~/.claude/skills/board
-$B/evidence.sh main ops/deploy-mango.sh | grep -n '\.claude'   # what main says now
+$B/evidence.sh main ops/deploy.sh | grep -n '\.claude'         # what main says now
 $B/evidence.sh pr <n>                                          # what the diff changes
 $B/evidence.sh pr <n> <path>                                   # what the head says now
 ```
@@ -697,9 +705,9 @@ dispatches nothing after it reads an `origin/main` from before every merge
 
 ```text
 12:00  the checkout was last fetched; refs/remotes/origin/main = X
-12:03  pass 1 merges PR #A, adding `--exclude='.claude/'` to ops/deploy-mango.sh
+12:03  pass 1 merges PR #A, adding `--exclude='.claude/'` to ops/deploy.sh
 12:07  pass 3 weighs a blocking finding on PR #B saying the deploy strips
-       `.claude/`, and runs `git show origin/main:ops/deploy-mango.sh`
+       `.claude/`, and runs `git show origin/main:ops/deploy.sh`
   ->   reads blob X, greps nothing, refutes a correct finding, merges
 ```
 
@@ -725,7 +733,7 @@ still stand, and they are why the fix has to be per-read:
 The audit property is the third reason, and only the helper earns it: a
 transcript carrying `evidence.sh main …` and its `evidence:` line records the
 exact SHA the bytes came from, so the next tick can check whether that SHA was
-new enough. `grep -n … ops/deploy-mango.sh` records nothing, which is why the
+new enough. `grep -n … ops/deploy.sh` records nothing, which is why the
 #159 overrule read as sound for half an hour.
 
 **The bar, all four:**
@@ -741,11 +749,12 @@ new enough. `grep -n … ops/deploy-mango.sh` records nothing, which is why the
    you have is a search that found nothing. Uncertainty resolves toward the
    reviewer: send the card back and let the build agent answer it.
 4. **A claim about somewhere else cannot be settled by reading here.** If the
-   finding is about what happens on mango, in CI, or during the deploy, only the
-   thing that runs there settles it — `ops/tests/`, a CI job, or the deploy
-   script's own text. The half-hour outage on 2026-08-03 was exactly this: the
-   claim was about `just test-all` on a checkout with no `.claude/`, and no read
-   of any file could confirm it because nothing ran that tree.
+   finding is about what happens on the deploy host, in CI, or during the
+   deploy, only the thing that runs there settles it — `ops/tests/`, a CI job,
+   or the deploy script's own text. The half-hour outage on 2026-08-03 was
+   exactly this: the claim was about the target's own test run on a checkout
+   with no `.claude/`, and no read of any file could confirm it because nothing
+   ran that tree.
 
 **Say it on the card, or you did not do it.** An overrule that is not written
 down cannot be checked by the next tick. Four things, and the third is the one
@@ -763,13 +772,13 @@ it is a claim, and the next tick should read it as one.
 
 This exists because of #159 on 2026-08-03. A reviewer found, correctly, that the
 diff made `sweep.sh` and `preflight.py` resolvable only through
-`.claude/skills/board`, which `ops/deploy-mango.sh` keeps off the live checkout —
-so `just test-all`, the deploy gate, would fail on mango while CI stayed green.
-The tick ran `grep -n "\.claude" ops/deploy-mango.sh` **in its own tree**, found
-nothing, and merged. The tree was 169 commits behind and the exclusion had landed
-after that commit. The deploy failed with the reviewer's sentence almost verbatim
-and `main` was undeployable until #161 reverted it. The file was real, the path
-was right, and the answer was still false.
+`.claude/skills/board`, which `ops/deploy.sh` keeps off the live checkout —
+so the target's own test run, the deploy gate, would fail on the deploy host
+while CI stayed green. The tick ran `grep -n "\.claude" ops/deploy.sh` **in its
+own tree**, found nothing, and merged. The tree was 169 commits behind and the
+exclusion had landed after that commit. The deploy failed with the reviewer's
+sentence almost verbatim and `main` was undeployable until #161 reverted it.
+The file was real, the path was right, and the answer was still false.
 
 ### 4. Merge, split by risk
 
@@ -778,8 +787,8 @@ was right, and the answer was still false.
 
 - **`risk: high`** — currently **migrations only**
   (`backend/app/events/migrations/`) → leave the card in `In Review`, add
-  `needs-merge`, comment naming the files, and say he decides. A parked card does
-  **not** hold a concurrency slot.
+  `needs-merge`, comment naming the files, and say the operator decides. A
+  parked card does **not** hold a concurrency slot.
 - **`risk: unknown`** — `gh pr diff` failed, so **the diff was never read** and
   nothing is known about what it touches. Merge nothing. Leave the card where it
   is, say the diff could not be read, and look again next tick; it usually reads
@@ -792,12 +801,13 @@ was right, and the answer was still false.
 Everything else merges autonomously, including health, finance, sensors, `ops/`
 and `.github/workflows/`. "Everything else" means every *low-risk* diff — it is
 not a catch-all for the two states above, both of which stop. That is deliberate: those are a revert and a redeploy
-away, whereas a migration runs against mango's live SQLite and mutates the ledger
-in place, so reverting the pull request does not undo it.
+away, whereas a migration runs against the deploy host's live database and
+mutates the ledger in place, so reverting the pull request does not undo it.
 
 When you merge something that touches a sensitive area, **say so on the card** —
-name the paths in the comment even though you merged. He should be able to read
-the blast radius of a night's merges without opening a single diff.
+name the paths in the comment even though you merged. The operator should be
+able to read the blast radius of a night's merges without opening a single
+diff.
 
 Before merging, three things that make a green PR lie:
 
@@ -828,11 +838,12 @@ each one:
 2. `commit_on_main: true`,
 3. `deploy.verified: true`.
 
-Point 3 is the `Deploy and verify murmr` **step** concluding success — not the
-job. A stale-revision stand-down concludes `success` at the job level, so
-reading the job calls a non-deploy a deploy. A good deploy also logs about nine
-services as `Failed with result 'exit-code'`; those are the *old* processes
-exiting during the restart. Benign.
+Point 3 is `DEPLOY_STEP` (`config.sh`, e.g. `Deploy and verify`) — the **step**
+concluding success, not the job. A stale-revision stand-down concludes
+`success` at the job level, so reading the job calls a non-deploy a deploy. A
+good deploy on a host running under systemd may also log several old services
+as `Failed with result 'exit-code'`; those are the *old* processes exiting
+during the restart. Benign.
 
 **Having merged, wait for the deploy** — `waitfor.py deploy --sha <merge-sha>` —
 and move the card to `Done` in this same tick once all three hold. The deploy is
@@ -871,19 +882,21 @@ the next pass, by which time the merge commit exists.
 
 Three ways to end up at exit 3, and only the first two are about production:
 
-- `deploy-failed` — `ops/deploy-mango.sh` ran on mango and broke. **The merge is
-  on `main` and production is not running it**, which is the state Praveen has to
-  hear about first. Say which commit, quote the run URL, and stop merging further
-  cards this tick — the next merge deploys on top of a machine in an unknown
-  state. This is also reported for the deploy of a *descendant* that carries this
-  commit, which is where it usually appears: an overtaken merge's own run always
-  stands down, so the run that broke belongs to whoever overtook it.
-- `deploy-never-ran` — the run completed with no `Deploy and verify murmr` step
-  at all, so the deploy job was skipped in its entirety. That is what a red CI
-  run on `main` produces. Step 0's guard is the thing that fixes it; say so and
-  leave the card.
+- `deploy-failed` — the deploy script ran on the deploy host and broke. **The
+  merge is on `main` and production is not running it**, which is the state the
+  operator has to hear about first. Say which commit, quote the run URL, and
+  stop merging further cards this tick — the next merge deploys on top of a
+  machine in an unknown state. This is also reported for the deploy of a
+  *descendant* that carries this commit, which is where it usually appears: an
+  overtaken merge's own run always stands down, so the run that broke belongs
+  to whoever overtook it.
+- `deploy-never-ran` — the run completed with no `DEPLOY_STEP` at all, so the
+  deploy job was skipped in its entirety. That is what a red CI run on `main`
+  produces. Step 0's guard is the thing that fixes it; say so and leave the
+  card.
 - `not-on-main` — the merge commit is not on `main` at all, so no deploy will
-  ever carry it. Something is wrong with what was merged, not with mango.
+  ever carry it. Something is wrong with what was merged, not with the deploy
+  host.
 
 A deploy that is merely *stale-revision skipped* is none of these: it is the
 normal stand-down of an overtaken merge, the descendant's deploy carries the
@@ -892,7 +905,7 @@ commit, and the wait keeps going until its budget runs out.
 ### 6. Dispatch
 
 Free slots = `MAX_CONCURRENT` − (cards in `In Progress`) − (cards in `In Review`
-with a live reviewer). Parked-for-Praveen cards do not count.
+with a live reviewer). Parked-for-the-operator cards do not count.
 
 **Recount here, after steps 2–5 have run.** A card that reached `Done` earlier in
 this same tick has already released its slot, and the whole point of running the
@@ -929,11 +942,12 @@ merged but failed to deploy is building on something that is not there.
   that could actually run.
 - **A blocker in `Canceled` or `Duplicate` blocks forever.** Never auto-satisfy
   it: a cancelled blocker may mean the dependent is now wrong, and guessing is
-  worse than waiting. Name it in the report so Praveen can drop the relation.
+  worse than waiting. Name it in the report so the operator can drop the
+  relation.
 - **A cycle stalls every card in it.** If nothing in `Todo` is dispatchable and
   at least one card is blocked by another card in `Todo`, say so plainly rather
   than reporting a quiet tick — a quiet tick and a deadlocked one look identical
-  from the outside, and only one of them needs him.
+  from the outside, and only one of them needs the operator.
 
 Ordering within what is left is unchanged. `blocks` needs no handling: the
 gating always happens on the dependent's side.
@@ -957,7 +971,7 @@ them with slots `a`, `b`, …:
 
 ```bash
 $B/brief.py review --ticket <T> --pr <n> --round <r> \
-  --out ~/.murmr-board/cards/<T>/reviews/<r>a.json > /tmp/r.md
+  --out $BOARD_HOME/cards/<T>/reviews/<r>a.json > /tmp/r.md
 $B/dispatch.sh --ticket <T> --role review --attempt <r> --slot a \
   --ref <headRefOid> --prompt-file /tmp/r.md
 ```
@@ -971,14 +985,14 @@ there was nothing blocking — not that you should improvise one.
 
 For cards that entered `Done` **this tick** only, and only if the card has no
 `follow-ups-written` label yet: write at most `MAX_FOLLOWUPS` cards into
-`Backlog`, in project `murmr.`, each labelled `follow-up` and linking the parent
-card and its PR. Then add `follow-ups-written` to the parent so a repeated tick
-cannot re-emit them.
+`Backlog`, in the configured project, each labelled `follow-up` and linking the
+parent card and its PR. Then add `follow-ups-written` to the parent so a
+repeated tick cannot re-emit them.
 
 Each follow-up must cite concrete evidence — a review `warning` or `note` that
 did not block, a TODO the agent left, a test gap it named, or a blocker it
-worked around. **No speculative feature ideation.** Feature cards are his to
-write. If nothing qualifies, write nothing.
+worked around. **No speculative feature ideation.** Feature cards are the
+operator's to write. If nothing qualifies, write nothing.
 
 Never write into `Todo`.
 
@@ -1018,7 +1032,7 @@ Nothing else. A tick that changed nothing says so in one line and stops.
 
 - **The lock is the card.** Move to `In Progress` before spawning, always.
 - **Never write into `Todo`, never move anything out of `Backlog`.** Those
-  are his.
+  are the operator's.
 - **Never move a card to `Done` on a claim.** An agent will report a green PR it
   never opened. Here `Done` means merged, on `main`, and deployed — all three
   observed, never reported.
@@ -1031,13 +1045,15 @@ Nothing else. A tick that changed nothing says so in one line and stops.
   way, and the overrule goes on the card with the command and the `evidence:` SHA
   that produced it — a search that found nothing is a failed search, not a
   refutation.
-- **Migrations park.** A diff touching `backend/app/events/migrations/` is his to
-  merge however green it is, because applying it to the live ledger is not
-  reversible. `config.sh` holds the list; do not widen or narrow it yourself.
+- **Migrations park.** A diff touching `backend/app/events/migrations/` is the
+  operator's to merge however green it is, because applying it to the live
+  ledger is not reversible. `config.sh` holds the list; do not widen or narrow
+  it yourself.
 - **A failing card goes back to `Backlog` with `board-failed`, never into a dead
-  end.** He re-triages it; that is what stops a card looping. If you are about to
-  send back a card that already carries `board-failed`, say so loudly in the
-  comment — it has now failed twice and the ticket is probably the problem.
+  end.** The operator re-triages it; that is what stops a card looping. If you
+  are about to send back a card that already carries `board-failed`, say so
+  loudly in the comment — it has now failed twice and the ticket is probably
+  the problem.
 - **Prove the machine can build before you dispatch into it.** Step 0 is not
   optional and its threshold is written, not queried — a free-space number can
   say 1.5G while every write fails.

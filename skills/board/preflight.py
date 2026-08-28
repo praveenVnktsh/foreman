@@ -5,7 +5,7 @@
     preflight.py --quiet    # same exit code, no output unless unfit
 
 The board lost two consecutive PRA-28 build attempts on 2026-08-02 to a `/tmp`
-that was over its user quota. Both agents died mid-`just test-all` with no error
+that was over its user quota. Both agents died mid-test-run with no error
 in the transcript, no pull request, and no branch. Each death consumed an attempt
 budget meant for a bad *ticket*, and the second attempt was dispatched into
 exactly the same broken environment as the first — because nothing checked.
@@ -36,10 +36,11 @@ finish, which is worse than the race it exists to prevent.
 
 WHY IT NO LONGER MEASURES STALENESS. It used to report `behind_origin_main`,
 after a tick on 2026-08-03 refuted a `blocking` finding by grepping
-`ops/deploy-mango.sh` in this checkout, 169 commits behind, and merged a change
-that broke the mango deploy. The number never fixed that, and could not: it is
-measured against `refs/remotes/origin/main`, which is the very ref the tick was
-misreading. `evidence.sh` did fix it, by fetching per read.
+`ops/deploy.sh` in this checkout, 169 commits behind, and merged a change
+that broke the deploy on the target host. The number never fixed that, and
+could not: it is measured against `refs/remotes/origin/main`, which is the
+very ref the tick was misreading. `evidence.sh` did fix it, by fetching per
+read.
 
 What was left was a number with no consumer. `dispatch.sh` reads this script's
 exit code and discards the JSON, nothing in the skill parsed the field, and

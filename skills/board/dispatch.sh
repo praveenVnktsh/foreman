@@ -43,7 +43,7 @@ PROMPT="$(cat "$PROMPT_FILE")"
 
 # Never spawn an agent into a machine that cannot build. On 2026-08-02 two
 # PRA-28 attempts were lost to a `/tmp` over its user quota: the first died
-# mid-`just test-all` leaving no branch and no pull request, and the second was
+# mid-test-run leaving no branch and no pull request, and the second was
 # dispatched into the identical broken environment because nothing looked. The
 # gate belongs here rather than only in SKILL.md so that it holds however the
 # script is called — by the tick, by a resume, or by hand.

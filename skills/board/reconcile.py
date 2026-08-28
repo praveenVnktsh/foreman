@@ -275,9 +275,10 @@ def pr_for(ticket: str) -> dict | None:
     # This folded a failed `gh pr diff` into an empty file list, and an empty
     # file list has no high-risk paths, so `risk` came out `low` — which step 4
     # merges autonomously. One transient GitHub error was therefore enough to
-    # merge a MIGRATION without Praveen, and a migration applied to mango's live
-    # SQLite is not undone by reverting the pull request. That is the one place
-    # in this file where guessing costs something irreversible.
+    # merge a MIGRATION without the operator, and a migration applied to the
+    # deploy host's live database is not undone by reverting the pull request.
+    # That is the one place in this file where guessing costs something
+    # irreversible.
     #
     # `risk: unknown` is deliberately neither value: step 4 merges only `low`
     # and parks only `high`, so an unknown risk stops the card until the diff
@@ -345,7 +346,7 @@ def _explains_better(candidate: dict, current: dict | None) -> bool:
     but two merges two minutes apart can still have their CI runs COMPLETE out
     of order -- `ci.yml` groups pull-request runs only and gives every push a
     group of its own, and one self-hosted runner serves them all, so they queue
-    rather than finish in order -- and deploy-mango is `workflow_run`-triggered.
+    rather than finish in order -- and the deploy workflow is `workflow_run`-triggered.
     That puts an older run that ran the deploy and BROKE it behind a newer one
     that merely stood down, and first-writer-wins
     then discards the failure and waits the full budget every tick forever —
@@ -370,10 +371,10 @@ def _not_deployed(r: dict, head: str, sha: str, state: str, concl: str | None) -
     Final means: this answer cannot improve by waiting. Two shapes are final and
     they are different things.
 
-      * `failure` — ops/deploy-mango.sh ran on mango and broke. Production is in
-        whatever state it left behind, and the tick must say so now.
+      * `failure` — the deploy script ran on the deploy host and broke. Production
+        is in whatever state it left behind, and the tick must say so now.
       * no DEPLOY_STEP at all — the deploy job was skipped in its entirety, which
-        is what a red CI run on `main` produces (deploy-mango.yml gates the job
+        is what a red CI run on `main` produces (the deploy workflow gates the job
         on the CI run concluding success). That run will never deploy anything.
 
     Everything else keeps the wait alive: a `skipped` STEP is the stale-revision
@@ -465,7 +466,7 @@ def deploy_verdict(sha: str) -> dict:
     # WHICH REVISION DID A RUN ACTUALLY DEPLOY?
     #
     # Not `headSha`. For a `workflow_run`-triggered workflow GitHub sets that to
-    # the branch tip at dispatch, while deploy-mango checks out DEPLOY_REVISION =
+    # the branch tip at dispatch, while the deploy workflow checks out DEPLOY_REVISION =
     # `github.event.workflow_run.head_sha`. Measured 2026-08-03: run 30764121331
     # reported headSha acd6917a and deployed dc17565 — unrelated commits. Reading
     # headSha as the deployed revision can therefore mark a card `Done` with code
@@ -522,8 +523,8 @@ def deploy_verdict(sha: str) -> dict:
             # Records why this run did not verify, without letting it contribute
             # an attribution. Which non-success it was decides everything:
             # `skipped` is a stand-down with a descendant still coming, `failure`
-            # is ops/deploy-mango.sh breaking on mango, and no step at all is the
-            # deploy job never having run. deploy_state needs to tell them apart.
+            # is the deploy script breaking on the deploy host, and no step at all
+            # is the deploy job never having run. deploy_state needs to tell them apart.
             candidate = _not_deployed(r, head, sha, state, concl)
             if _explains_better(candidate, unverified):
                 unverified = candidate

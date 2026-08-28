@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # `brief.py` used to hand every dispatched agent a prompt naming ONE specific
-# project by hand: "the murmr repository", `board/{ticket}` branches, and a
+# project by hand: "the target repository", `board/{ticket}` branches, and a
 # STANDING paragraph that never read the target's own test command or its
 # required reading. That only ever worked for the one repository it was
 # written against.
@@ -12,10 +12,15 @@
 # refusing to dispatch rather than starting an agent that will spend its whole
 # attempt discovering a broken environment.
 #
-# The fixture below is deliberately NOTHING like murmr: a made-up team key, a
-# made-up test command, made-up doc names. A passing test here proves the
-# prompt reflects THIS contract, not a hardcoded string that happens to
-# resemble a real one.
+# The fixture below is deliberately NOTHING like the project this tool was
+# extracted from: a made-up team key, a made-up test command, made-up doc
+# names. A passing test here proves the prompt reflects THIS contract, not a
+# hardcoded string that happens to resemble a real one -- including the
+# specific strings that used to leak from the project this tool grew up in,
+# checked by name below (`banned`) as a standing regression guard, which is
+# also why this one file is exempted from tests/test-no-target-specifics.sh's
+# scan rather than rewritten: the words in `banned` are the check, not leftover
+# prose.
 set -euo pipefail
 
 here="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"

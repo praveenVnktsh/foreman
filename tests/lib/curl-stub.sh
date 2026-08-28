@@ -3,7 +3,7 @@
 #
 # One copy, shared by every deploy test. There were four, byte-identical apart
 # from a comment and some unreachable trailing lines, and they had to agree with
-# `verify_*` in deploy-mango.sh -- so teaching the read-surface gate to read a
+# `verify_*` in the deploy script -- so teaching the read-surface gate to read a
 # response header broke three harnesses that were not testing headers at all.
 # Four copies of a stub that must track one script is the same hand-kept-duplicate
 # failure the system pane's rosters had.
@@ -14,8 +14,9 @@
 # exits 0 hides a bug that real curl would expose.
 #
 # `-D -` writes headers to stdout. The read-surface gate reads them, because a
-# 200 alone does not prove *murmr* answered -- a stray `python -m http.server`
-# squatted port 3015 for a month and served 200s the whole time.
+# 200 alone does not prove *the target application* answered -- a stray
+# `python -m http.server` squatted port 3015 for a month and served 200s the
+# whole time.
 #
 # `WHATSAPP_CONNECT_AFTER` models the real startup shape: a Baileys runtime
 # answers /status with 503 for a second or two after the port opens, before the
@@ -40,7 +41,7 @@ elif [[ "$url" == *":3002/health"* ]]; then
 elif [[ "$url" == *"/status"* ]]; then
   code="${WHATSAPP_STATUS:-200}"
   if [[ -n "${WHATSAPP_CONNECT_AFTER:-}" ]]; then
-    counter="${MURMR_STUB_COUNTER:?stub counter path}"
+    counter="${STUB_COUNTER:?stub counter path}"
     calls=$(( $(cat "$counter" 2>/dev/null || echo 0) + 1 ))
     echo "$calls" > "$counter"
     if (( calls > WHATSAPP_CONNECT_AFTER )); then code=200; else code=503; fi
@@ -51,8 +52,9 @@ fi
 
 if [[ "$url" == *"-D -"* ]]; then
   echo "HTTP/1.1 $code STUB"
-  # `READ_SURFACE_CSP=0` models something other than murmr holding the port: it
-  # can answer 200, but it does not send the read service's policy.
+  # `READ_SURFACE_CSP=0` models something other than the target application
+  # holding the port: it can answer 200, but it does not send the read
+  # service's policy.
   if [[ "${READ_SURFACE_CSP:-1}" != "0" ]]; then
     echo "content-security-policy: default-src 'none'; script-src 'self'"
   fi

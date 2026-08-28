@@ -124,7 +124,7 @@ World(deploy_runs=None).install()
 v = reconcile.deploy_verdict(A)
 check(not v["verified"] and not v["terminal"], "an unreadable list keeps the wait open")
 check("gh failed" in v["reason"], "it names the lookup", v["reason"])
-check("no deploy-mango" not in v["reason"],
+check("no deploy run" not in v["reason"],
       "it does not claim there is no run yet", v["reason"])
 
 print("==> a descendant's deploy that BROKE is this commit's answer, and it is final")
@@ -163,7 +163,7 @@ check("could not read" in v["reason"], "it says the run was unreadable", v["reas
 print("==> a terminal failure wins over a NEWER stand-down, whatever the list order")
 # ci.yml gives every push its own concurrency group, and one self-hosted runner
 # serves them, so CI for A and CI for B queue and can complete out of order.
-# deploy-mango is workflow_run-triggered, so BOTH deploy runs report
+# the deploy workflow is workflow_run-triggered, so BOTH deploy runs report
 # headSha = main's tip = B. The older run (id 1) checked out B
 # and broke; the newer one (id 2) stood down. First-writer-wins over a
 # newest-first list discarded the failure and waited the budget every tick —

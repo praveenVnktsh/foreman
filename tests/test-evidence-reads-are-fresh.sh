@@ -13,9 +13,9 @@
 # So the blessed command reproduced the outage it was written for:
 #
 #   12:00  step 0 fetches; refs/remotes/origin/main = X
-#   12:03  pass 1 merges a PR adding `--exclude='.claude/'` to deploy-mango.sh
+#   12:03  pass 1 merges a PR adding `--exclude='.claude/'` to deploy.sh
 #   12:07  pass 3 weighs a blocking finding claiming the deploy strips
-#          `.claude/`, runs `git show origin/main:ops/deploy-mango.sh`, reads
+#          `.claude/`, runs `git show origin/main:ops/deploy.sh`, reads
 #          blob X, greps nothing, refutes a correct finding, and merges
 #
 # A staleness number on the checkout could not catch that either -- `rev-list

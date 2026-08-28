@@ -26,9 +26,9 @@
 #
 #   12:00  step 0 runs; refs/remotes/origin/main = X
 #   12:03  pass 1 merges PR #A, which adds `--exclude='.claude/'` to
-#          ops/deploy-mango.sh; GitHub's main is now X+1
+#          ops/deploy.sh; GitHub's main is now X+1
 #   12:07  pass 3 weighs a blocking finding on PR #B saying the deploy strips
-#          `.claude/`, and runs `git show origin/main:ops/deploy-mango.sh`
+#          `.claude/`, and runs `git show origin/main:ops/deploy.sh`
 #   ->     reads blob X, greps nothing, refutes a correct finding, merges
 #
 # A staleness number on this checkout could not catch it either, which is why

@@ -4,9 +4,10 @@
 # It used to report `behind_origin_main` -- how far this checkout trailed
 # `origin/main` -- and to fetch in BOTH modes to compute it. That number was
 # added after 2026-08-03, when a tick overruled a `blocking` finding by grepping
-# `ops/deploy-mango.sh` in a checkout 169 commits behind, merged, and broke the
-# mango deploy for half an hour. It never fixed that and could not: it measures
-# against `refs/remotes/origin/main`, which is the very ref the tick misread.
+# `ops/deploy.sh` in a checkout 169 commits behind, merged, and broke the
+# deploy on the target host for half an hour. It never fixed that and could
+# not: it measures against `refs/remotes/origin/main`, which is the very ref
+# the tick misread.
 # `evidence.sh` fixed it, by fetching per read.
 #
 # What was left was a number with no consumer. `dispatch.sh` reads the exit code

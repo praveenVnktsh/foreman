@@ -15,10 +15,11 @@
 #      argument. One script of thirteen was parsed, and which one depended on
 #      directory traversal order.
 #   4. `find ops scripts .claude`, which is the same list one directory wider:
-#      it silently omitted `setup.sh` and `start_murmr.sh` at the repository
-#      root -- and every production deploy runs `setup.sh` *after* rsync has
-#      already replaced mango's tree -- and, matching on extension, it omitted
-#      `ops/git-hooks/pre-commit` and `pre-push`, which have no suffix.
+#      it silently omitted `setup.sh` and the target's own start script at the
+#      repository root -- and every production deploy runs `setup.sh` *after*
+#      rsync has already replaced the deploy host's tree -- and, matching on
+#      extension, it omitted `ops/git-hooks/pre-commit` and `pre-push`, which
+#      have no suffix.
 #
 # So the file set is `git ls-files`. Coverage is a property of the repository
 # rather than a list someone has to remember to widen, because remembering is

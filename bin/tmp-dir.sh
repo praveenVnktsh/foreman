@@ -8,7 +8,7 @@
 #
 # `/tmp` on the dev host is a tmpfs sized at half of RAM under a per-user quota
 # that refuses writes around 5.5GB, so it is RAM that competes with the agents
-# doing the work: one `just test-all` leaves ~725MB of test vaults under it, two
+# doing the work: one full test run leaves ~725MB of test vaults under it, two
 # builds died with EDQUOT mid-run, and 2.1GB of stale vaults were found sitting
 # in memory on 2026-08-02. The root disk has 336GB.
 #

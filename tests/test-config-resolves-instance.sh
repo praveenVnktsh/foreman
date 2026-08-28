@@ -111,7 +111,7 @@ else
 fi
 
 # A slash is refused too, for the same reason -- and underscores stay legal,
-# so an operator can still write `murmr_staging`.
+# so an operator can still write `target_staging`.
 if err="$(env HOME="$home" FOREMAN_INSTANCE="alpha/x" bash -c \
      ". '$root/skills/board/config.sh'" 2>&1)"; then
   printf 'FAIL an instance name containing a slash must fail\n'; fail=1
@@ -121,10 +121,10 @@ else
   printf 'FAIL error was not the invalid-name refusal: %s\n' "$err"; fail=1
 fi
 
-staging_inst="$home/.foreman/instances/murmr_staging"; mkdir -p "$staging_inst"
+staging_inst="$home/.foreman/instances/target_staging"; mkdir -p "$staging_inst"
 printf 'REPO=%s\n' "$target" >"$staging_inst/instance.env"
-check "an underscore in the instance name is legal" "murmr_staging" \
-  "$(env HOME="$home" FOREMAN_INSTANCE=murmr_staging bash -c \
+check "an underscore in the instance name is legal" "target_staging" \
+  "$(env HOME="$home" FOREMAN_INSTANCE=target_staging bash -c \
        ". '$root/skills/board/config.sh' >/dev/null; printf '%s' \"\$INSTANCE\"")"
 
 # A contract that does not load must fail the SOURCE too, loudly -- not

@@ -29,7 +29,7 @@ fi
 # regardless, but the name is constrained here rather than changing the
 # worktree delimiter -- any separator can be absorbed by an unconstrained
 # name, so the name is what actually has to be closed. Underscores stay legal
-# so `murmr_staging` is still sayable.
+# so `target_staging` is still sayable.
 if [[ ! "$INSTANCE" =~ ^[A-Za-z0-9_]+$ ]]; then
   printf 'foreman: instance name %s is invalid; only letters, digits and underscore are allowed (no hyphen, no slash)\n' "$INSTANCE" >&2
   if [[ $- == *i* ]]; then return 1; else exit 1; fi
@@ -128,7 +128,7 @@ HOST_MAX_CONCURRENT="${HOST_MAX_CONCURRENT:-4}"
 # Empty disables the backstop entirely, relying on the marker alone.
 HOST_SLOT_STALE_MINUTES="${HOST_SLOT_STALE_MINUTES:-720}"
 
-# Dispatched agents run with --dangerously-skip-permissions, at Praveen's
+# Dispatched agents run with --dangerously-skip-permissions, at the operator's
 # explicit instruction on 2026-08-01.
 #
 # `acceptEdits` cannot work here: it accepts file edits but still prompts for
@@ -140,7 +140,7 @@ HOST_SLOT_STALE_MINUTES="${HOST_SLOT_STALE_MINUTES:-720}"
 # What contains a dispatched agent is therefore NOT the permission prompt. It is:
 # the throwaway worktree it runs in, the fact that nothing merges without an
 # adversarial review, the three required checks, and migrations still parking for
-# Praveen. Weakening any of those matters much more now than it did before.
+# the operator. Weakening any of those matters much more now than it did before.
 AGENT_SKIP_PERMISSIONS="${AGENT_SKIP_PERMISSIONS:-1}"
 
 # The self-looping tick agent, and the watchdog that keeps it alive.
