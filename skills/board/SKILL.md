@@ -49,7 +49,7 @@ A default duplicated in prose is a default that is eventually wrong, so this
 table says what each knob *means* and `config.sh` says what it *is*:
 
 ```bash
-( . ~/.claude/skills/board/config.sh
+( . ~/.foreman/install/skills/board/config.sh
   printf '%-22s %s\n' MAX_CONCURRENT "$MAX_CONCURRENT" \
     MAX_BUILD_ATTEMPTS "$MAX_BUILD_ATTEMPTS" MAX_REVIEW_ROUNDS "$MAX_REVIEW_ROUNDS" \
     REVIEWERS_PER_ROUND "$REVIEWERS_PER_ROUND" STALL_MINUTES "$STALL_MINUTES" \
@@ -159,7 +159,7 @@ reasoning is real and only the writes are withheld.
 Monitor that fires the moment a dispatched agent comes back:
 
 ```bash
-Monitor(command="~/.claude/skills/board/watch-agents.py",
+Monitor(command="~/.foreman/install/skills/board/watch-agents.py",
         persistent=True, description="board agents finishing")
 ```
 
@@ -257,9 +257,9 @@ misjudged liveness, and misjudging liveness is what watchdogs do under load.
 Inspect or control it by hand:
 
 ```bash
-~/.claude/skills/board/supervise.sh --status   # what it sees, changes nothing
-~/.claude/skills/board/supervise.sh --stop     # stop ticking
-~/.claude/skills/board/supervise.sh            # start or repair now
+~/.foreman/install/skills/board/supervise.sh --status   # what it sees, changes nothing
+~/.foreman/install/skills/board/supervise.sh --stop     # stop ticking
+~/.foreman/install/skills/board/supervise.sh            # start or repair now
 claude attach <id>                             # watch a tick live
 ```
 
@@ -337,7 +337,7 @@ about the world prints a verdict on stdout; if there is no JSON, the tick learne
 nothing except that the command was wrong.
 
 ```bash
-B=~/.claude/skills/board
+B=~/.foreman/install/skills/board
 $B/waitfor.py reviews --ticket <T> --round <r> --slots a,b --timeout "$WAIT_REVIEW_SECONDS"
 $B/waitfor.py checks  --pr <n>                             --timeout "$WAIT_CHECKS_SECONDS"
 $B/waitfor.py deploy  --sha <merge-sha>                    --timeout "$WAIT_DEPLOY_SECONDS"
@@ -356,8 +356,8 @@ acted on now, not something to keep waiting on.
 ### 0. Preflight
 
 ```bash
-~/.claude/skills/board/preflight.py --quick   # heartbeat tick
-~/.claude/skills/board/preflight.py           # before a dispatch, or when diagnosing
+~/.foreman/install/skills/board/preflight.py --quick   # heartbeat tick
+~/.foreman/install/skills/board/preflight.py           # before a dispatch, or when diagnosing
 ```
 
 Exit 0 means this machine can build. **Non-zero means it cannot, and the tick
@@ -403,7 +403,7 @@ pull requests after that.
 class of fault and gets the same treatment:
 
 ```bash
-~/.claude/skills/board/reconcile.py --main-ci
+~/.foreman/install/skills/board/reconcile.py --main-ci
 ```
 
 It answers with one named `verdict`, because branching on a formatted `gh` line
@@ -517,7 +517,7 @@ project** from Linear — filter by project ID, not by scanning the team. For an
 gates on `blockedBy` and `list_issues` cannot return it. Then:
 
 ```bash
-~/.claude/skills/board/reconcile.py <TICKET> <TICKET> ...
+~/.foreman/install/skills/board/reconcile.py <TICKET> <TICKET> ...
 ```
 
 One JSON object per card, joining agents, git, PR, checks, risk and deploy
@@ -577,7 +577,7 @@ the same attempt number** so `build_attempts` does not rise, and record the
 write-off so a later tick can see what happened:
 
 ```bash
-source ~/.claude/skills/board/config.sh
+source ~/.foreman/install/skills/board/config.sh
 card_log <TICKET> '{"action":"void","role":"build","attempt":"<N>","reason":"…"}'
 ```
 
@@ -669,8 +669,8 @@ deploy runs in**, and there is a written bar.
 command for this, and it fetches before it answers:
 
 ```bash
-B=~/.claude/skills/board
-$B/evidence.sh main ops/deploy.sh | grep -n '\.claude'         # what main says now
+B=~/.foreman/install/skills/board
+$B/evidence.sh main deploy/release.sh | grep -n '\.claude'         # what main says now
 $B/evidence.sh pr <n>                                          # what the diff changes
 $B/evidence.sh pr <n> <path>                                   # what the head says now
 ```
@@ -709,9 +709,9 @@ dispatches nothing after it reads an `origin/main` from before every merge
 
 ```text
 12:00  the checkout was last fetched; refs/remotes/origin/main = X
-12:03  pass 1 merges PR #A, adding `--exclude='.claude/'` to ops/deploy.sh
+12:03  pass 1 merges PR #A, adding `--exclude='.claude/'` to deploy/release.sh
 12:07  pass 3 weighs a blocking finding on PR #B saying the deploy strips
-       `.claude/`, and runs `git show origin/main:ops/deploy.sh`
+       `.claude/`, and runs `git show origin/main:deploy/release.sh`
   ->   reads blob X, greps nothing, refutes a correct finding, merges
 ```
 
@@ -737,7 +737,7 @@ still stand, and they are why the fix has to be per-read:
 The audit property is the third reason, and only the helper earns it: a
 transcript carrying `evidence.sh main …` and its `evidence:` line records the
 exact SHA the bytes came from, so the next tick can check whether that SHA was
-new enough. `grep -n … ops/deploy.sh` records nothing, which is why the
+new enough. `grep -n … deploy/release.sh` records nothing, which is why the
 #159 overrule read as sound for half an hour.
 
 **The bar, all four:**
@@ -754,7 +754,7 @@ new enough. `grep -n … ops/deploy.sh` records nothing, which is why the
    reviewer: send the card back and let the build agent answer it.
 4. **A claim about somewhere else cannot be settled by reading here.** If the
    finding is about what happens on the deploy host, in CI, or during the
-   deploy, only the thing that runs there settles it — `ops/tests/`, a CI job,
+   deploy, only the thing that runs there settles it — `deploy/tests/`, a CI job,
    or the deploy script's own text. The half-hour outage on 2026-08-03 was
    exactly this: the claim was about the target's own test run on a checkout
    with no `.claude/`, and no read of any file could confirm it because nothing
@@ -776,9 +776,9 @@ it is a claim, and the next tick should read it as one.
 
 This exists because of #159 on 2026-08-03. A reviewer found, correctly, that the
 diff made `sweep.sh` and `preflight.py` resolvable only through
-`.claude/skills/board`, which `ops/deploy.sh` keeps off the live checkout —
+`.claude/skills/board`, which `deploy/release.sh` keeps off the live checkout —
 so the target's own test run, the deploy gate, would fail on the deploy host
-while CI stayed green. The tick ran `grep -n "\.claude" ops/deploy.sh` **in its
+while CI stayed green. The tick ran `grep -n "\.claude" deploy/release.sh` **in its
 own tree**, found nothing, and merged. The tree was 169 commits behind and the
 exclusion had landed after that commit. The deploy failed with the reviewer's
 sentence almost verbatim and `main` was undeployable until #161 reverted it.
@@ -794,7 +794,16 @@ The file was real, the path was right, and the answer was still false.
   `bin/contract.py`) → leave the card in `In Review`, add `needs-merge`,
   comment naming the files, and say the operator decides. Absent `[risk]`
   means the target has declared nothing high-risk, and everything low-risk
-  merges autonomously. A parked card does **not** hold a concurrency slot.
+  merges autonomously. A parked card does **not** hold a concurrency slot —
+  no agent is running on it, only a human's decision is outstanding — so say
+  so the same way the two `board-failed` exits above do:
+  `card_log <T> '{"action":"released","reason":"parked: high-risk paths"}'`.
+  Without this the marker is never written for a parked card, and
+  `reconcile.py --host-slots` (step 6) keeps counting it against
+  `HOST_MAX_CONCURRENT` for up to `HOST_SLOT_STALE_MINUTES` (12h) — a
+  backstop for a marker some terminal exit forgets, not a licence to skip
+  writing it here. Do this **once**, the first tick a card parks; a card
+  already parked with `needs-merge` needs no further action here.
 - **`risk: unknown`** — `gh pr diff` failed, so **the diff was never read** and
   nothing is known about what it touches. Merge nothing. Leave the card where it
   is, say the diff could not be read, and look again next tick; it usually reads
@@ -972,7 +981,7 @@ Never hand-write a prompt. `brief.py` renders all four, and it is the only thing
 that quotes agent-written text correctly:
 
 ```bash
-B=~/.claude/skills/board
+B=~/.foreman/install/skills/board
 $B/brief.py build --ticket <T> --title "<title>" --body-file <ticket-body> > /tmp/b.md
 $B/dispatch.sh --ticket <T> --role build --attempt <n> --prompt-file /tmp/b.md
 ```
@@ -1010,8 +1019,8 @@ Never write into `Todo`.
 ### 8. Sweep
 
 ```bash
-~/.claude/skills/board/sweep.sh <merged-or-abandoned tickets...>
-~/.claude/skills/board/sweep.sh --orphans
+~/.foreman/install/skills/board/sweep.sh <merged-or-abandoned tickets...>
+~/.foreman/install/skills/board/sweep.sh --orphans
 ```
 
 `--orphans` protects any worktree whose agent is not positively `stopped`, and

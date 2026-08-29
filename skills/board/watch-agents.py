@@ -5,7 +5,7 @@ Intended as the command behind a persistent Monitor, so that an agent coming
 back wakes the board immediately instead of the board discovering it on a poll
 several minutes later.
 
-    Monitor(command="~/.claude/skills/board/watch-agents.py",
+    Monitor(command="~/.foreman/install/skills/board/watch-agents.py",
             persistent=True, description="board agents finishing")
 
 TWO RULES MAKE THIS SAFE.
@@ -56,7 +56,20 @@ INSTANCE = reconcile.INSTANCE
 
 # foreman/<instance>/<TICKET>/<role>-<attempt>. The tick is foreman/<instance>/tick,
 # which has no fourth segment and therefore never matches.
-DISPATCHED = re.compile(r"^foreman/([^/]+)/([A-Z]+-\d+)/(build|review)-(\w+)$")
+#
+# The team-key half of TICKET is `[A-Z0-9]+`, not `[A-Z]+`: nothing in this
+# codebase constrains a Linear team key to letters only -- bin/contract.py
+# takes `linear.team` as an arbitrary non-empty string, bin/resolve-ids.py
+# resolves it by name with no charset check, and reconcile.py's own
+# agents_for() matches agents by plain prefix, not a regex, so it was never
+# the thing enforcing "letters only". A team key containing a digit (Linear
+# allows them) still dispatches and still shows up in `claude agents`, but
+# silently never matched DISPATCHED before this -- this Monitor then never
+# reported that instance's agents finishing, and the board fell back to
+# discovering the work on its next ordinary poll instead of waking
+# immediately. No error, no crash: just a slower board on any instance whose
+# team key happens to have a digit in it.
+DISPATCHED = re.compile(r"^foreman/([^/]+)/([A-Z0-9]+-\d+)/(build|review)-(\w+)$")
 
 # Phases that mean "this agent is no longer working". `done` is a completed turn;
 # `stopped` covers both a deliberate stop and a death.

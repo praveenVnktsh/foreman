@@ -100,7 +100,22 @@ start_agent() {
   # `--permission-mode` is non-variadic and sits immediately before the prompt,
   # for the same reason dispatch.sh does it: a variadic flag here eats the prompt
   # and produces an agent that starts and then waits at an empty prompt forever.
-  ( cd "$REPO" && claude --bg \
+  #
+  # `exec 9>&-` FIRST, inside this subshell only: fd 9 is the flock on
+  # supervise.lock, opened with a plain `exec 9>...` below, which bash does not
+  # mark close-on-exec. Left open, `claude --bg`'s own process -- and, through
+  # it, the DETACHED agent process that outlives `claude --bg` returning --
+  # inherits the fd and the flock with it. That agent runs for hours, so the
+  # lock would then read as held by a live process for exactly that long, and
+  # every supervise.sh fire in between reads `flock -n 9` failing as "another
+  # supervisor holds the lock" and stands down -- a watchdog that silently
+  # never runs again after its first successful start, on a lock nothing is
+  # actually contending for. Closing it here, in a subshell, drops it only for
+  # `claude` and whatever it forks; the parent script's own fd 9 (and the
+  # flock on it) is untouched and still released the ordinary way, when this
+  # script's own process exits.
+  ( exec 9>&-
+    cd "$REPO" && claude --bg \
       --name "$TICK_AGENT_NAME" \
       --model "$TICK_MODEL" \
       --permission-mode bypassPermissions \

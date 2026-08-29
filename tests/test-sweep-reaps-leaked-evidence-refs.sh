@@ -68,12 +68,9 @@ git_q() {
 # `sweep.sh` sources config.sh, which since Task 2/3 requires a
 # FOREMAN_INSTANCE and an instance directory declaring a REPO whose
 # board.toml passes bin/contract.py -- regardless of what REPO is overridden
-# to below. AGENT_TMP_ROOT is derived from THIS installation's own
-# bin/tmp-dir.sh, never the target's, and `--orphans` here never visits an
-# existing worktree or scratch dir (there are none), so agent_tmp_for() --
-# which still asks "$REPO/ops/tmp-dir.sh" pending Task 5, per
-# tests/test-tmp-dir.sh's own note -- is never called; the fixture needs no
-# tmp-dir.sh of its own.
+# to below. AGENT_TMP_ROOT and agent_tmp_for() are both derived from THIS
+# installation's own bin/tmp-dir.sh, never the target's, so the fixture needs
+# no tmp-dir.sh of its own.
 inst_home="$work_dir/foreman-home"
 fixture_add_instance "$inst_home" fixture
 export HOME="$inst_home" FOREMAN_INSTANCE=fixture

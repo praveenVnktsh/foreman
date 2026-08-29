@@ -61,12 +61,26 @@ REQUIRED_CHECKS = set(c for c in _CFG["REQUIRED_CHECKS"].split("|") if c)
 HIGH_RISK_PATHS = _CFG["HIGH_RISK_PATHS"].split()
 DEPLOY_WORKFLOW = _CFG["DEPLOY_WORKFLOW"]
 DEPLOY_STEP = _CFG["DEPLOY_STEP"]
-# The one value here with a fallback, and only because config.sh is deliberately
-# NOT mirrored to the running board (design/shipping.md). A key added here reads
-# as the empty string until that copy is edited by hand, and an empty workflow
-# name makes every `main` CI lookup fail — which stands the whole board down on a
-# missing string rather than on anything about `main`. config.sh still overrides.
-CI_WORKFLOW = _CFG["CI_WORKFLOW"] or "CI"
+# No fallback here, deliberately -- `checks.ci_workflow` is REQUIRED and
+# non-empty in bin/contract.py (SCALARS' default of None, refused if blank),
+# so an empty CI_WORKFLOW reaching this process means an environment override
+# bypassed that requirement (config.sh reads a contract-emitted key with `-`,
+# not `:-`, so `CI_WORKFLOW=` set in the environment overrides even a
+# board.toml that named a real workflow). This used to substitute the literal
+# "CI" for that case, justified by a design doc that described a DIFFERENT
+# codebase's decision not to mirror config.sh's values into the running board
+# -- a doc that does not exist in this repository, for a distinction that
+# does not apply here. Silently checking a workflow board.toml never named
+# ("CI") is exactly the failure contract.py's own validation exists to
+# prevent: refuse instead, the same way a required scalar refuses everywhere
+# else in this codebase.
+if not _CFG["CI_WORKFLOW"]:
+    raise SystemExit(
+        "reconcile: CI_WORKFLOW is empty -- checks.ci_workflow is required in "
+        "board.toml and bin/contract.py refuses it blank, so this can only mean "
+        "an environment override (CI_WORKFLOW=) blanked it out after the fact"
+    )
+CI_WORKFLOW = _CFG["CI_WORKFLOW"]
 FOREMAN_HOME = _CFG["FOREMAN_HOME"]
 # Empty means "disabled" -- see host_slots()'s docstring for why that is a
 # real, supported value and not just an unset-variable accident.
@@ -419,7 +433,19 @@ def deploy_verdict(sha: str) -> dict:
     says whether the question is settled. The pair is what lets waitfor.py stop
     on a deploy that ran and BROKE — which is neither satisfied nor still coming
     — instead of polling it for the whole budget on every tick, forever.
+
+    A target that declares no `[deploy]` at all (DEPLOY_WORKFLOW == "") has
+    nowhere for a commit to deploy TO — board.toml's own comment and the design
+    spec both say "merged is done" for exactly this case. Checked before
+    anything else, and before the sha guard below: this is a fact about the
+    contract, not about this merge, so it answers even a call made with no sha.
+    Without this, `gh run list --workflow ""` ran unconditionally against every
+    target with no [deploy] -- including foreman's own board.toml -- and no
+    card on such a target could ever reach `Done`.
     """
+    if not DEPLOY_WORKFLOW:
+        return {"verified": True, "terminal": True, "outcome": "no-deploy-configured",
+                "reason": "no [deploy] configured for this target; merged is done"}
     if not sha:
         return {"verified": False, "terminal": True, "outcome": "no-merge-commit",
                 "reason": "no merge commit"}

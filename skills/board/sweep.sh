@@ -24,6 +24,39 @@ SKILL_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=config.sh
 source "$SKILL_DIR/config.sh"
 
+# Everything below that touches `.claude/worktrees/` -- `remove_tree`'s `git
+# worktree remove`, the final `git worktree prune` -- has to run while holding
+# `$REPO/.git/board-worktree.lock`, the SAME lock dispatch.sh takes around its
+# own `git worktree add`. This used to take the lock around `true`: acquired,
+# `true` ran and exited instantly, released, all before any worktree was
+# touched -- proving nothing except that the lockfile was momentarily free.
+# `git worktree add` (dispatch.sh) and `git worktree remove`/`prune` (this
+# script) racing on the same `.git/worktrees` metadata is exactly what the
+# lock exists to prevent, and it was not preventing it.
+#
+# Re-executing this SAME script as the command withlock.py guards -- rather
+# than inlining the mutating body as a `bash -c '...'` string the way
+# dispatch.sh does -- keeps every function below exactly as written, with no
+# quoting hazard from embedding 150 lines of shell inside a string literal.
+# `_FOREMAN_SWEEP_LOCKED` is the re-entry guard: unset on the first (real)
+# invocation, set on the re-exec, so the second pass falls through instead of
+# taking the lock again.
+if [[ -z "${_FOREMAN_SWEEP_LOCKED:-}" ]]; then
+  status=0
+  env _FOREMAN_SWEEP_LOCKED=1 \
+    "$SKILL_DIR/withlock.py" "$REPO/.git/board-worktree.lock" 120 \
+    -- "$SKILL_DIR/sweep.sh" "$@" || status=$?
+  # 75 is withlock.py's own EX_TEMPFAIL, meaning ONLY "the lock was still held
+  # after the timeout" -- anything else is the sweep itself failing while
+  # holding the lock, and reporting that as "lock is held" would hide a real
+  # failure (a bad worktree, a `die` from inside) behind a contention message
+  # that was never true.
+  if [[ "$status" -eq 75 ]]; then
+    die "repository lock is held; skipping sweep this tick"
+  fi
+  exit "$status"
+fi
+
 # Scratch lives beside the worktree and dies with it. It is reaped HERE, by the
 # sweep, and never by the agent itself: an agent only cleans up if it gets to
 # exit on its own terms, and the ones that most need cleaning are the ones
@@ -148,15 +181,36 @@ for a in agents:
 '
 }
 
-"$SKILL_DIR/withlock.py" "$REPO/.git/board-worktree.lock" 120 -- true \
-  || die "repository lock is held; skipping sweep this tick"
+[[ "${1:-}" == "--orphans" || $# -gt 0 ]] || die "usage: sweep.sh <TICKET...> | --orphans"
+
+# Read ONCE, and read the same way, for BOTH modes. This used to be built only
+# under --orphans; ticket mode called remove_tree() straight from the caller's
+# say-so, with no liveness check of its own. `--orphans`' whole reason to exist
+# is that deleting a live agent's working directory "destroys unpushed work and
+# kills it with no diagnosable error" and that cost is "nowhere near equal" to
+# leaving a dead tree an extra tick -- a reasoning that does not become false
+# because the caller named the ticket instead of sweep.sh finding it itself.
+# SKILL.md only ever passes tickets it just judged terminal, so this should be
+# a no-op in the ordinary case; it is the same defense-in-depth `--orphans`
+# already has, for the case where that judgment was stale, raced, or wrong.
+LIVE_FILE="$(mktemp)"
+trap 'rm -f "$LIVE_FILE"' EXIT
+if ! live_worktrees >"$LIVE_FILE"; then
+  die "could not read live agents; refusing to sweep"
+fi
+
+# remove_tree_unless_live <path> -- remove_tree(), but leave a worktree alone
+# if it is a not-provably-stopped agent's cwd, the same guard --orphans uses.
+remove_tree_unless_live() {
+  local path="$1"
+  if grep -Fxq "$path" "$LIVE_FILE"; then
+    printf 'foreman: leaving %s -- its agent is not (yet) stopped\n' "$path" >&2
+    return 0
+  fi
+  remove_tree "$path"
+}
 
 if [[ "${1:-}" == "--orphans" ]]; then
-  LIVE_FILE="$(mktemp)"
-  trap 'rm -f "$LIVE_FILE"' EXIT
-  if ! live_worktrees >"$LIVE_FILE"; then
-    die "could not read live agents; refusing to sweep orphans"
-  fi
   for path in "$REPO"/.claude/worktrees/foreman-"$INSTANCE"-*/; do
     [[ -d "$path" ]] || continue
     path="${path%/}"
@@ -176,11 +230,10 @@ if [[ "${1:-}" == "--orphans" ]]; then
     remove_agent_tmp "$tmp"
   done
 else
-  [[ $# -gt 0 ]] || die "usage: sweep.sh <TICKET...> | --orphans"
   for ticket in "$@"; do
-    remove_tree "$(worktree_path "$ticket")"
+    remove_tree_unless_live "$(worktree_path "$ticket")"
     for extra in "$REPO"/.claude/worktrees/foreman-"$INSTANCE"-"$ticket"-*/; do
-      [[ -d "$extra" ]] && remove_tree "${extra%/}"
+      [[ -d "$extra" ]] && remove_tree_unless_live "${extra%/}"
     done
   done
 fi
