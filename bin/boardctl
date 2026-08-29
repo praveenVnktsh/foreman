@@ -1,0 +1,197 @@
+#!/usr/bin/env bash
+# boardctl -- create and control foreman instances.
+#
+#     boardctl add <name> --repo <path> --linear-key-file <path>
+#     boardctl list
+#     boardctl status <name>
+#     boardctl halt <name>
+#     boardctl resume <name>
+#
+# An instance is a directory under $FOREMAN_HOME/instances/<name>/ -- the same
+# state skills/board/config.sh reads (see that file for INSTANCE_HOME,
+# instance.env and ids.env). This is the only writer of instance.env and
+# linear.key; config.sh and bin/resolve-ids.py only ever read them.
+#
+# `add` writes instance.env BEFORE calling bin/resolve-ids.py, because
+# resolution shells out to config.sh, which needs REPO to find the target's
+# board.toml. If anything after that point fails -- the key file, or
+# resolve-ids.py itself -- the whole instance directory is removed. A
+# half-created instance that a later tick picks up (a REPO with no ids, or an
+# ids.env left over from nothing) is worse than no instance at all.
+set -euo pipefail
+
+FOREMAN_HOME="${FOREMAN_HOME:-$HOME/.foreman}"
+export FOREMAN_HOME
+
+here="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+root="$(dirname -- "$here")"
+
+die() { printf 'boardctl: %s\n' "$*" >&2; exit 1; }
+
+usage() {
+  cat >&2 <<'USAGE'
+usage:
+  boardctl add <name> --repo <path> --linear-key-file <path>
+  boardctl list
+  boardctl status <name>
+  boardctl halt <name>
+  boardctl resume <name>
+USAGE
+  exit 2
+}
+
+instance_home() { printf '%s/instances/%s\n' "$FOREMAN_HOME" "$1"; }
+
+# Same constraint config.sh enforces at load: no hyphen, no slash. It matters
+# here for the identical reason it matters there -- sweep.sh's worktree glob
+# joins INSTANCE and the ticket with a hyphen, so an unconstrained name can
+# absorb another instance's boundary. config.sh would refuse this instance on
+# its very first tick regardless; checking it here means the operator learns
+# at creation, not at the first tick.
+validate_name() {
+  local name="$1"
+  [[ "$name" =~ ^[A-Za-z0-9_]+$ ]] || \
+    die "instance name '$name' is invalid; only letters, digits and underscore are allowed (no hyphen, no slash)"
+}
+
+# read_env_key <file> <KEY> -- the same line-oriented convention config.sh's
+# own _foreman_read_env uses: KEY=VALUE, comments and blanks skipped, first
+# match wins. Not sourced, for the same reason config.sh does not source
+# instance.env either -- it is untrusted enough to be worth a real parser, not
+# `eval`.
+read_env_key() {
+  local file="$1" want="$2" line key value
+  [[ -r "$file" ]] || return 1
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    [[ -z "$line" || "$line" == \#* ]] && continue
+    key="${line%%=*}"; value="${line#*=}"
+    [[ "$key" == "$want" ]] || continue
+    printf '%s' "$value"
+    return 0
+  done <"$file"
+  return 1
+}
+
+cmd_add() {
+  [[ $# -ge 1 ]] || usage
+  local name="$1"; shift
+  validate_name "$name"
+
+  local repo="" key_file=""
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --repo)
+        [[ $# -ge 2 ]] || die "add: --repo needs a value"
+        repo="$2"; shift 2 ;;
+      --linear-key-file)
+        [[ $# -ge 2 ]] || die "add: --linear-key-file needs a value"
+        key_file="$2"; shift 2 ;;
+      *) die "add: unrecognized argument '$1'" ;;
+    esac
+  done
+  [[ -n "$repo" ]] || die "add: --repo is required"
+  [[ -n "$key_file" ]] || die "add: --linear-key-file is required"
+
+  local inst; inst="$(instance_home "$name")"
+  [[ -e "$inst" ]] && \
+    die "instance '$name' already exists at $inst -- refusing to overwrite its ids"
+
+  [[ -d "$repo" ]] || die "no such repository directory: $repo"
+  repo="$(cd -- "$repo" && pwd)"
+  [[ -f "$repo/board.toml" ]] || \
+    die "$repo has no board.toml -- not a foreman target"
+
+  [[ -f "$key_file" ]] || die "no such linear key file: $key_file"
+
+  mkdir -p "$inst"
+  # Write REPO before anything that reads it. resolve-ids.py shells out to
+  # config.sh, which reads REPO from instance.env to find board.toml.
+  printf 'REPO=%s\n' "$repo" > "$inst/instance.env"
+
+  local install_err; install_err="$(mktemp)"
+  if ! install -m 600 "$key_file" "$inst/linear.key" 2>"$install_err"; then
+    local err; err="$(cat "$install_err" 2>/dev/null)"
+    rm -f "$install_err"
+    rm -rf "$inst"
+    die "could not install the linear key file: $err"
+  fi
+  rm -f "$install_err"
+
+  # Forwarded only when set: an operator's real install never sets this, and
+  # bin/resolve-ids.py's own default (api.linear.app) applies. Tests point it
+  # at a local stub so `add` never has to reach the real Linear API to be
+  # exercised.
+  local api_url_args=()
+  [[ -n "${FOREMAN_LINEAR_API_URL:-}" ]] && \
+    api_url_args=(--api-url "$FOREMAN_LINEAR_API_URL")
+
+  # `${arr[@]+"${arr[@]}"}`, not `"${arr[@]}"`: bash 3.2 (this project's own
+  # floor -- macOS ships nothing newer) treats `"${arr[@]}"` on an EMPTY array
+  # as an unset variable under `set -u` and dies "unbound variable". The `+`
+  # form only expands the alternate value when the array is set, empty or
+  # not, so the ordinary case -- no FOREMAN_LINEAR_API_URL, which is every
+  # real install -- does not crash before resolve-ids.py is even reached.
+  if ! "$root/bin/resolve-ids.py" --instance "$name" \
+      ${api_url_args[@]+"${api_url_args[@]}"}; then
+    rm -rf "$inst"
+    die "resolving ids failed; instance '$name' was not created (see above)"
+  fi
+
+  printf 'boardctl: instance %s created, serving %s\n' "$name" "$repo"
+}
+
+cmd_list() {
+  local dir="$FOREMAN_HOME/instances"
+  [[ -d "$dir" ]] || return 0
+  local inst name repo
+  for inst in "$dir"/*/; do
+    [[ -d "$inst" ]] || continue
+    name="$(basename -- "$inst")"
+    repo="$(read_env_key "$inst/instance.env" REPO || true)"
+    printf '%s\t%s\n' "$name" "${repo:-(no REPO declared)}"
+  done | sort
+}
+
+cmd_status() {
+  [[ $# -eq 1 ]] || usage
+  local name="$1" inst; inst="$(instance_home "$name")"
+  [[ -d "$inst" ]] || die "no instance '$name' at $inst"
+
+  local repo; repo="$(read_env_key "$inst/instance.env" REPO || true)"
+  local ids_state="not resolved"
+  [[ -f "$inst/ids.env" ]] && ids_state="resolved"
+  local halt_state="running"
+  [[ -f "$inst/HALT" ]] && halt_state="halted"
+
+  printf 'instance: %s\n' "$name"
+  printf 'repo:     %s\n' "${repo:-(none declared)}"
+  printf 'ids:      %s\n' "$ids_state"
+  printf 'state:    %s\n' "$halt_state"
+}
+
+cmd_halt() {
+  [[ $# -eq 1 ]] || usage
+  local name="$1" inst; inst="$(instance_home "$name")"
+  [[ -d "$inst" ]] || die "no instance '$name' at $inst"
+  : > "$inst/HALT"
+  printf 'boardctl: instance %s halted\n' "$name"
+}
+
+cmd_resume() {
+  [[ $# -eq 1 ]] || usage
+  local name="$1" inst; inst="$(instance_home "$name")"
+  [[ -d "$inst" ]] || die "no instance '$name' at $inst"
+  rm -f "$inst/HALT"
+  printf 'boardctl: instance %s resumed\n' "$name"
+}
+
+[[ $# -ge 1 ]] || usage
+cmd="$1"; shift
+case "$cmd" in
+  add) cmd_add "$@" ;;
+  list) cmd_list "$@" ;;
+  status) cmd_status "$@" ;;
+  halt) cmd_halt "$@" ;;
+  resume) cmd_resume "$@" ;;
+  *) usage ;;
+esac
