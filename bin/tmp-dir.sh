@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 # Where a checkout's test scratch goes. One derivation, printed for its callers.
 #
-#   ops/tmp-dir.sh              the scratch dir paired with the checkout this
+#   bin/tmp-dir.sh              the scratch dir paired with the checkout this
 #                               script is committed to
-#   ops/tmp-dir.sh <worktree>   the scratch dir paired with that worktree
-#   ops/tmp-dir.sh --root       the root those live under
+#   bin/tmp-dir.sh <worktree>   the scratch dir paired with that worktree
+#   bin/tmp-dir.sh --root       the root those live under
 #
 # `/tmp` on the dev host is a tmpfs sized at half of RAM under a per-user quota
 # that refuses writes around 5.5GB, so it is RAM that competes with the agents

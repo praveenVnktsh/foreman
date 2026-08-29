@@ -36,7 +36,7 @@ finish, which is worse than the race it exists to prevent.
 
 WHY IT NO LONGER MEASURES STALENESS. It used to report `behind_origin_main`,
 after a tick on 2026-08-03 refuted a `blocking` finding by grepping
-`ops/deploy.sh` in this checkout, 169 commits behind, and merged a change
+`deploy/release.sh` in this checkout, 169 commits behind, and merged a change
 that broke the deploy on the target host. The number never fixed that, and
 could not: it is measured against `refs/remotes/origin/main`, which is the
 very ref the tick was misreading. `evidence.sh` did fix it, by fetching per

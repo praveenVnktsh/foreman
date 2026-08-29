@@ -8,10 +8,16 @@
 # migrations/` names no person and no project, but it is a real path in the
 # origin project's tree, and a search engine will resolve it to that
 # repository regardless of what this one is called. `backend/`,
-# `design/build_system` and `test_design_invariants` are banned for the same
-# reason `mango` is -- structure that identifies whose codebase this grew up
-# on. A passage that needs an example path should invent a plainly generic
-# one (`db/migrations/`, `docs/ENGINEERING.md`), not cite a real tree.
+# `design/build_system`, `test_design_invariants` and `ops/` are banned for
+# the same reason `mango` is -- structure that identifies whose codebase this
+# grew up on. `ops/` specifically: this codebase's own scripts moved to
+# `bin/`, and every `ops/...` example that survived generalisation (a target's
+# deploy script, its git hooks) was a leftover real path from the origin
+# project's tree, reused as the running illustration instead of an invented
+# one -- exactly the class of leak `agent_tmp_for()` shipped as actual code,
+# not just prose (see config.sh and bin/tmp-dir.sh). A passage that needs an
+# example path should invent a plainly generic one (`db/migrations/`,
+# `docs/ENGINEERING.md`), not cite a real tree.
 #
 # Scoped to skills/, bin/ and tests/: LICENSE names its copyright holder and
 # must; README.md and docs/ legitimately say where this came from — naming
@@ -42,7 +48,7 @@ set -euo pipefail
 here="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 root="$(dirname -- "$here")"
 self="$(basename -- "${BASH_SOURCE[0]}")"
-banned='murmr|mango|Praveen|MURMR_|just test-all|deploy-mango|\.murmr-|backend/|design/build_system|test_design_invariants'
+banned='murmr|mango|Praveen|MURMR_|just test-all|deploy-mango|\.murmr-|backend/|design/build_system|test_design_invariants|ops/'
 banned_ci='whatsapp|baileys'
 hits=""
 if part="$(grep -rInE "$banned" "$root/skills" "$root/bin" "$root/tests" \

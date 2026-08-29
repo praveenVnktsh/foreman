@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Parse every tracked shell and Python source in the repository. Syntax only.
 #
-#     ops/check-syntax.sh
+#     bin/check-syntax.sh
 #
 # It takes no arguments, and that is the whole design. Every previous version of
 # this check named what to cover and was under-covering by the time anyone
@@ -10,16 +10,16 @@
 #   1. A hand-listed file set, which omitted the regression test written for a
 #      real production outage, install-user-units.sh, and all of scripts/.
 #   2. A glob, which would have passed had it matched nothing at all.
-#   3. `find ops scripts -exec bash -n {} +`, which hands a batch to one `bash`
+#   3. `find src scripts -exec bash -n {} +`, which hands a batch to one `bash`
 #      -- and `bash -n a.sh b.sh` parses `a.sh` and takes `b.sh` as a positional
 #      argument. One script of thirteen was parsed, and which one depended on
 #      directory traversal order.
-#   4. `find ops scripts .claude`, which is the same list one directory wider:
+#   4. `find src scripts .claude`, which is the same list one directory wider:
 #      it silently omitted `setup.sh` and the target's own start script at the
 #      repository root -- and every production deploy runs `setup.sh` *after*
 #      rsync has already replaced the deploy host's tree -- and, matching on
-#      extension, it omitted `ops/git-hooks/pre-commit` and `pre-push`, which
-#      have no suffix.
+#      extension, it omitted `deploy/git-hooks/pre-commit` and `pre-push`,
+#      which have no suffix.
 #
 # So the file set is `git ls-files`. Coverage is a property of the repository
 # rather than a list someone has to remember to widen, because remembering is

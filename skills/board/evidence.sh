@@ -26,9 +26,9 @@
 #
 #   12:00  step 0 runs; refs/remotes/origin/main = X
 #   12:03  pass 1 merges PR #A, which adds `--exclude='.claude/'` to
-#          ops/deploy.sh; GitHub's main is now X+1
+#          deploy/release.sh; GitHub's main is now X+1
 #   12:07  pass 3 weighs a blocking finding on PR #B saying the deploy strips
-#          `.claude/`, and runs `git show origin/main:ops/deploy.sh`
+#          `.claude/`, and runs `git show origin/main:deploy/release.sh`
 #   ->     reads blob X, greps nothing, refutes a correct finding, merges
 #
 # A staleness number on this checkout could not catch it either, which is why
@@ -173,7 +173,7 @@ trap 'exit 143' TERM
 # an empty file behind, never content.
 #
 # It lives under the board scratch root rather than `/tmp` for the reason
-# `ops/tmp-dir.sh` exists: `/tmp` on the dev host is a RAM-backed tmpfs under a
+# `bin/tmp-dir.sh` exists: `/tmp` on the dev host is a RAM-backed tmpfs under a
 # per-user quota, and buffering there competes for memory with the agents doing
 # the work.
 #

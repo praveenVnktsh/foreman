@@ -4,7 +4,7 @@
 # Four versions of this check passed while covering less than they claimed: a
 # hand-listed file set, a glob that would have passed matching nothing,
 # `-exec bash -n {} +` (which parses only the first file of each batch), and a
-# `find ops scripts .claude` root list that omitted the repository-root scripts
+# `find src scripts .claude` root list that omitted the repository-root scripts
 # and every extensionless one. So most of what follows asserts *coverage*
 # rather than syntax -- the cases that were green in CI were never "a syntax
 # error slipped through", they were "that file was never read".
@@ -109,8 +109,8 @@ echo "  ok: no __pycache__, no .pyc"
 echo "==> a script at the repository root, where no find root reached"
 repo="$(new_repo repo_root_script)"
 good_shell "$repo/keeps-the-count-up.sh"
-mkdir -p "$repo/ops"
-good_shell "$repo/ops/deploy.sh"
+mkdir -p "$repo/deploy"
+good_shell "$repo/deploy/release.sh"
 bad_shell "$repo/setup.sh"
 track "$repo"
 if run_checker "$repo"; then
@@ -122,10 +122,10 @@ echo "  ok: read -- every deploy runs setup.sh after rsync has replaced the tree
 
 echo "==> an extensionless executable script, which no extension matcher saw"
 repo="$(new_repo extensionless)"
-mkdir -p "$repo/ops/git-hooks"
-good_shell "$repo/ops/deploy.sh"
-bad_shell "$repo/ops/git-hooks/pre-commit"
-chmod +x "$repo/ops/git-hooks/pre-commit"
+mkdir -p "$repo/deploy/git-hooks"
+good_shell "$repo/deploy/release.sh"
+bad_shell "$repo/deploy/git-hooks/pre-commit"
+chmod +x "$repo/deploy/git-hooks/pre-commit"
 track "$repo"
 if run_checker "$repo"; then
   fail "a broken extensionless hook passed the check"
