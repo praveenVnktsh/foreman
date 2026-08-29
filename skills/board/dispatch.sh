@@ -92,7 +92,13 @@ EXTRA=()
 # before the prompt is non-variadic, which is what keeps the prompt from being
 # swallowed. This applies to RESUME too — a resumed agent with no permission
 # flag blocks on its first Bash call exactly like a fresh one.
-if [[ -n "$AGENT_SKIP_PERMISSIONS" ]]; then
+#
+# "0" is off too, not just empty: `-n` alone reads the STRING "0" as
+# non-empty, i.e. "on" -- exactly the value an operator would type expecting
+# it to mean off, and previously the one value that could never turn this off
+# at all (config.sh's old `:-` also silently reinstated the default for an
+# explicitly empty override). Both are honoured now.
+if [[ -n "$AGENT_SKIP_PERMISSIONS" && "$AGENT_SKIP_PERMISSIONS" != "0" ]]; then
   EXTRA+=(--dangerously-skip-permissions)
 else
   EXTRA+=(--permission-mode acceptEdits)
@@ -184,10 +190,9 @@ fi
 # the shared `claude daemon`, not from this script, so every agent after the
 # first would receive the first one's value. Measured 2026-08-02 — a reviewer
 # and an unrelated ticket's build both reported the same ticket and role in
-# their environment. The justfile's test recipes export the same path as
-# TMPDIR, asking the same ops/tmp-dir.sh this does, keyed on the worktree they
-# are running in — the one per-agent fact that cannot go stale. sweep.sh reaps
-# it.
+# their environment. A target's own TEST_COMMAND asks the same bin/tmp-dir.sh
+# this does, keyed on the worktree it is running in — the one per-agent fact
+# that cannot go stale. sweep.sh reaps it.
 mkdir -p "$(agent_tmp_for "$WORKTREE")"
 
 cd "$WORKTREE"

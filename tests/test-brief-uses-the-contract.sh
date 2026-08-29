@@ -64,13 +64,12 @@ command = "make check"
 [docs]
 required = ["OPERATING.md", "STYLE.md"]
 TOML
-# config.sh's agent_tmp_for() asks "$REPO/ops/tmp-dir.sh" for the scratch dir
-# paired with a worktree (see tests/test-tmp-dir.sh's own note: this is a
-# pending seam, not something Task 7 touches) -- so any target this test
-# dispatches a BUILD agent into needs one, committed or not.
-mkdir -p "$target/ops"
-cp "$root/bin/tmp-dir.sh" "$target/ops/tmp-dir.sh"
-chmod +x "$target/ops/tmp-dir.sh"
+# No scripts of its own for agent_tmp_for() to find here, deliberately:
+# config.sh's agent_tmp_for() asks THIS INSTALLATION's own bin/tmp-dir.sh for
+# the scratch dir paired with a worktree, never the target's -- the real
+# dispatch.sh run below (Part 3) is this repository's end-to-end proof that a
+# target shipping no scratch-dir helper of its own can still be dispatched
+# into.
 echo "seed" > "$target/seed.txt"
 git_q -C "$target" add -A
 git_q -C "$target" commit -q -m "Seed"
@@ -335,9 +334,6 @@ command = "make check"
 [bootstrap]
 command = "exit 1"
 TOML
-mkdir -p "$target2/ops"
-cp "$root/bin/tmp-dir.sh" "$target2/ops/tmp-dir.sh"
-chmod +x "$target2/ops/tmp-dir.sh"
 echo "seed" > "$target2/seed.txt"
 git_q -C "$target2" add -A
 git_q -C "$target2" commit -q -m "Seed"

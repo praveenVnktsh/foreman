@@ -278,4 +278,86 @@ else
     *) printf 'FAIL error did not mention NUL: %s\n' "$err"; fail=1 ;; esac
 fi
 
+# A target cannot disarm the adversarial review gate with a zero. Before this,
+# the only bound on any [limits] entry was `value < 0`, so
+# `reviewers_per_round = 0` and `max_review_rounds = 0` loaded cleanly --
+# SKILL.md then dispatches zero reviewers and merges on "no blocking
+# findings". Both must now be refused outright.
+cat >"$work/zero_reviewers.toml" <<'TOML'
+[linear]
+team = "PRA"
+project = "foreman"
+[checks]
+required = ["Tests"]
+ci_workflow = "CI"
+[test]
+command = "make test"
+[limits]
+reviewers_per_round = 0
+TOML
+if err="$("$root/bin/contract.py" "$work/zero_reviewers.toml" 2>&1 >/dev/null)"; then
+  printf 'FAIL reviewers_per_round = 0 must be refused (it disarms the review gate)\n'; fail=1
+else
+  case "$err" in *reviewers_per_round*) printf 'ok   reviewers_per_round = 0 is refused\n' ;;
+    *) printf 'FAIL error did not name reviewers_per_round: %s\n' "$err"; fail=1 ;; esac
+fi
+
+cat >"$work/zero_rounds.toml" <<'TOML'
+[linear]
+team = "PRA"
+project = "foreman"
+[checks]
+required = ["Tests"]
+ci_workflow = "CI"
+[test]
+command = "make test"
+[limits]
+max_review_rounds = 0
+TOML
+if err="$("$root/bin/contract.py" "$work/zero_rounds.toml" 2>&1 >/dev/null)"; then
+  printf 'FAIL max_review_rounds = 0 must be refused (it disarms the review gate)\n'; fail=1
+else
+  case "$err" in *max_review_rounds*) printf 'ok   max_review_rounds = 0 is refused\n' ;;
+    *) printf 'FAIL error did not name max_review_rounds: %s\n' "$err"; fail=1 ;; esac
+fi
+
+# The floor is scoped to the two review-gate limits, not every limit. Zero is
+# still a legitimate value for MAX_CONCURRENT (starves dispatch, merges
+# nothing unreviewed) and every other [limits] entry.
+cat >"$work/zero_concurrent.toml" <<'TOML'
+[linear]
+team = "PRA"
+project = "foreman"
+[checks]
+required = ["Tests"]
+ci_workflow = "CI"
+[test]
+command = "make test"
+[limits]
+max_concurrent = 0
+TOML
+check "max_concurrent = 0 still loads (not a review-gate limit)" \
+  "0" "$(read_key "$work/zero_concurrent.toml" MAX_CONCURRENT)"
+
+# A negative value is refused for a review-gate limit too, with the
+# gate-specific message rather than the generic "non-negative integer" one.
+cat >"$work/negative_rounds.toml" <<'TOML'
+[linear]
+team = "PRA"
+project = "foreman"
+[checks]
+required = ["Tests"]
+ci_workflow = "CI"
+[test]
+command = "make test"
+[limits]
+max_review_rounds = -1
+TOML
+if err="$("$root/bin/contract.py" "$work/negative_rounds.toml" 2>&1 >/dev/null)"; then
+  printf 'FAIL max_review_rounds = -1 must be refused\n'; fail=1
+else
+  case "$err" in *max_review_rounds*) printf 'ok   max_review_rounds = -1 is refused\n' ;;
+    *) printf 'FAIL error did not name max_review_rounds: %s\n' "$err"; fail=1 ;; esac
+fi
+
 exit "$fail"

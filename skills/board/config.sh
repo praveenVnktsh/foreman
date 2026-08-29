@@ -125,8 +125,14 @@ HOST_MAX_CONCURRENT="${HOST_MAX_CONCURRENT:-4}"
 # lifecycle -- ticks run every TICK_INTERVAL_MINUTES and a card usually
 # resolves in a handful of them -- and short enough to self-heal a leaked slot
 # same-day rather than needing an operator to notice and hand-edit a file.
-# Empty disables the backstop entirely, relying on the marker alone.
-HOST_SLOT_STALE_MINUTES="${HOST_SLOT_STALE_MINUTES:-720}"
+# Empty disables the backstop entirely, relying on the marker alone -- which
+# means `-`, not `:-`, for the same reason HIGH_RISK_PATHS and every
+# `_foreman_read_env` key above are `-`: an explicitly empty override must
+# mean empty. Reconcile.py already gets this right on its own side
+# (`float(...) if _CFG["HOST_SLOT_STALE_MINUTES"] else None`), so `:-` here
+# was the one place in the chain that silently reinstated 720 for an operator
+# who set `HOST_SLOT_STALE_MINUTES=` meaning "disabled".
+HOST_SLOT_STALE_MINUTES="${HOST_SLOT_STALE_MINUTES-720}"
 
 # Dispatched agents run with --dangerously-skip-permissions, at the operator's
 # explicit instruction on 2026-08-01.
@@ -142,7 +148,15 @@ HOST_SLOT_STALE_MINUTES="${HOST_SLOT_STALE_MINUTES:-720}"
 # the throwaway worktree it runs in, the fact that nothing merges without an
 # adversarial review, the three required checks, and migrations still parking for
 # the operator. Weakening any of those matters much more now than it did before.
-AGENT_SKIP_PERMISSIONS="${AGENT_SKIP_PERMISSIONS:-1}"
+#
+# `-`, not `:-`: an operator debugging the acceptEdits path on purpose must be
+# able to turn this off by setting it explicitly empty, the same distinction
+# every other override in this file makes. dispatch.sh:95 also treats the
+# literal string "0" as off (`-n` alone reads "0" as non-empty, i.e. "on" --
+# the one value an operator would most naturally reach for), so there are now
+# two ways to say "off" and both work: `AGENT_SKIP_PERMISSIONS=` and
+# `AGENT_SKIP_PERMISSIONS=0`.
+AGENT_SKIP_PERMISSIONS="${AGENT_SKIP_PERMISSIONS-1}"
 
 # The self-looping tick agent, and the watchdog that keeps it alive.
 #
@@ -214,8 +228,21 @@ BOARD_DRY_RUN="${BOARD_DRY_RUN:-}"
 # scratch accumulates forever and nothing says so. `FOREMAN_TMP_ROOT` (and
 # `BOARD_HOME`) now move both at once because there is only one derivation
 # left to move.
-if ! AGENT_TMP_ROOT="$(BOARD_HOME="$BOARD_HOME" \
-    "$(dirname -- "$(dirname -- "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)")")/bin/tmp-dir.sh" --root)"; then
+#
+# THIS INSTALLATION's own bin/tmp-dir.sh, never the target's. A target repo
+# is not obliged to ship any particular directory of its own scripts --
+# asking it for a scratch-dir helper of its own was a leftover from before
+# foreman was extracted from the project it grew up in, and it made every
+# dispatch onto a target that (like every target except that one) ships no
+# such file die right after the worktree was cut,
+# under `set -euo pipefail` (dispatch.sh's `mkdir -p "$(agent_tmp_for
+# "$WORKTREE")"`) or silently reap nothing (sweep.sh's `remove_agent_tmp
+# "$(agent_tmp_for "$path")"`, where an empty argument passes
+# `[[ -d "" ]] || return 0` and reports success). Computed once and kept (not
+# unset like the contract-loading temporaries above) because agent_tmp_for()
+# below needs the identical path.
+_foreman_tmp_dir_sh="$(dirname -- "$(dirname -- "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)")")/bin/tmp-dir.sh"
+if ! AGENT_TMP_ROOT="$(BOARD_HOME="$BOARD_HOME" "$_foreman_tmp_dir_sh" --root)"; then
   printf 'foreman: bin/tmp-dir.sh failed; cannot derive the agent scratch root\n' >&2
   if [[ $- == *i* ]]; then return 1; else exit 1; fi
 fi
@@ -223,7 +250,8 @@ fi
 card_dir() { printf '%s/cards/%s\n' "$BOARD_HOME" "$1"; }
 # The scratch dir paired with a worktree path. Same basename, so a sweep that
 # reaps the worktree can reap the scratch without tracking anything.
-agent_tmp_for() { BOARD_HOME="$BOARD_HOME" "$REPO/ops/tmp-dir.sh" "$1"; }
+# THIS INSTALLATION's bin/tmp-dir.sh -- see the comment above AGENT_TMP_ROOT.
+agent_tmp_for() { BOARD_HOME="$BOARD_HOME" "$_foreman_tmp_dir_sh" "$1"; }
 # Every name carries the instance. `claude agents` is one flat registry shared
 # by every installation on this machine, matched by prefix in reconcile.py and
 # by regex in watch-agents.py; without this segment two instances reap each

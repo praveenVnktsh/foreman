@@ -308,4 +308,78 @@ else
 fi
 stop_stub
 
+# =============================================================================
+# Case: an ambient REPO left over from a DIFFERENT instance must not leak into
+# this one's ids.env
+#
+# config.sh exports REPO (and reads instance.env with `-`, not `:-`, so an
+# already-set value always wins -- deliberate, for an operator's explicit
+# per-call override). A shell that has sourced config.sh once for instance
+# "fixture" carries fixture's REPO in its environment from then on. Simulated
+# here exactly that way: REPO is set in resolve-ids.py's own environment
+# before it is asked to resolve a SECOND, unrelated instance ("leaky"), the
+# same shape as `boardctl add leaky ...` typed right after debugging
+# "fixture" in one terminal. Without the fix, resolve-ids.py's subprocess
+# inherits that REPO and resolves leaky's ids.env against fixture's team and
+# project instead of leaky's own.
+# =============================================================================
+
+leaky_target="$work_dir/leaky-target"
+mkdir -p "$leaky_target"
+cat >"$leaky_target/board.toml" <<'TOML'
+[linear]
+team = "OTHR"
+project = "other-project"
+[checks]
+required = ["Tests"]
+ci_workflow = "CI"
+[test]
+command = "true"
+TOML
+fixture_add_instance "$home" leaky "$leaky_target"
+leaky_home="$home/.foreman/instances/leaky"
+printf 'test-linear-key\n' > "$leaky_home/linear.key"
+chmod 600 "$leaky_home/linear.key"
+
+cat >"$work_dir/leak_check.json" <<'JSON'
+{
+  "teams": [
+    {"id": "team-fixture", "name": "PRA"},
+    {"id": "team-leaky",   "name": "OTHR"}
+  ],
+  "projects": [
+    {"id": "proj-fixture", "name": "fixture",       "teamId": "team-fixture"},
+    {"id": "proj-leaky",   "name": "other-project",  "teamId": "team-leaky"}
+  ],
+  "states": [
+    {"id": "state-backlog",    "name": "Backlog",     "type": "backlog"},
+    {"id": "state-todo",       "name": "Todo",        "type": "unstarted"},
+    {"id": "state-inprogress", "name": "In Progress", "type": "started"},
+    {"id": "state-inreview",   "name": "In Review",   "type": "started"},
+    {"id": "state-done",       "name": "Done",        "type": "completed"}
+  ],
+  "labels": []
+}
+JSON
+start_stub "$work_dir/leak_check.json"
+# REPO is set in the ENVIRONMENT, ambient, the way an export from a previous
+# `config.sh` load would be -- not passed by resolve-ids.py's own logic.
+if HOME="$home" FOREMAN_INSTANCE=leaky REPO="$target" \
+    "$resolve_ids" --instance leaky --api-url "$STUB_URL" \
+    >"$work_dir/leak.out.log" 2>"$work_dir/leak.err.log"; then
+  leaky_ids="$leaky_home/ids.env"
+  team_id="$(read_id "$leaky_ids" LINEAR_TEAM_ID)"
+  project_id="$(read_id "$leaky_ids" LINEAR_PROJECT_ID)"
+  if [[ "$team_id" == "team-leaky" && "$project_id" == "proj-leaky" ]]; then
+    ok "an ambient REPO from a different instance does not leak into this instance's ids.env"
+  else
+    not_ok "an ambient REPO from a different instance does not leak into this instance's ids.env" \
+      "resolved team=[$team_id] project=[$project_id], expected leaky's own (team-leaky/proj-leaky) -- got fixture's instead"
+  fi
+else
+  not_ok "an ambient REPO from a different instance does not leak into this instance's ids.env" \
+    "resolve-ids failed outright: $(cat "$work_dir/leak.err.log")"
+fi
+stop_stub
+
 exit "$fail"

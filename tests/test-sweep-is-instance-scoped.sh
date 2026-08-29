@@ -37,23 +37,11 @@ mkdir -p "$fixture"
 git -C "$fixture" init -q -b main
 fixture_board_toml "$fixture"
 
-# `agent_tmp_for` still asks the TARGET's own `$REPO/ops/tmp-dir.sh` (config.sh
-# leaves that alone -- see task-5-decisions.md section 6), so the fixture needs
-# one. Mirrors `bin/tmp-dir.sh`'s own derivation exactly, so AGENT_TMP_ROOT
-# (computed by config.sh from THIS installation's bin/tmp-dir.sh) and what this
-# prints agree.
-mkdir -p "$fixture/ops"
-cat > "$fixture/ops/tmp-dir.sh" <<'TMPDIR'
-#!/usr/bin/env bash
-set -euo pipefail
-root="${FOREMAN_TMP_ROOT:-${BOARD_HOME:-$HOME/.foreman}/tmp}"
-case "${1:-}" in
-  --root) printf '%s\n' "$root" ;;
-  "") printf '%s/%s\n' "$root" "$(basename -- "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)")" ;;
-  *) printf '%s/%s\n' "$root" "$(basename -- "$1")" ;;
-esac
-TMPDIR
-chmod +x "$fixture/ops/tmp-dir.sh"
+# `agent_tmp_for` asks THIS INSTALLATION's own `bin/tmp-dir.sh`, never the
+# target's -- fixed after a reviewer caught it still asking the target for a
+# scratch-dir helper script of its own, a path only the origin project
+# shipped. The fixture deliberately ships no scripts of its own at all: that
+# is the regression this file now guards against staying fixed.
 
 home="$work_dir/home"
 fixture_add_instance "$home" alpha "$fixture"

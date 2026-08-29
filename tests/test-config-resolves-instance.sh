@@ -52,6 +52,21 @@ check "env beats ids"                    "other"       "$(ask LINEAR_TEAM_ID LIN
 # under `:-` and pass under `-`; see task-3-decisions.md section 5.
 check "explicit empty env beats ids (not :-)"      ""  "$(ask LINEAR_TEAM_ID LINEAR_TEAM_ID=)"
 check "explicit empty env beats contract (not :-)" ""  "$(ask TEST_COMMAND TEST_COMMAND=)"
+
+# HOST_SLOT_STALE_MINUTES is not read through `_foreman_read_env` -- it is a
+# plain `${VAR-720}` a few lines below the rest -- and it used to be
+# `${VAR:-720}`, the one place in this file that got the `-` vs `:-`
+# distinction backwards. config.sh's OWN comment above it says "Empty
+# disables the backstop entirely", and reconcile.py's HOST_SLOT_STALE_MINUTES
+# already treats an empty string as `None` (disabled) on its own side -- so
+# an operator who set `HOST_SLOT_STALE_MINUTES=` meaning "disabled" instead
+# silently got 720 back, from config.sh alone, before reconcile.py ever saw
+# the value.
+check "an explicitly empty HOST_SLOT_STALE_MINUTES stays empty (not :-)" \
+  "" "$(ask HOST_SLOT_STALE_MINUTES HOST_SLOT_STALE_MINUTES=)"
+check "an unset HOST_SLOT_STALE_MINUTES still falls back to 720" \
+  "720" "$(ask HOST_SLOT_STALE_MINUTES)"
+
 check "instance name is exported"        "demo"        "$(ask INSTANCE)"
 
 # REPO must NOT be the foreman checkout. This is the bug the change exists to

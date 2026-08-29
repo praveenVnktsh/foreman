@@ -121,17 +121,26 @@ board_root="$(env HOME="$home" FOREMAN_INSTANCE=demo bash -c \
   "source '$install/skills/board/config.sh'; printf '%s\n' \"\$AGENT_TMP_ROOT\"")"
 expect "SENTINEL --root" "$board_root" "config.sh AGENT_TMP_ROOT"
 
+# agent_tmp_for() used to ask $REPO for a scratch-dir helper script of its
+# own -- $REPO being the *target*, which under the instance model is under no
+# obligation to ship any such thing, and every real target except the origin
+# project never did. That made every dispatch die right after cutting the
+# worktree (dispatch.sh's `mkdir -p "$(agent_tmp_for "$WORKTREE")"` under
+# `set -euo pipefail`) and made sweep.sh silently reap nothing (an empty
+# substitution passes `[[ -d "" ]] || return 0`). `target-a` above
+# deliberately ships no scripts of its own at all -- proof the function no
+# longer needs one.
+echo "==> agent_tmp_for asks bin/tmp-dir.sh too, never a script of the target's own"
+[[ -e "$target/ops" ]] && fail "target-a fixture must not have scripts of its own -- the whole point is that it doesn't need any"
+tmp_for="$(env HOME="$home" FOREMAN_INSTANCE=demo bash -c \
+  "source '$install/skills/board/config.sh'; agent_tmp_for /some/worktree/board-PRA-9")"
+expect "SENTINEL /some/worktree/board-PRA-9" "$tmp_for" "agent_tmp_for routes through bin/tmp-dir.sh"
+
 echo "==> the board stops rather than guessing when the script is unusable"
 rm "$install/bin/tmp-dir.sh"
 status=0
 env HOME="$home" FOREMAN_INSTANCE=demo bash -c \
   "source '$install/skills/board/config.sh'" >/dev/null 2>&1 || status=$?
 [[ "$status" -ne 0 ]] || fail "config.sh sourced cleanly with no bin/tmp-dir.sh"
-
-# NOTE: agent_tmp_for() is not exercised here. Its body still asks
-# "$REPO/ops/tmp-dir.sh" -- $REPO being the *target*, which under the instance
-# model ships no such script -- because Task 3 (task-3-decisions.md section 4)
-# deliberately leaves every function body in config.sh, including this one,
-# for Task 5 to rewrite. Routing coverage for it belongs with that rewrite.
 
 echo "PASS"

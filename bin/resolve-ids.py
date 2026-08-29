@@ -331,6 +331,23 @@ def _load_instance_config(instance: str) -> dict:
     subprocess's own stdout is safe from the bash-3.2 NUL-in-$(...) bug
     because it never passes through a `$(...)` capture inside bash itself;
     Python's subprocess.run reads the raw bytes directly.
+
+    REPO, BOARD_HOME and INSTANCE_HOME are scrubbed from the environment
+    handed to that subprocess, even though config.sh exports all three
+    (`export REPO INSTANCE INSTANCE_HOME BOARD_HOME FOREMAN_HOME`) and reads
+    instance.env with `-`, not `:-`, so an already-set value always wins (see
+    config.sh:56 -- that is deliberate, and test-config-resolves-instance.sh
+    depends on it, for values an operator legitimately overrides per call).
+    Left alone here, that combination is a leak: any shell that has sourced
+    config.sh once for instance A carries A's REPO in its environment, and
+    resolving ids for a DIFFERENT instance B -- `boardctl add B ...` typed
+    straight after debugging A in the same terminal -- would silently ignore
+    B's own instance.env and pin instance A's team and project into B's
+    ids.env. This function's whole job is "derive config fresh for exactly
+    the named --instance", and `boardctl add` already writes instance.env's
+    REPO before ever calling this script (see boardctl's own comment), so
+    there is no legitimate reason for it to inherit an ambient REPO from
+    whatever ran before it in this process's environment.
     """
     keys = ("INSTANCE_HOME", "LINEAR_TEAM_NAME", "LINEAR_PROJECT_NAME")
     script = os.path.join(
@@ -341,6 +358,8 @@ def _load_instance_config(instance: str) -> dict:
     )
     printf = 'printf "%s\\0" ' + " ".join(f'"${k}"' for k in keys)
     env = dict(os.environ)
+    for leaked in ("REPO", "BOARD_HOME", "INSTANCE_HOME"):
+        env.pop(leaked, None)
     env["FOREMAN_INSTANCE"] = instance
     result = subprocess.run(
         ["bash", "-c", f". {script!r} >/dev/null; {printf}"],

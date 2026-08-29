@@ -96,6 +96,20 @@ LISTS = [
 # a Python test suite, a large `node_modules`, a media pipeline -- say so in
 # `board.toml`'s `[limits]`; this table cannot tell a cheap repo from an
 # unconfigured expensive one.
+# A limit whose own zero disarms a safety gate rather than merely idling it.
+# `reviewers_per_round = 0` dispatches zero reviewers and SKILL.md then reads
+# "no blocking findings" and merges; `max_review_rounds = 0` never even asks
+# for a first round. Both load cleanly under the plain `value < 0` check below
+# -- a target can disable the adversarial review gate with one integer. Every
+# OTHER limit here may still be zero: MAX_CONCURRENT=0 only starves dispatch,
+# MAX_BUILD_ATTEMPTS=0 only parks every card unbuilt, and the free-space/probe
+# sizes are floors preflight.py adds to, not gates that skip a check outright
+# -- none of those merge something unreviewed.
+LIMIT_MINIMUMS = {
+    "MAX_REVIEW_ROUNDS": 1,
+    "REVIEWERS_PER_ROUND": 1,
+}
+
 LIMITS = {
     "MAX_CONCURRENT": 1,
     "MAX_BUILD_ATTEMPTS": 2,
@@ -246,7 +260,11 @@ def load(path: str) -> list[tuple[str, str]]:
         die(f"{path}: limits must be a table")
     for key, fallback in LIMITS.items():
         value = limits.get(key.lower(), fallback)
-        if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+        floor = LIMIT_MINIMUMS.get(key, 0)
+        if not isinstance(value, int) or isinstance(value, bool) or value < floor:
+            if floor > 0:
+                die(f"{path}: limits.{key.lower()} must be an integer >= {floor} "
+                    f"(0 would disarm the adversarial review gate)")
             die(f"{path}: limits.{key.lower()} must be a non-negative integer")
         out.append((key, str(value)))
 
