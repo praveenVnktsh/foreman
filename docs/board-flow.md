@@ -2,6 +2,15 @@
 
 One tick, end to end. Line counts are current as of 2026-08-31.
 
+GitHub renders the mermaid below. Nothing else does, so to see it anywhere else:
+
+```bash
+bin/render-diagram.sh docs/board-flow.md
+```
+
+That writes `docs/board-flow.svg`, which is gitignored. The mermaid is the
+source; an SVG is a view of it.
+
 ```mermaid
 flowchart TD
     cron(["cron"]) --> sup
