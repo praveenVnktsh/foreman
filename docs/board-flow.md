@@ -12,78 +12,87 @@ That writes `docs/board-flow.svg`, which is gitignored. The mermaid is the
 source; an SVG is a view of it.
 
 ```mermaid
+%%{init: {
+  "theme": "base",
+  "themeVariables": {
+    "fontFamily": "ui-sans-serif, -apple-system, BlinkMacSystemFont, Segoe UI, Helvetica, Arial, sans-serif",
+    "fontSize": "13px",
+    "lineColor": "#94a3b8",
+    "primaryTextColor": "#0f172a",
+    "clusterBkg": "#f8fafc",
+    "clusterBorder": "#cbd5e1",
+    "edgeLabelBackground": "#ffffff"
+  },
+  "flowchart": { "curve": "basis", "nodeSpacing": 40, "rankSpacing": 55, "padding": 14 }
+}}%%
 flowchart TD
     cron(["cron"]) --> sup
 
-    sup["<b>supervise.sh</b> · 201<br/>watchdog only<br/>guarantees exactly one tick alive<br/><i>never dispatches a card</i>"]
-    sup -->|"starts · restarts · recycles"| tick
+    sup["<b>supervise.sh</b><br/><small>201 lines</small><br/>watchdog only<br/><i>never dispatches a card</i>"]
+    sup -->|"start · restart · recycle"| tick
+    tick["<b>tick agent</b><br/><small>SKILL.md · 58KB</small><br/>holds no state<br/><i>re-derives everything</i>"]
 
-    tick["<b>tick agent</b><br/>claude --bg '/loop /board'<br/>driven by SKILL.md · 58KB<br/><i>holds no state, re-derives everything</i>"]
-
-    subgraph ONETICK["ONE TICK"]
+    subgraph ONETICK[" ONE TICK "]
         direction TB
-        rec["<b>reconcile.py</b> · 1005<br/>join Linear + gh + claude agents<br/>→ what should happen to each card"]
-        pre["<b>preflight.py</b> · 305<br/>can this machine build at all?<br/>disk · quota · real write probes"]
-        bri["<b>brief.py</b> · 290<br/>write the prompt<br/>build | review | fix | ci-fix"]
-        dis["<b>dispatch.sh</b> · 205<br/>cut worktree · bootstrap · spawn"]
-        wait["<b>waitfor.py</b> · 272<br/><b>watch-agents.py</b> · 140<br/>block until the work finishes"]
-        swp["<b>sweep.sh</b> · 199<br/>reap worktrees and scratch"]
-
-        rec -->|"card needs an agent"| pre
-        pre -->|"machine is fit"| bri
+        rec["<b>reconcile.py</b><br/><small>1005 lines</small><br/>join Linear · gh · agents<br/><i>what happens to each card</i>"]
+        pre["<b>preflight.py</b><br/><small>305 lines</small><br/>can this machine build?"]
+        bri["<b>brief.py</b><br/><small>290 lines</small><br/>write the prompt"]
+        dis["<b>dispatch.sh</b><br/><small>205 lines</small><br/>worktree · bootstrap · spawn"]
+        wai["<b>waitfor.py · watch-agents.py</b><br/><small>272 + 140 lines</small><br/>block until work finishes"]
+        swp["<b>sweep.sh</b><br/><small>199 lines</small><br/>reap worktrees"]
+        rec -->|"needs an agent"| pre
+        pre -->|"fit"| bri
         bri --> dis
-        dis --> wait
-        wait --> swp
+        dis --> wai
+        wai --> swp
     end
 
     tick --> rec
-    swp -.->|"next tick re-derives from scratch"| rec
+    swp -.->|"next tick re-derives"| rec
+    pre -->|"unfit"| stop["<b>refuse to dispatch</b><br/><i>not the card's fault</i>"]
 
-    pre -->|"machine is unfit"| unfit["<b>refuse to dispatch</b><br/>not the card's fault<br/>do not spend a build attempt"]
-
-    dis --> agents["spawned agent"]
-
-    subgraph AGENTS["DETACHED AGENTS · own worktree · permissions bypassed"]
+    subgraph AGENTS[" DETACHED AGENTS · own worktree "]
         direction LR
-        build["build<br/>implement · test · open PR"]
-        review["review<br/>read the diff"]
-        fix["fix<br/>answer blocking findings"]
+        bld["build<br/><small>implement · test · PR</small>"]
+        rev["review<br/><small>read the diff</small>"]
+        fix["fix<br/><small>answer findings</small>"]
     end
+    dis --> bld
+    dis --> rev
+    dis --> fix
 
-    agents --> build
-    agents --> review
-    agents --> fix
+    ev["<b>evidence.sh</b><br/><small>362 lines</small><br/>read what GitHub holds <i>now</i><br/><i>never the working tree</i>"]
+    rev -.-> ev
+    fix -.-> ev
 
-    ev["<b>evidence.sh</b> · 362<br/>read a file as GitHub holds it NOW<br/>fetches, then answers<br/><i>never the working tree</i>"]
-    review -.->|"verify a claim"| ev
-    fix -.->|"refute a finding"| ev
-
-    subgraph CONFIG["READ BY EVERYTHING"]
+    subgraph CONFIG[" READ BY EVERYTHING "]
         direction LR
-        toml["board.toml<br/><i>what the project declares</i>"]
-        contract["bin/contract.py<br/>parsed, never sourced"]
-        inst["instance.env · ids.env<br/><i>what the machine declares</i>"]
-        cfg["config.sh · 244"]
-        toml --> contract --> cfg
-        inst --> cfg
+        toml["board.toml<br/><small>the project declares</small>"]
+        con["bin/contract.py<br/><small>parsed, never sourced</small>"]
+        ids["instance.env · ids.env<br/><small>the machine declares</small>"]
+        cfg["config.sh<br/><small>244 lines</small>"]
+        toml --> con --> cfg
+        ids --> cfg
     end
+    cfg -.-> rec
 
-    CONFIG -.-> ONETICK
-    lock["withlock.py · 84<br/>serialise shared git metadata"]
-    dis -.-> lock
-
-    classDef brain fill:#7c2d12,stroke:#ea580c,color:#fff
-    classDef gate fill:#713f12,stroke:#eab308,color:#fff
-    classDef plain fill:#1e3a5f,stroke:#3b82f6,color:#fff
-    classDef bad fill:#7f1d1d,stroke:#ef4444,color:#fff
-    classDef cfg fill:#14532d,stroke:#22c55e,color:#fff
+    classDef brain fill:#fff7ed,stroke:#ea580c,stroke-width:2.5px,color:#7c2d12
+    classDef gate  fill:#fefce8,stroke:#ca8a04,stroke-width:2px,color:#713f12
+    classDef step  fill:#eff6ff,stroke:#93c5fd,stroke-width:1.5px,color:#1e3a5f
+    classDef stop  fill:#fef2f2,stroke:#ef4444,stroke-width:2px,color:#7f1d1d
+    classDef cfgn  fill:#f0fdf4,stroke:#86efac,stroke-width:1.5px,color:#14532d
+    classDef agent fill:#f5f3ff,stroke:#c4b5fd,stroke-width:1.5px,color:#4c1d95
+    classDef edge  fill:#f8fafc,stroke:#cbd5e1,stroke-width:1.5px,color:#334155
 
     class rec brain
     class pre,ev gate
-    class bri,dis,wait,swp,sup,tick,lock,agents plain
-    class unfit bad
-    class toml,contract,inst,cfg cfg
-    class build,review,fix plain
+    class bri,dis,wai,swp step
+    class sup,tick,cron edge
+    class stop stop
+    class toml,con,ids,cfg cfgn
+    class bld,rev,fix agent
+
+    linkStyle default stroke:#94a3b8,stroke-width:1.5px
 ```
 
 ## Three things the diagram shows that a file list does not

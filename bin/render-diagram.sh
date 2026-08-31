@@ -54,7 +54,7 @@ else
   [[ -s "$BLOCK" ]] || die "no \`\`\`mermaid block in $SRC"
 fi
 
-"${RENDER[@]}" --input "$BLOCK" --output "$OUT" --backgroundColor transparent \
+"${RENDER[@]}" --input "$BLOCK" --output "$OUT" --backgroundColor white \
   >/dev/null || die "mermaid-cli failed on $SRC"
 
 [[ -s "$OUT" ]] || die "renderer reported success but wrote nothing to $OUT"
