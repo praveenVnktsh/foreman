@@ -1,0 +1,13 @@
+/* Styling mermaid-cli applies at render time, so it reaches the PNG as well as
+ * the SVG. Post-processing the SVG afterwards would fix one and leave the other
+ * clipped.
+ *
+ * Cluster titles clip. Mermaid sizes a <foreignObject> for each one from a
+ * measured text width, then paints the label bold, and bold is wider than what
+ * was measured -- "READ BY EVERYTHING" was given 125px and needs about 170.
+ * Every cluster label came out roughly 25% too narrow.
+ *
+ * Overflow rather than a guessed width: any hardcoded number here would be
+ * wrong for the next label somebody writes. */
+.cluster-label foreignObject { overflow: visible; }
+.cluster-label foreignObject div { white-space: nowrap; }

@@ -54,6 +54,11 @@ else
 or make npx available on PATH."
 fi
 
+# Render-time styling. Refuse rather than silently produce the clipped labels
+# this file exists to prevent.
+CSS="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/diagram.css"
+[[ -r "$CSS" ]] || die "missing $CSS; renders would clip their cluster labels"
+
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
 BLOCK="$WORK/diagram.mmd"
@@ -80,7 +85,8 @@ esac
 [[ -z "$HTML" || "$OUT" == *.svg ]] || die "--html needs an .svg output; a page wrapping a PNG cannot be zoomed without blurring"
 
 "${RENDER[@]}" --input "$BLOCK" --output "$OUT" --backgroundColor white \
-  ${FMT[@]+"${FMT[@]}"} >/dev/null || die "mermaid-cli failed on $SRC"
+  --cssFile "$CSS" ${FMT[@]+"${FMT[@]}"} >/dev/null \
+  || die "mermaid-cli failed on $SRC"
 
 [[ -s "$OUT" ]] || die "renderer reported success but wrote nothing to $OUT"
 
