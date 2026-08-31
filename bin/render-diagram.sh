@@ -4,7 +4,13 @@
 #   bin/render-diagram.sh docs/board-flow.md            # -> docs/board-flow.svg
 #   bin/render-diagram.sh --html docs/board-flow.md     # -> .svg and .html
 #   bin/render-diagram.sh docs/board-flow.md /tmp/x.svg
+#   bin/render-diagram.sh docs/board-flow.md docs/board-flow.png
 #   bin/render-diagram.sh diagram.mmd
+#
+# The output EXTENSION picks the format. PNG previews in more places than SVG
+# does, so it is often the one you actually want to look at; SVG is the one to
+# zoom, because a PNG blurs past the scale it was rendered at. PNG is rendered
+# at 3x for that reason.
 #
 # `--html` writes a self-contained page beside the SVG with scroll-to-zoom and
 # drag-to-pan. An SVG on its own cannot be zoomed in a file preview, and a
@@ -63,8 +69,18 @@ else
   [[ -s "$BLOCK" ]] || die "no \`\`\`mermaid block in $SRC"
 fi
 
+# mermaid-cli picks its format from the output extension, so the caller does
+# too. A PNG is rendered at 3x: at 1x, 13px labels in a 1239-wide drawing are
+# unreadable the moment anything scales them down.
+FMT=(); case "$OUT" in
+  *.png) FMT=(--scale 3) ;;
+  *.svg) ;;
+  *) die "output must end in .svg or .png, got $OUT" ;;
+esac
+[[ -z "$HTML" || "$OUT" == *.svg ]] || die "--html needs an .svg output; a page wrapping a PNG cannot be zoomed without blurring"
+
 "${RENDER[@]}" --input "$BLOCK" --output "$OUT" --backgroundColor white \
-  >/dev/null || die "mermaid-cli failed on $SRC"
+  ${FMT[@]+"${FMT[@]}"} >/dev/null || die "mermaid-cli failed on $SRC"
 
 [[ -s "$OUT" ]] || die "renderer reported success but wrote nothing to $OUT"
 
@@ -73,6 +89,7 @@ fi
 # The viewBox already carries the aspect ratio, so dropping the cap lets it
 # scale. Only the root element's cap: the stylesheet further down sets
 # `max-width:200px` on node labels, which is what keeps long labels wrapping.
+if [[ "$OUT" == *.svg ]]; then
 python3 - "$OUT" <<'PYEOF'
 import re, sys
 path = sys.argv[1]
@@ -81,6 +98,7 @@ head = svg[:600]
 fixed = re.sub(r'style="max-width:\s*[0-9.]+px;\s*', 'style="', head, count=1)
 open(path, "w").write(fixed + svg[600:])
 PYEOF
+fi
 
 printf '%s\n' "$OUT"
 

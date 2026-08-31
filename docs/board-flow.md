@@ -5,11 +5,20 @@ One tick, end to end. Line counts are current as of 2026-08-31.
 GitHub renders the mermaid below. Nothing else does, so to see it anywhere else:
 
 ```bash
-bin/render-diagram.sh docs/board-flow.md
+bin/render-diagram.sh docs/board-flow.md                    # SVG
+bin/render-diagram.sh docs/board-flow.md docs/board-flow.png   # PNG, 3x
+bin/render-diagram.sh --html docs/board-flow.md             # zoom and pan
 ```
 
-That writes `docs/board-flow.svg`, which is gitignored. The mermaid is the
-source; an SVG is a view of it.
+The output extension picks the format. Every render is gitignored: the mermaid
+above is the source, and a render is a view of it.
+
+- **PNG** previews in the most places, and your image viewer's zoom works on it.
+  It blurs past 3x.
+- **SVG** stays sharp at any size, but many viewers will not preview it and none
+  offer a zoom control.
+- **`--html`** wraps the SVG in a page with scroll-to-zoom and drag-to-pan. Open
+  it with `open docs/board-flow.html`.
 
 ```mermaid
 %%{init: {
