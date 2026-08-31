@@ -3,9 +3,4 @@
 __pycache__/
 
 # Local diagram renders. Source of truth is the mermaid in docs/*.md.
-/docs/*.svg
-/docs/*.dot
-/docs/*.png
-
-# Local diagram render pages.
 /docs/*.html

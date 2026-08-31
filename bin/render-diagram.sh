@@ -1,51 +1,38 @@
 #!/usr/bin/env bash
-# Render a mermaid diagram to SVG, for viewing.
+# Render a mermaid diagram to a page you can look at.
 #
-#   bin/render-diagram.sh docs/board-flow.md            # -> docs/board-flow.svg
-#   bin/render-diagram.sh --html docs/board-flow.md     # -> .svg and .html
-#   bin/render-diagram.sh docs/board-flow.md /tmp/x.svg
-#   bin/render-diagram.sh docs/board-flow.md docs/board-flow.png
+#   bin/render-diagram.sh docs/board-flow.md          # -> docs/board-flow.html
+#   bin/render-diagram.sh docs/board-flow.md /tmp/x.html
 #   bin/render-diagram.sh diagram.mmd
 #
-# The output EXTENSION picks the format. PNG previews in more places than SVG
-# does, so it is often the one you actually want to look at; SVG is the one to
-# zoom, because a PNG blurs past the scale it was rendered at. PNG is rendered
-# at 3x for that reason.
-#
-# `--html` writes a self-contained page beside the SVG with scroll-to-zoom and
-# drag-to-pan. An SVG on its own cannot be zoomed in a file preview, and a
-# diagram this size is unreadable at fit-to-window: 1239 x 1536 shrunk into a
-# side pane puts 13px type below the size anyone can read.
-#
-# The mermaid in the markdown is the source. The SVG is a view, and .gitignore
+# The mermaid in the markdown is the source. The page is a view, and .gitignore
 # keeps it out of the repository -- a committed render is a second copy of one
 # fact, and it goes stale the first time nobody re-runs this.
 #
-# Why extract the block instead of handing the .md to mermaid-cli directly:
-# mermaid-cli given `-i foo.md -o out.svg` writes `out-1.svg`, `out-2.svg`, one
-# per block, and never writes the path it was asked for. A script whose output
-# path is a suggestion is a script every caller has to guess at, so this one
-# takes the first block and writes exactly where it was told.
+# HTML only, deliberately. A bare SVG cannot be zoomed in any file preview, and
+# a PNG blurs past the scale it was rendered at; a drawing this size is
+# unreadable at fit-to-window either way. Both existed here and both were worse
+# than the page, so both are gone rather than kept as options nobody should pick.
+#
+# Why extract the block instead of handing the .md to mermaid-cli: given
+# `-i foo.md -o out.svg` it writes `out-1.svg` and never the path it was asked
+# for. A script whose output path is a suggestion is one every caller has to
+# guess at.
 set -euo pipefail
 
 die() { printf 'render-diagram: %s\n' "$*" >&2; exit 1; }
 
-HTML=""
-if [[ "${1:-}" == "--html" ]]; then HTML=1; shift; fi
-
 SRC="${1:-}"
-[[ -n "$SRC" ]] || die "usage: render-diagram.sh <file.md|file.mmd> [out.svg]"
+[[ -n "$SRC" ]] || die "usage: render-diagram.sh <file.md|file.mmd> [out.html]"
 [[ -r "$SRC" ]] || die "cannot read $SRC"
-OUT="${2:-${SRC%.*}.svg}"
+OUT="${2:-${SRC%.*}.html}"
+[[ "$OUT" == *.html ]] || die "output must end in .html, got $OUT"
 
-# A renderer, or a clear refusal. Never a half-render.
 if command -v mmdc >/dev/null 2>&1; then
   RENDER=(mmdc)
 elif command -v npx >/dev/null 2>&1; then
-  # An uncached mermaid-cli pulls a headless browser, roughly 150MB, and takes
-  # minutes. Say so rather than appearing to hang with no output. Worded to stay
-  # true on a cached run, which takes about five seconds: this line prints every
-  # time and must not read as "downloading now".
+  # Worded to stay true on a cached run, which takes about five seconds. This
+  # line prints every time and must not read as "downloading now".
   printf 'render-diagram: using npx. If mermaid-cli is not cached this downloads ~150MB and takes minutes.\n' >&2
   RENDER=(npx -y @mermaid-js/mermaid-cli)
 else
@@ -54,67 +41,39 @@ else
 or make npx available on PATH."
 fi
 
-# Render-time styling. Refuse rather than silently produce the clipped labels
-# this file exists to prevent.
+# Render-time styling. Refuse rather than silently produce the clipped cluster
+# labels that file exists to prevent.
 CSS="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/diagram.css"
 [[ -r "$CSS" ]] || die "missing $CSS; renders would clip their cluster labels"
 
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
 BLOCK="$WORK/diagram.mmd"
+SVG="$WORK/diagram.svg"
 
 if [[ "$SRC" == *.mmd ]]; then
   cp "$SRC" "$BLOCK"
 else
-  # First ```mermaid fence only. awk rather than sed -n '/,/p' so a file with no
-  # fence produces an empty file and the check below fires, instead of silently
+  # First ```mermaid fence only. awk rather than sed so a file with no fence
+  # produces an empty file and the check below fires, instead of silently
   # rendering the whole document as if it were mermaid.
   awk '/^```mermaid[[:space:]]*$/{f=1;next} /^```[[:space:]]*$/{if(f)exit} f' \
     "$SRC" >"$BLOCK"
   [[ -s "$BLOCK" ]] || die "no \`\`\`mermaid block in $SRC"
 fi
 
-# mermaid-cli picks its format from the output extension, so the caller does
-# too. A PNG is rendered at 3x: at 1x, 13px labels in a 1239-wide drawing are
-# unreadable the moment anything scales them down.
-FMT=(); case "$OUT" in
-  *.png) FMT=(--scale 3) ;;
-  *.svg) ;;
-  *) die "output must end in .svg or .png, got $OUT" ;;
-esac
-[[ -z "$HTML" || "$OUT" == *.svg ]] || die "--html needs an .svg output; a page wrapping a PNG cannot be zoomed without blurring"
+"${RENDER[@]}" --input "$BLOCK" --output "$SVG" --backgroundColor white \
+  --cssFile "$CSS" >/dev/null || die "mermaid-cli failed on $SRC"
+[[ -s "$SVG" ]] || die "renderer reported success but wrote nothing"
 
-"${RENDER[@]}" --input "$BLOCK" --output "$OUT" --backgroundColor white \
-  --cssFile "$CSS" ${FMT[@]+"${FMT[@]}"} >/dev/null \
-  || die "mermaid-cli failed on $SRC"
-
-[[ -s "$OUT" ]] || die "renderer reported success but wrote nothing to $OUT"
-
-# mermaid-cli caps the root element at `max-width: <diagram width>px`, so the
-# drawing refuses to grow past its natural size however wide the container is.
-# The viewBox already carries the aspect ratio, so dropping the cap lets it
-# scale. Only the root element's cap: the stylesheet further down sets
-# `max-width:200px` on node labels, which is what keeps long labels wrapping.
-if [[ "$OUT" == *.svg ]]; then
-python3 - "$OUT" <<'PYEOF'
-import re, sys
-path = sys.argv[1]
-svg = open(path).read()
-head = svg[:600]
-fixed = re.sub(r'style="max-width:\s*[0-9.]+px;\s*', 'style="', head, count=1)
-open(path, "w").write(fixed + svg[600:])
-PYEOF
-fi
-
-printf '%s\n' "$OUT"
-
-if [[ -n "$HTML" ]]; then
-  PAGE="${OUT%.svg}.html"
-  {
-    printf '%s' '<!doctype html><meta charset="utf-8"><title>'
-    printf '%s' "$(basename "${SRC%.*}")"
-    cat <<'PAGEEOF'
-</title>
+# mermaid caps the root element at `max-width: <diagram width>px`, so the
+# drawing would refuse to grow past its natural size. The page overrides it in
+# CSS below rather than editing the SVG, so there is one place that decides how
+# the drawing is sized.
+{
+  printf '<!doctype html><meta charset="utf-8"><title>%s</title>\n' \
+    "$(basename "${SRC%.*}")"
+  cat <<'PAGE'
 <style>
   html,body{margin:0;height:100%;background:#f8fafc;font:13px ui-sans-serif,-apple-system,Segoe UI,Helvetica,Arial,sans-serif;color:#334155}
   #stage{position:fixed;inset:0;overflow:hidden;cursor:grab}
@@ -127,13 +86,14 @@ if [[ -n "$HTML" ]]; then
   button{font:inherit;border:1px solid #cbd5e1;background:#fff;border-radius:6px;
          padding:3px 9px;cursor:pointer;color:#334155}
   button:hover{background:#f1f5f9}
+  button:focus-visible{outline:2px solid #2563eb;outline-offset:1px}
   #pct{min-width:44px;text-align:right;font-variant-numeric:tabular-nums;color:#64748b}
   kbd{font:inherit;color:#94a3b8}
 </style>
 <div id="stage"><div id="art">
-PAGEEOF
-    cat "$OUT"
-    cat <<'PAGEEOF'
+PAGE
+  cat "$SVG"
+  cat <<'PAGE'
 </div></div>
 <div id="bar">
   <button id="out">&minus;</button><button id="in">+</button>
@@ -163,10 +123,10 @@ PAGEEOF
   document.getElementById('in').onclick=function(){zoom(1.25,innerWidth/2,innerHeight/2);};
   document.getElementById('out').onclick=function(){zoom(0.8,innerWidth/2,innerHeight/2);};
   document.getElementById('fit').onclick=fit;
-  document.getElementById('one').onclick=function(){var c=s;zoom(1/c,innerWidth/2,innerHeight/2);};
+  document.getElementById('one').onclick=function(){zoom(1/s,innerWidth/2,innerHeight/2);};
   addEventListener('resize',fit);fit();
 </script>
-PAGEEOF
-  } >"$PAGE"
-  printf '%s\n' "$PAGE"
-fi
+PAGE
+} >"$OUT"
+
+printf '%s\n' "$OUT"
