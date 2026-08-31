@@ -1,21 +1,15 @@
 ---
 name: graphplan
-description: "Plan and drive a whole task, from a cold start to a merged pull request. Use at the beginning of any non-trivial piece of work, before writing code. Produces one self-contained mermaid dependency graph as the plan, then executes it with parallel subagents, tests it, reviews it adversarially, and ships it. Use when asked to build, implement or add a feature, or when a task is large enough that the order of work matters."
+description: "Turn a task into one mermaid dependency graph that a fresh subagent can execute. Use at the very beginning of any non-trivial piece of work, before writing code, and before deciding what to parallelise. Produces the plan and stops; implementing, testing, reviewing and shipping it are the loop in AGENTS.md. Use when asked to build, implement, add or design a feature, or when a task is large enough that the order of the work matters."
 ---
 
 # Graphplan
 
-Five stages. Do not start one before the stage above it has passed its gate.
+Turn a task into one dependency graph, and stop there. `AGENTS.md` owns what
+happens after: implement, test, review, ship. This skill owns the plan and the
+contract the plan is written in.
 
-| Stage | Output | Gate |
-|---|---|---|
-| 1. Plan | one mermaid graph | the operator approves the graph |
-| 2. Implement | code on a branch | every node in the graph is done |
-| 3. Test | a green run of the target's test command | it actually ran, and passed |
-| 4. Review | fixes for blocking findings | one round only |
-| 5. Ship | a merged pull request | CI green, comments answered |
-
-## Stage 1: Plan
+## Plan
 
 **Read before you plan.** Name what you read: the task, the files it touches,
 `STYLEGUIDE.md`, `AGENTS.md`, and the surrounding code. A plan written before
@@ -94,9 +88,11 @@ bin/render-diagram.sh docs/plans/<file>.md && open docs/plans/<file>.html
 Stop. Do not implement until they approve the graph. A plan is the cheapest
 place to be wrong, which is the only reason to write one.
 
-## Stage 2: Implement
+## How the graph is executed
 
-Translate the graph into one Workflow script. The mapping is mechanical:
+This belongs here rather than in `AGENTS.md` because it is a property of the
+artifact: a graph that cannot be mapped to execution is a picture. The mapping
+is mechanical, which is the whole return on writing the plan as a graph.
 
 - a node → `agent(prompt, {label, model, effort})`
 - an edge → a `pipeline()` stage boundary
@@ -114,51 +110,6 @@ the acceptance check, and an instruction to read `STYLEGUIDE.md` first.
 If the session has no Workflow tool, say so and execute the graph in rank order
 yourself. Do not silently serialise and call it done.
 
-## Stage 3: Test
-
-Run the target's own command. Read it from the contract rather than guessing:
-
-```bash
-bin/contract.py board.toml | tr '\0' '\n' | grep -A1 TEST_COMMAND
-```
-
-Fan out only what is genuinely independent — a long suite split by directory, or
-one agent per failing test. One green run of the whole suite at the end is what
-the gate needs, and a fanned-out run does not replace it.
-
-**A test you did not watch run is not a passing test.** Quote the output.
-
-## Stage 4: Review
-
-Run the `adversarial-reviewer` skill. **Once.**
-
-- Fix every blocking finding.
-- A finding you believe is wrong gets refuted with evidence, not ignored. Read
-  the file as the remote has it with `skills/board/evidence.sh`, reproduce the
-  stated failure path, and say what you ran.
-- Do not re-run the reviewer after fixing. A second round on a diff the first
-  round shaped finds the fixes, not the defects, and costs a full pass to learn
-  nothing.
-
-## Stage 5: Ship
-
-1. Open the pull request. Ready for review, never a draft — a draft cannot be
-   merged, so it blocks after its checks are green.
-2. Watch the checks. `gh run watch`, or poll `gh pr checks`. An empty check list
-   is not a pass: it means the build never queued, and an empty commit produces
-   the `synchronize` event that starts it.
-3. A red check is fixed on the same branch, not worked around.
-4. Answer every review comment. Answering means a reply and a commit, or a reply
-   explaining why no commit.
-5. Merge.
-
-**Do not merge if the board dispatched you.** `skills/board/brief.py` tells a
-dispatched agent *"Do not merge, and do not enable auto-merge"*, and it is right:
-merging deploys, and the board decides that after its own review rounds. In a
-board-dispatched session this stage ends at step 4.
-
-**In any other session, merging is the operator's call.** Ask before you do it.
-
 ## Red flags
 
 | Thought | Reality |
@@ -168,6 +119,3 @@ board-dispatched session this stage ends at step 4.
 | "Everything is opus · max" | You priced the plan, you did not plan it. |
 | "These two nodes both touch that file" | They are one node, or they are sequential. |
 | "I will add an edge to be safe" | A false edge costs the parallelism you planned for. |
-| "The suite is probably green" | Run it. Quote it. |
-| "One more review round" | Round two finds the fixes, not the defects. |
-| "CI is red but unrelated" | It is red. Fix it on this branch. |
