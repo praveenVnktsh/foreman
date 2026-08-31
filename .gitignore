@@ -6,3 +6,6 @@ __pycache__/
 /docs/*.svg
 /docs/*.dot
 /docs/*.png
+
+# Local diagram render pages.
+/docs/*.html
