@@ -30,7 +30,10 @@ paths = ["skills/board/config.sh", "bin/resolve-ids.py"]
 command = "tests/run-all.sh"
 
 [docs]
-required = ["docs/specs/2026-08-27-autonomous-board-runner-design.md"]
+# STYLEGUIDE.md first: it is what an agent needs before it writes a line, and
+# the brief renders these in order. The design spec explains why the loop is
+# shaped the way it is, which matters second.
+required = ["STYLEGUIDE.md", "docs/specs/2026-08-27-autonomous-board-runner-design.md"]
 
 [limits]
 max_concurrent = 1
