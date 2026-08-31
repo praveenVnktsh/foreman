@@ -25,11 +25,24 @@ else
   ok "SKILL.md no longer hardcodes ~/.claude/skills/board"
 fi
 
-hits="$(grep -c '~/.foreman/install/skills/board' "$repo_root/skills/board/SKILL.md" || true)"
-if [[ "$hits" -ge 10 ]]; then
-  ok "SKILL.md consistently uses ~/.foreman/install/skills/board ($hits references)"
+# Named at all, and no OTHER install root named beside it.
+#
+# This used to assert "at least 10 references". A count is not a behaviour: it
+# fails when somebody legitimately adds an eleventh, passes when ten of them are
+# wrong, and tells a reader nothing about what must be true. What must be true
+# is that SKILL.md names one install root and it is the documented one.
+if grep -q '~/.foreman/install/skills/board' "$repo_root/skills/board/SKILL.md"; then
+  ok "SKILL.md names the documented install root"
 else
-  bad "expected SKILL.md to reference ~/.foreman/install/skills/board at least 10 times, found $hits"
+  bad "SKILL.md never references ~/.foreman/install/skills/board"
+fi
+
+others="$(grep -oE '~/[A-Za-z0-9._/-]*/skills/board' "$repo_root/skills/board/SKILL.md" \
+  | sort -u | grep -v '^~/.foreman/install/skills/board$' || true)"
+if [[ -z "$others" ]]; then
+  ok "SKILL.md names no other install root"
+else
+  bad "SKILL.md also names: $others"
 fi
 
 # The end-to-end proof: build the EXACT layout SKILL.md now tells the tick
