@@ -5,27 +5,44 @@ Orientation for an agent. **What to reach for, and what to reach for instead.**
 This file does not say how to write code. `STYLEGUIDE.md` does, and repeating it
 here would create the second source of truth that both files forbid.
 
-## How work proceeds here
+## The board owns the loop
 
-Five stages. Do not start one until the stage above it has passed its gate.
+Work here arrives as a Linear card. The board dispatches an agent for it, runs
+its own adversarial review rounds, gates the merge on evidence, and watches the
+deploy. `skills/board/SKILL.md` is that loop.
 
-| Stage | Do | Gate |
+**Read your own prompt as the authority on what to do with your result.**
+`skills/board/brief.py` writes it, and it already says whether to open a pull
+request, and that you must not merge or arm auto-merge. This file does not
+repeat those instructions, because two files saying one thing is how they come
+to disagree.
+
+| The board owns | You own |
+|---|---|
+| dispatch, and which card is worked at all | planning the work |
+| adversarial review rounds | implementing it |
+| the merge, and the deploy after it | testing it, and reporting honestly |
+
+**Do not review your own diff and call the loop done.** The board reviews with
+sessions that did not write the code, which is the point. A self-review shares
+the author's blind spots exactly.
+
+## The three stages you own
+
+| Stage | Do | Done when |
 |---|---|---|
-| 1. Plan | invoke the `graphplan` skill | the operator approves the graph |
+| 1. Plan | invoke the `graphplan` skill | the graph exists under `docs/plans/` |
 | 2. Implement | execute the graph | every node is done |
 | 3. Test | run the target's own test command | it ran, and it passed |
-| 4. Review | invoke `adversarial-reviewer`, once | blocking findings fixed |
-| 5. Ship | open a pull request, get it green, merge | CI green, comments answered |
 
-**Stage 1 — plan.** `graphplan` produces one mermaid dependency graph and no
-prose, saved under `docs/plans/`. It also defines how that graph maps to
-parallel execution, so stage 2 is mechanical rather than interpretive.
+**Plan.** `graphplan` produces one mermaid dependency graph and no prose. It also
+defines how that graph maps to parallel execution, so stage 2 is mechanical
+rather than interpretive.
 
-**Stage 2 — implement.** Follow the graph. If the session has no Workflow tool,
-say so and execute in rank order by hand. Do not silently serialise and report it
-as done.
+**Implement.** Follow the graph. If the session has no Workflow tool, say so and
+execute in rank order by hand. Do not silently serialise and report it as done.
 
-**Stage 3 — test.** Read the command from the contract rather than guessing it:
+**Test.** Read the command from the contract rather than guessing it:
 
 ```bash
 bin/contract.py board.toml | tr '\0' '\n' | grep -A1 TEST_COMMAND
@@ -35,25 +52,18 @@ A test you did not watch run is not a passing test. Quote the output. Fan out
 only genuinely independent work; a fanned-out run does not replace one green run
 of the whole suite.
 
-**Stage 4 — review. Once.** Fix every blocking finding. A finding you believe is
-wrong gets refuted with evidence: read the file as the remote has it with
-`skills/board/evidence.sh`, reproduce the stated failure path, and say what you
-ran. Do not re-run the reviewer afterwards — a second round on a diff the first
-round shaped finds the fixes, not the defects.
+**Then stop and report.** What you did, what you did not, what you assumed. If a
+command failed for a reason that is not about the code -- no disk, a quota, a
+missing credential, a network failure -- say exactly that, name the command and
+quote the error. The board can repair a machine it has been told about and re-run
+you for free. A build that quietly works around a broken environment and then
+dies costs the card one of its few attempts.
 
-**Stage 5 — ship.**
+## Working outside the board
 
-- Open the pull request ready for review, never a draft. A draft cannot be
-  merged, so it blocks after its checks are green.
-- Watch the checks. An empty check list is not a pass: the build never queued,
-  and an empty commit produces the `synchronize` event that starts it.
-- Fix a red check on the same branch. Do not work around it.
-- Answer every review comment: a reply and a commit, or a reply saying why no
-  commit.
-- **Do not merge if the board dispatched you.** `skills/board/brief.py` tells a
-  dispatched agent not to, and it is right: merging deploys, and the board
-  decides that after its own review rounds. In that case stage 5 ends at the
-  step above. Anywhere else, merging is the operator's call — ask first.
+The same three stages. Nobody is running review rounds for you, so reviewing and
+shipping are the operator's call: ask rather than assuming. `adversarial-reviewer`
+is here if they want a review.
 
 ## Run things
 

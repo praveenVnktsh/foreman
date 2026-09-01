@@ -1,13 +1,13 @@
 ---
 name: graphplan
-description: "Turn a task into one mermaid dependency graph that a fresh subagent can execute. Use at the very beginning of any non-trivial piece of work, before writing code, and before deciding what to parallelise. Produces the plan and stops; implementing, testing, reviewing and shipping it are the loop in AGENTS.md. Use when asked to build, implement, add or design a feature, or when a task is large enough that the order of the work matters."
+description: "Turn a task into one mermaid dependency graph that a fresh subagent can execute. Use at the very beginning of any non-trivial piece of work, before writing code, and before deciding what to parallelise. Produces the plan and stops; AGENTS.md covers implementing and testing it, and the board owns review and merge. Use when asked to build, implement, add or design a feature, or when a task is large enough that the order of the work matters."
 ---
 
 # Graphplan
 
-Turn a task into one dependency graph, and stop there. `AGENTS.md` owns what
-happens after: implement, test, review, ship. This skill owns the plan and the
-contract the plan is written in.
+Turn a task into one dependency graph, and stop there. `AGENTS.md` covers what
+happens after: implement and test. Review and merge belong to the board, not to
+you. This skill owns the plan and the contract it is written in.
 
 ## Plan
 
@@ -77,16 +77,18 @@ priced.
   checks, not something that writes.
 - Rank is a wave. Nodes at the same depth run together.
 
-### Gate
+### Keep it
 
-Render it and show the operator:
+The graph is an artifact, not a checkpoint. Write it, commit it, and carry on.
+Nobody has to approve it.
 
 ```bash
 bin/render-diagram.sh docs/plans/<file>.md && open docs/plans/<file>.html
 ```
 
-Stop. Do not implement until they approve the graph. A plan is the cheapest
-place to be wrong, which is the only reason to write one.
+It is kept because the agents that execute it hold no memory of writing it, and
+because the next person to touch this feature has nothing else that says why the
+work was cut up this way.
 
 ## How the graph is executed
 
