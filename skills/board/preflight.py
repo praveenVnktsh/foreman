@@ -215,6 +215,60 @@ def locked_write_probe(lockfile: str, directory: str, megabytes: int) -> dict:
         }
 
 
+def runner_check(repo: str) -> dict:
+    """Every self-hosted runner this repository has is offline.
+
+    A required check that no runner can ever pick up does not fail. It sits
+    `queued` forever, and a board waiting on it is indistinguishable from a board
+    watching a job that is still running -- the same "waiting looks identical to
+    running" failure SKILL.md names for a check-name mismatch, with a different
+    cause.
+
+    Measured on 2026-09-01: a self-hosted runner was OOM-killed at 20:49 the
+    previous night and nothing noticed for fifteen hours. Every card on the board
+    sat waiting on checks that could not start, and the tick reported the machine
+    fit the whole time, because nothing here asked.
+
+    Only fires when the repository actually depends on self-hosted runners. A
+    repository with none registered uses GitHub-hosted ones, where there is
+    nothing for this machine to be wrong about -- so `total_count == 0` is a pass,
+    not a failure. An API call that cannot be made at all is also a pass: the gh
+    check above already covers a dead token, and reporting the same fault twice
+    tells an operator nothing new.
+    """
+    check = {"name": "a runner is online", "ok": True, "detail": "no self-hosted runners registered"}
+    try:
+        p = subprocess.run(
+            ["gh", "api", "repos/{owner}/{repo}/actions/runners"],
+            cwd=repo, capture_output=True, text=True, timeout=60,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        check["detail"] = f"could not ask: {exc}"
+        return check
+    if p.returncode != 0:
+        check["detail"] = "could not ask; see the gh check above"
+        return check
+    try:
+        body = json.loads(p.stdout or "{}")
+    except json.JSONDecodeError:
+        check["detail"] = "could not ask; unreadable response"
+        return check
+    runners = body.get("runners") or []
+    if not runners:
+        return check
+    online = [r.get("name") for r in runners if (r.get("status") or "") == "online"]
+    if online:
+        check["detail"] = "online: " + ", ".join(n for n in online if n)
+        return check
+    names = ", ".join(str(r.get("name")) for r in runners)
+    check["ok"] = False
+    check["detail"] = (
+        f"every registered runner is offline ({names}). A required check will "
+        f"queue and never start, which reads as pending forever."
+    )
+    return check
+
+
 def command_check(name: str, args: list[str], cwd: str | None = None) -> dict:
     check = {"name": name, "ok": False, "detail": ""}
     try:
@@ -294,6 +348,7 @@ def main() -> int:
             # whether a credential is CONFIGURED rather than whether it WORKS is
             # not a gate.
             command_check("gh auth", ["gh", "api", "user"]),
+            runner_check(repo),
             command_check("claude binary", ["claude", "--version"]),
         ]
 
