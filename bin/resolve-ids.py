@@ -323,6 +323,18 @@ def write_ids(instance_home: str, ids: dict) -> None:
     project, an unreachable API -- raises and this function never runs at all,
     leaving whatever ids.env already existed untouched.
     """
+    # Create the runtime directory here rather than assuming it.
+    #
+    # It used to be a side effect of `boardctl add`, which built an instance
+    # directory. A board is now two lines in boards.toml and nothing makes a
+    # directory for it, so the first resolve on a newly declared board died with
+    # FileNotFoundError on ids.env.tmp -- found by declaring a real board and
+    # running this for real, not by the suite.
+    #
+    # This is also the right owner for it: ids.env is a cache, documented as safe
+    # to delete, so whatever rebuilds the cache has to be able to rebuild the
+    # directory holding it.
+    os.makedirs(instance_home, exist_ok=True)
     target = os.path.join(instance_home, "ids.env")
     tmp = os.path.join(instance_home, "ids.env.tmp")
     with open(tmp, "w") as handle:

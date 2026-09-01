@@ -473,4 +473,18 @@ else
 fi
 stop_stub
 
+# --- a newly declared board has no runtime directory yet -------------------
+#
+# `boardctl add` no longer builds one: a board is two lines in boards.toml. The
+# first resolve therefore has to create it, and used to die with
+# FileNotFoundError on ids.env.tmp instead.
+start_stub "$work_dir/happy.json"
+rm -rf "$foreman_home/instances/fixture"
+if run_resolve "$STUB_URL" && [[ -f "$foreman_home/instances/fixture/ids.env" ]]; then
+  ok "a board with no runtime directory yet resolves, creating it"
+else
+  not_ok "a board with no runtime directory yet failed to resolve: $(tail -2 "$work_dir/err.log")"
+fi
+stop_stub
+
 exit "$fail"
