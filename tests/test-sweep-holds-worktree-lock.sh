@@ -82,6 +82,17 @@ exec "$real_git" "\$@"
 STUB
 chmod +x "$stub_dir/git"
 
+# sweep.sh asks `claude agents --json --all` which cards still have a live agent,
+# and refuses to sweep anything if it cannot read that list. Without a stub this
+# test passes on a developer's machine, where the real binary happens to be on
+# PATH, and fails in CI, where it is not -- which is exactly what it did.
+# Stubbed at the external boundary, like every other sweep test here.
+cat >"$stub_dir/claude" <<'STUB'
+#!/usr/bin/env bash
+printf '[]\n'
+STUB
+chmod +x "$stub_dir/claude"
+
 sweep_out="$work_dir/sweep.out"
 if ! HOME="$home" FOREMAN_INSTANCE=alpha PATH="$stub_dir:$PATH" "$sweep" PRA-1 \
     >"$sweep_out" 2>&1; then
