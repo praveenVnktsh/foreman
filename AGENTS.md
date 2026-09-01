@@ -47,7 +47,8 @@
 | Get a Linear id | `ids.env`, from `bin/resolve-ids.py` | a literal UUID, ever |
 | Get an agent's scratch dir | `bin/tmp-dir.sh <worktree>` | `$TMPDIR`, or a path you compose |
 | Serialise shared git metadata | `skills/board/withlock.py` | hoping two ticks do not collide |
-| Manage an instance | `bin/boardctl add\|list\|status\|halt\|resume` | editing `instance.env` by hand |
+| Manage a board | `bin/boardctl add\|list\|status\|halt\|resume` | editing `boards.toml` by hand |
+| Make skills resolvable | `bin/install-skills.sh` | assuming the install directory is searched |
 | View a diagram | `bin/render-diagram.sh <file.md>` | committing the render |
 
 - `git show origin/main:<path>` reads a **local** ref. No fetch is guaranteed to

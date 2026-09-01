@@ -40,6 +40,31 @@ BOARDS="$("$INSTALL_ROOT/bin/boards.py" --list 2>/dev/null | tr '\0' '\n' | grep
 [[ "${BOARDS:-0}" -gt 0 ]] \
   || die "no boards declared in $FOREMAN_HOME/boards.toml; run 'boardctl add <name> --repo <path>' first"
 
+# The tick runs `/board`, and Claude Code resolves a skill by name from
+# ~/.claude/skills/ -- never from this install directory. A timer whose tick
+# cannot find its own skill is the worst of both worlds: it looks installed,
+# reports healthy, and does nothing. Worse, if some other project left a skill
+# of the same name at that path, the tick runs THAT instead -- which happened on
+# 2026-09-01, putting a second dispatcher on a live board.
+SKILLS_DIR="${CLAUDE_SKILLS_DIR:-$HOME/.claude/skills}"
+BOARD_LINK="$SKILLS_DIR/board"
+board_is_ours() {
+  [[ -L "$BOARD_LINK" ]] || return 1
+  case "$(cd -- "$(dirname -- "$BOARD_LINK")" && readlink "$BOARD_LINK")" in
+    "$INSTALL_ROOT/skills"/*) return 0 ;; *) return 1 ;;
+  esac
+}
+if ! board_is_ours; then
+  if [[ -e "$BOARD_LINK" ]]; then
+    die "$BOARD_LINK exists but is not this installation's board skill.
+A tick started now would run that skill instead of this one. Inspect it, then run
+  $INSTALL_ROOT/bin/install-skills.sh          (refuses to replace it)
+  $INSTALL_ROOT/bin/install-skills.sh --force  (replaces it, keeping a backup)"
+  fi
+  die "this installation's skills are not resolvable; a tick could not find /board.
+Run: $INSTALL_ROOT/bin/install-skills.sh"
+fi
+
 UNIT_DIR="$HOME/.config/systemd/user"
 
 service_unit() {
