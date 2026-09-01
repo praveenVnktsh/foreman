@@ -1,6 +1,6 @@
 ---
 name: graphplan
-description: "Turn a task into one mermaid dependency graph that a fresh subagent can execute. Use at the very beginning of any non-trivial piece of work, before writing code, and before deciding what to parallelise. Produces the plan and stops; AGENTS.md covers implementing and testing it, and the board owns review and merge. Use when asked to build, implement, add or design a feature, or when a task is large enough that the order of the work matters."
+description: "Draw the architecture of a proposed change as one mermaid diagram, with the build order falling out of it. Use at the very beginning of any non-trivial piece of work, before writing code, and before deciding what to parallelise. Produces the plan and stops; AGENTS.md covers implementing and testing it, and the board owns review and merge. Use when asked to build, implement, add or design a feature, or when a task is large enough that the order of the work matters."
 ---
 
 # Graphplan
@@ -31,29 +31,46 @@ cannot be done.
 
 ### What a node is
 
-One node is one subagent task. Every node label carries four things:
+**A node is a component of the system, not a task.** A file, a process, a data
+store, an external service. The graph is what the thing *is* once it is built.
+
+Every node label carries:
 
 - an id, so edges and reports can name it
-- what to do, in an imperative sentence
-- the model tier
-- the files it owns
+- what the component is, and what it holds or does
+- its build state: `NEW`, `CHANGE`, or nothing at all if it is untouched context
+- for `NEW` and `CHANGE` only, the model tier that builds it
 
 ```
-n3["<b>n3 · brief.py</b><br/>add --lens to review(); slot a gets correctness, b design<br/><i>opus · high</i><br/>skills/board/brief.py"]
+c4["<b>c4 · config.sh</b> · CHANGE<br/>loads one board into the environment<br/>sourced per board in a subshell<br/><i>opus · high</i>"]
 ```
 
-**Two nodes must never own the same file.** They run in parallel; the later
-write wins and the earlier work vanishes with no error. If two pieces of work
-touch one file, they are one node or they are sequential.
+**Untouched components belong in the graph.** They are how a fresh agent
+understands what it is building into. A graph showing only the new parts is a
+task list again.
+
+**Two nodes must never own the same file.** They get built in parallel; the
+later write wins and the earlier work vanishes with no error.
 
 ### What an edge is
 
-A real dependency: the target cannot start until the source has finished.
+A real relationship in the built system: reads, writes, spawns, depends on.
+Label it with the verb.
 
-**Do not draw an edge for tidiness.** Every edge you add that is not a genuine
-dependency serialises work that could have run in parallel, and that is the cost
-this whole skill exists to avoid. If you are unsure whether B needs A, ask
-whether B's subagent could do its job with A's files unchanged. If yes, no edge.
+**Do not draw an edge for tidiness.** An edge is a claim about how the system
+works, and a false one is a false claim before it is a scheduling mistake.
+
+### The work order falls out of the graph
+
+This is the whole return on drawing the architecture rather than a task list:
+
+- Two `NEW` or `CHANGE` nodes with no path between them can be built at once.
+- A node whose only inbound edges come from untouched components has nothing to
+  wait for.
+- Where building order genuinely differs from the runtime relationship — B reads
+  A at runtime, but only A's interface is needed to start B — say so on the edge.
+
+You do not schedule the work. You read the schedule off the diagram.
 
 ### Model tiers
 
@@ -71,11 +88,16 @@ priced.
 
 ### Shape of the graph
 
-- Roots are nodes that need nothing. There should be several. One root means the
-  work is serial and the graph is not earning its keep.
-- Leaves are verification. The last thing on every path is something that
-  checks, not something that writes.
-- Rank is a wave. Nodes at the same depth run together.
+- **Show the boundary.** What is inside the system, and what is external to it —
+  a forge, an issue tracker, the target repository. A graph with no outside has
+  not said where the system ends.
+- **Roots are what depends on nothing:** config, credentials, external services.
+- **Leaves are what nothing reads:** the outputs.
+- **Do not add verification nodes.** Testing is a stage in `AGENTS.md`, not a
+  component of the system. A test node in an architecture diagram is the task
+  list creeping back in.
+- **Depth is not a schedule.** The schedule is which nodes are `NEW` or `CHANGE`
+  and how they connect.
 
 ### Keep it
 
@@ -96,21 +118,23 @@ This belongs here rather than in `AGENTS.md` because it is a property of the
 artifact: a graph that cannot be mapped to execution is a picture. The mapping
 is mechanical, which is the whole return on writing the plan as a graph.
 
-- a node → `agent(prompt, {label, model, effort})`
-- an edge → a `pipeline()` stage boundary
-- nodes at one rank with no edges between them → the same `parallel()` call
+- a `NEW` or `CHANGE` node → `agent(prompt, {label, model, effort})`
+- an untouched node → context in the prompt, never an agent
+- a path between two changed nodes → a `pipeline()` stage boundary
+- changed nodes with no path between them → the same `parallel()` call
 - nodes that write files concurrently → `isolation: 'worktree'`
 
 **Default to `pipeline()`.** Use `parallel()` only where a stage genuinely needs
-every result from the stage before it — a dedup across all findings, an
-early exit on zero. "It reads better" is not a reason: a barrier makes every fast
-node wait for the slowest one.
+every result from the stage before it — a dedup across all findings, an early
+exit on zero. "It reads better" is not a reason: a barrier makes every fast node
+wait for the slowest one.
 
-Each node's prompt is its label plus what a stranger needs: the files it owns,
-the acceptance check, and an instruction to read `STYLEGUIDE.md` first.
+Each node's prompt is its label plus what a stranger needs: the component's
+neighbours in the graph, the files it owns, the acceptance check, and an
+instruction to read `STYLEGUIDE.md` first.
 
-If the session has no Workflow tool, say so and execute the graph in rank order
-yourself. Do not silently serialise and call it done.
+If the session has no Workflow tool, say so and execute the changed nodes in
+dependency order yourself. Do not silently serialise and call it done.
 
 ## Red flags
 
@@ -120,4 +144,6 @@ yourself. Do not silently serialise and call it done.
 | "The graph needs a paragraph to explain it" | Then the graph is wrong. Fix the graph. |
 | "Everything is opus · max" | You priced the plan, you did not plan it. |
 | "These two nodes both touch that file" | They are one node, or they are sequential. |
-| "I will add an edge to be safe" | A false edge costs the parallelism you planned for. |
+| "I will add an edge to be safe" | An edge is a claim about the system. A false one is a false claim. |
+| "Only the new parts belong in the graph" | Then it is a task list. Untouched components are how a stranger reads it. |
+| "Now let me work out the build order" | Read it off the diagram. That is what the diagram is for. |
