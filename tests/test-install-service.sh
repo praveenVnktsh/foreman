@@ -37,8 +37,11 @@ command = "true"
 TOML
 
 fh="$work/foreman-home"; mkdir -p "$fh"
+skills="$work/claude-skills"; mkdir -p "$skills"
 run() { env PATH="$work/bin:$PATH" FOREMAN_HOME="$fh" HOME="$work" \
+          CLAUDE_SKILLS_DIR="$skills" \
           bash "$root/bin/install-service.sh" "$@" 2>&1; }
+link_our_skills() { ln -sfn "$root/skills/board" "$skills/board"; }
 
 # --- no boards declared
 out="$(run --dry-run)"
@@ -47,8 +50,25 @@ case "$out" in
   *) bad "did not refuse with no boards: $out" ;;
 esac
 
-# --- one board declared
+# --- one board declared, but the skills are not resolvable yet
 printf '[boards.demo]\nrepo = "%s"\n' "$work/repo" > "$fh/boards.toml"
+out="$(run --dry-run)"
+case "$out" in
+  *"could not find /board"*) ok "refuses while the tick could not find its own skill" ;;
+  *) bad "installed a timer whose tick cannot resolve /board: $out" ;;
+esac
+
+# --- a foreign board skill is named specifically, not lumped in with absence
+mkdir -p "$skills/board"; printf 'somebody else\n' > "$skills/board/SKILL.md"
+out="$(run --dry-run)"
+case "$out" in
+  *"not this installation's board skill"*) ok "names a foreign board skill rather than reporting it missing" ;;
+  *) bad "did not distinguish a foreign skill from an absent one: $out" ;;
+esac
+rm -rf "$skills/board"
+
+# --- skills linked
+link_our_skills
 out="$(run --dry-run)"
 
 case "$out" in

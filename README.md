@@ -18,8 +18,18 @@ installation. See `docs/specs/`.
 foreman is installed once and pointed at repositories.
 
     git clone <url> ~/.foreman/install
-    ~/.foreman/install/bin/boardctl add myproject --repo ~/Developer/myproject \
-        --linear-key-file ~/.config/linear.key
+    ~/.foreman/install/bin/install-skills.sh
+    install -m 600 ~/.config/linear.key ~/.foreman/linear.key
+    ~/.foreman/install/bin/boardctl add myproject --repo ~/Developer/myproject
+
+`install-skills.sh` is not optional and not cosmetic. A tick runs `/board`, and
+Claude Code resolves a skill by name from `~/.claude/skills/` -- never from this
+install directory. Skip it and the loop looks installed and is not: the watchdog
+starts a tick, reports it healthy, and the tick cannot find its own skill. If
+another project has left a skill of the same name there, the tick runs that one
+instead. `install-skills.sh` refuses to replace a skill it did not put there.
+
+The key is one file per Linear workspace, not one per board.
 
 **The running loop uses the installed clone, never a working tree** — including
 when the repository it is building is foreman itself. A board that reads its own
