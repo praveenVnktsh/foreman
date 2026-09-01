@@ -58,6 +58,55 @@ This is NOT a failure of ticket $TICKET and must not consume its attempt budget.
 Repair the machine, then dispatch again at the same attempt number."
 fi
 
+# The concurrency ceilings, held here rather than only in SKILL.md.
+#
+# SKILL.md states the arithmetic exactly -- a board's free slots are its
+# MAX_CONCURRENT minus its cards in progress and in review -- but that is prose
+# an agent is asked to follow, and prose is not a gate. On 2026-09-01 a tick
+# adopted five cards left In Progress by a previous layout and dispatched a build
+# for each, against a MAX_CONCURRENT of 1. The machine reached a load average of
+# 14 with four builds, a tick and a self-hosted CI runner competing for 14GB, and
+# an earlier OOM had already killed that runner once the same night.
+#
+# So this refuses, for the same reason and in the same voice as the preflight
+# gate above: it holds however this script is called -- by the tick, by a resume,
+# or by hand -- rather than only when the caller remembers to count first.
+#
+# A card that ALREADY holds a slot is not consuming a new one. A resume, a fix,
+# or a reviewer for a card the board is already working must pass: refusing
+# those would block every fix-dispatch behind the card's own slot. That is why
+# `--host-slots` reports which tickets are holding, not just how many.
+SLOTS="$("$SKILL_DIR/reconcile.py" --host-slots 2>/dev/null || true)"
+if [[ -n "$SLOTS" ]]; then
+  VERDICT="$(printf '%s' "$SLOTS" | python3 -c '
+import json, sys
+try:
+    d = json.load(sys.stdin)
+except Exception:
+    sys.exit(0)                      # unreadable: advisory input, never a blocker
+board, ticket = sys.argv[1], sys.argv[2]
+board_max, host_max = int(sys.argv[3]), int(sys.argv[4])
+held = (d.get("tickets") or {}).get(board) or []
+if ticket in held:
+    sys.exit(0)                      # already on the board; not a new slot
+count, total = len(held), d.get("total", 0)
+# `", ".join(...)` and not the single-quoted spelling: this whole program is
+# inside a single-quoted shell string, and one apostrophe here closes it.
+names = ", ".join(held)
+if count >= board_max:
+    print(f"board {board} holds {count} of {board_max} slots: {names}")
+elif total >= host_max:
+    print(f"this machine holds {total} of {host_max} slots across every board")
+' "$INSTANCE" "$TICKET" "$MAX_CONCURRENT" "$HOST_MAX_CONCURRENT" 2>/dev/null || true)"
+  if [[ -n "$VERDICT" ]]; then
+    die "at the concurrency ceiling; refusing to dispatch $NAME.
+$VERDICT
+This is NOT a failure of ticket $TICKET and must not consume its attempt budget.
+Wait for a card to release a slot, or raise the limit deliberately in the
+target's board.toml (MAX_CONCURRENT) or instance state (HOST_MAX_CONCURRENT)."
+  fi
+fi
+
 if [[ "$ROLE" == "build" ]]; then
   WORKTREE="$(worktree_path "$TICKET")"
   MODEL="$BUILD_MODEL"
