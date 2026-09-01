@@ -19,7 +19,11 @@ fail=0
 ok() { printf 'ok   %s\n' "$1"; }
 bad() { printf 'FAIL %s\n' "$1"; fail=1; }
 
-if grep -q '~/.claude/skills/board' "$repo_root/skills/board/SKILL.md"; then
+# Both spellings. The tilde form was the only one checked, and the cron line in
+# this same file said `$HOME/.claude/skills/board/supervise.sh` for months
+# underneath a passing test -- a documented watchdog path that does not exist
+# under the documented install.
+if grep -qE '(~|\$HOME)/\.claude/skills/board' "$repo_root/skills/board/SKILL.md"; then
   bad "SKILL.md still tells the tick agent to use ~/.claude/skills/board -- README.md's only documented install path is ~/.foreman/install"
 else
   ok "SKILL.md no longer hardcodes ~/.claude/skills/board"
@@ -37,8 +41,8 @@ else
   bad "SKILL.md never references ~/.foreman/install/skills/board"
 fi
 
-others="$(grep -oE '~/[A-Za-z0-9._/-]*/skills/board' "$repo_root/skills/board/SKILL.md" \
-  | sort -u | grep -v '^~/.foreman/install/skills/board$' || true)"
+others="$(grep -oE '(~|\$HOME)/[A-Za-z0-9._/-]*/skills/board' "$repo_root/skills/board/SKILL.md" \
+  | sed 's|^[$]HOME|~|' | sort -u | grep -v '^~/.foreman/install/skills/board$' || true)"
 if [[ -z "$others" ]]; then
   ok "SKILL.md names no other install root"
 else
