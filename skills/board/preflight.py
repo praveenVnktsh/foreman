@@ -280,7 +280,20 @@ def main() -> int:
         # confusingly inside an agent; cheap to establish here.
         checks += [
             fetch_check(repo),
-            command_check("gh auth", ["gh", "auth", "status"]),
+            # `gh api user`, NOT `gh auth status`. Measured on a real host on
+            # 2026-09-01: with an expired token, `gh auth status` prints "The
+            # token ... is invalid" and exits 0, while every actual API call
+            # returns HTTP 401. This check read that exit code alone and passed,
+            # so the gate reported a machine fit to build on which `gh pr create`
+            # could not work at all.
+            #
+            # That is the precise failure this whole file exists to prevent: an
+            # agent dispatched into an unusable environment does the work, dies
+            # at the end, and costs the ticket one of its few attempts for a
+            # reason that was knowable before it started. A check that asks
+            # whether a credential is CONFIGURED rather than whether it WORKS is
+            # not a gate.
+            command_check("gh auth", ["gh", "api", "user"]),
             command_check("claude binary", ["claude", "--version"]),
         ]
 
