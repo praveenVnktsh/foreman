@@ -1,21 +1,18 @@
 # Working in this repository
 
-Orientation for an agent. **What to reach for, and what to reach for instead.**
-
-This file does not say how to write code. `STYLEGUIDE.md` does, and repeating it
-here would create the second source of truth that both files forbid.
+- Orientation for an agent: what to reach for, and what to reach for instead.
+- `STYLEGUIDE.md` says how to write code. This file repeats none of it.
+- `docs/board-flow.md` shows what the board does, as one diagram.
 
 ## The board owns the loop
 
-Work here arrives as a Linear card. The board dispatches an agent for it, runs
-its own adversarial review rounds, gates the merge on evidence, and watches the
-deploy. `skills/board/SKILL.md` is that loop.
-
-**Read your own prompt as the authority on what to do with your result.**
-`skills/board/brief.py` writes it, and it already says whether to open a pull
-request, and that you must not merge or arm auto-merge. This file does not
-repeat those instructions, because two files saying one thing is how they come
-to disagree.
+- Work arrives as a Linear card. The board dispatches an agent for it.
+- `skills/board/SKILL.md` is that loop.
+- **Your own prompt is the authority on what to do with your result.**
+  `skills/board/brief.py` writes it. It already says whether to open a pull
+  request, and that you must not merge or arm auto-merge.
+- This file repeats none of those instructions. Two files saying one thing is how
+  they come to disagree.
 
 | The board owns | You own |
 |---|---|
@@ -23,9 +20,9 @@ to disagree.
 | adversarial review rounds | implementing it |
 | the merge, and the deploy after it | testing it, and reporting honestly |
 
-**Do not review your own diff and call the loop done.** The board reviews with
-sessions that did not write the code, which is the point. A self-review shares
-the author's blind spots exactly.
+- **Do not review your own diff and call the loop done.**
+- The board reviews with sessions that did not write the code. That is the point.
+- A self-review shares the author's blind spots exactly.
 
 ## The three stages you own
 
@@ -35,35 +32,46 @@ the author's blind spots exactly.
 | 2. Implement | execute the graph | every node is done |
 | 3. Test | run the target's own test command | it ran, and it passed |
 
-**Plan.** `graphplan` produces one mermaid dependency graph and no prose. It also
-defines how that graph maps to parallel execution, so stage 2 is mechanical
-rather than interpretive.
+**Plan**
 
-**Implement.** Follow the graph. If the session has no Workflow tool, say so and
-execute in rank order by hand. Do not silently serialise and report it as done.
+- `graphplan` produces one mermaid dependency graph and no prose.
+- It also defines how that graph maps to parallel execution.
+- Stage 2 is then mechanical rather than interpretive.
 
-**Test.** Read the command from the contract rather than guessing it:
+**Implement**
+
+- Follow the graph.
+- No Workflow tool in this session? Say so, and execute in rank order by hand.
+- Never serialise silently and report it as done.
+
+**Test**
+
+- Read the command from the contract. Do not guess it:
 
 ```bash
 bin/contract.py board.toml | tr '\0' '\n' | grep -A1 TEST_COMMAND
 ```
 
-A test you did not watch run is not a passing test. Quote the output. Fan out
-only genuinely independent work; a fanned-out run does not replace one green run
-of the whole suite.
+- A test you did not watch run is not a passing test. Quote the output.
+- Fan out only genuinely independent work.
+- A fanned-out run does not replace one green run of the whole suite.
 
-**Then stop and report.** What you did, what you did not, what you assumed. If a
-command failed for a reason that is not about the code -- no disk, a quota, a
-missing credential, a network failure -- say exactly that, name the command and
-quote the error. The board can repair a machine it has been told about and re-run
-you for free. A build that quietly works around a broken environment and then
-dies costs the card one of its few attempts.
+**Then stop and report**
+
+- What you did. What you did not. What you assumed.
+- Some failures are not about the code: no disk, a quota, a missing credential,
+  a network failure.
+- Report one as exactly that. Name the command. Quote the error.
+- The board can repair a machine it has been told about, and re-run you for free.
+- A build that quietly works around a broken environment and then dies costs the
+  card one of its few attempts.
 
 ## Working outside the board
 
-The same three stages. Nobody is running review rounds for you, so reviewing and
-shipping are the operator's call: ask rather than assuming. `adversarial-reviewer`
-is here if they want a review.
+- The same three stages.
+- Nobody is running review rounds for you.
+- Reviewing and shipping are the operator's call. Ask rather than assuming.
+- `adversarial-reviewer` is here if they want a review.
 
 ## Run things
 
@@ -76,10 +84,10 @@ is here if they want a review.
 | See what the board does | `docs/board-flow.md` | reading 12 files to find out |
 | Look at a diagram | `bin/render-diagram.sh docs/board-flow.md` | committing a render |
 
-CI runs `tests/run-all.sh` on Python 3.12 and nothing else. Its job is named
-`Tests`, which must keep matching `checks.required` in `board.toml`. A mismatch
-makes the board wait forever for a check that never reports, and waiting looks
-exactly like running.
+- CI runs `tests/run-all.sh` on Python 3.12 and nothing else.
+- Its job is named `Tests`, matching `checks.required` in `board.toml`.
+- A mismatch makes the board wait forever for a check that never reports.
+- Waiting looks exactly like running, so nothing reports the mistake.
 
 ## Read the code the board reads
 
@@ -89,11 +97,12 @@ exactly like running.
 | Read a file at a PR's head | `skills/board/evidence.sh pr <n> <path>` | the working tree |
 | Read a PR's diff | `skills/board/evidence.sh pr <n>` | `git diff` against a local ref |
 
-This is the one that looks like pedantry and is not. `git show origin/main:...`
-reads a **local** ref that no fetch is guaranteed to have refreshed, so it
-answers confidently with a stale file. `evidence.sh` fetches, then answers. A
-reviewer refuting a finding from the working tree is the specific failure this
-exists to stop.
+- `git show origin/main:<path>` reads a **local** ref.
+- No fetch is guaranteed to have refreshed it, so it answers with a stale file
+  and no warning.
+- `evidence.sh` fetches, then answers.
+- A reviewer refuting a finding from the working tree is the failure this exists
+  to stop.
 
 ## Ids, paths and locks
 
@@ -104,36 +113,38 @@ exists to stop.
 | Serialise shared git metadata | `skills/board/withlock.py` | hoping two ticks do not collide |
 | Create or inspect an instance | `bin/boardctl add\|list\|status\|halt\|resume` | editing `instance.env` by hand |
 
-`skills/board/config.sh` needs `FOREMAN_INSTANCE` set and refuses to guess. It
-is sourced, not run: `. skills/board/config.sh`.
+- `skills/board/config.sh` needs `FOREMAN_INSTANCE` set. It refuses to guess.
+- It is sourced, not run: `. skills/board/config.sh`.
 
 ## Hard constraints
 
-- **Python: stdlib only.** No third-party packages anywhere. `tomllib` sets the
-  floor at 3.11; CI runs 3.12. This is why the contract is TOML and not YAML --
-  it keeps the property that there is no install step before the config can be
-  read.
-- **bash 3.2.** macOS ships it. No `mapfile`, no `declare -A`. Under `set -u`,
-  `"${arr[@]}"` on an empty array is an error, so use `"${arr[@]+"${arr[@]}"}"`
-  or avoid the construct.
+- **Python: stdlib only.** No third-party packages anywhere.
+- `tomllib` sets the floor at 3.11. CI runs 3.12.
+- This is why the contract is TOML and not YAML. There is no install step before
+  the config can be read.
+- **bash 3.2.** macOS ships it. No `mapfile`. No `declare -A`.
+- Under `set -u`, `"${arr[@]}"` on an empty array is an error. Use
+  `"${arr[@]+"${arr[@]}"}"` or avoid the construct.
 - **A target's config is parsed, never sourced.** Instances share a user and a
-  home, so a config that can run code runs beside every other instance's
-  credential before anything decided that repository was trusted.
+  home. A config that can run code runs beside every other instance's credential,
+  before anything decided that repository was trusted.
 - **Name nothing outside this repository.** No other project's name, no
-  operator's name, no foreign ticket key or path. Every such fact is read at
-  runtime from `board.toml` or instance state.
-  `tests/test-no-target-specifics.sh` enforces it.
+  operator's name, no foreign ticket key or path.
+- Read every such fact at runtime, from `board.toml` or instance state.
+- `tests/test-no-target-specifics.sh` enforces it.
 - **Renders are not committed.** `.gitignore` covers `/docs/*.html`. The mermaid
   in the markdown is the source.
 
 ## Where things live
 
-- `skills/board/` — the loop. `SKILL.md` is the tick's instructions and is the
-  largest file here; the rest are the scripts it calls.
+- `skills/board/` — the loop. `SKILL.md` is the tick's instructions and the
+  largest file here. The rest are the scripts it calls.
+- `skills/graphplan/` — how a task becomes a dependency graph.
+- `skills/adversarial-reviewer/` — the review the board runs.
 - `bin/` — everything not specific to running the board.
 - `tests/` — one file per invariant, named as the claim it makes.
-- `docs/specs/`, `docs/plans/` — the record of what was decided and why. Exempt
-  from the naming rule above, because they record what happened.
+- `docs/specs/`, `docs/plans/` — what was decided, and why. Exempt from the
+  naming rule above, because they record what happened.
 - `STYLEGUIDE.md` — how to write code here. `board.toml` hands it to every
   dispatched agent through `docs.required`.
 
@@ -141,9 +152,9 @@ is sourced, not run: `. skills/board/config.sh`.
 
 - **Add a dependency** — do not. See the constraint above.
 - **Hardcode an id, a path or a name** — read it at runtime instead.
-- **Commit a rendered diagram** — it is gitignored, and a committed render goes
-  stale the first time nobody re-runs the script.
-- **Write a test that reimplements the code it tests** — drive the real script
+- **Commit a rendered diagram** — it is gitignored. A committed render goes stale
+  the first time nobody re-runs the script.
+- **Write a test that reimplements the code it tests** — drive the real script,
   and stub at the external boundary. `tests/lib/linear-stub.py` is the pattern.
 - **Weaken a gate** — dispatched agents run with permissions bypassed. What
   contains them is the throwaway worktree, the required checks, the review, and
