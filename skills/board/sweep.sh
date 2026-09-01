@@ -181,6 +181,30 @@ for a in agents:
 '
 }
 
+# Release the card's concurrency slot, here rather than in prose.
+#
+# `config.sh` already predicted this failure where it explains
+# HOST_SLOT_STALE_MINUTES: "A slot releasable ONLY by an LLM remembering one
+# specific line violates that ... would otherwise wedge dispatch on EVERY
+# instance on this machine forever." Measured on 2026-09-01: a card merged, its
+# history recorded `merged`, no `released` marker was ever written, and the board
+# went on counting five held slots with nothing running.
+#
+# Ticket-mode sweep is the right place because it is already the code path for
+# "this card is terminal, clean up after it". The caller only ever names a
+# ticket here once the card has finished, so reaping its worktree and releasing
+# its slot are the same event, and one of them was being left to memory.
+#
+# The marker means "this card no longer holds a slot", NOT "this card
+# succeeded" -- both board-failed exits release exactly as much as Done does.
+# Writing it twice is harmless: `card_holds_slot` reads the LAST entry, so a
+# second release is a no-op rather than a corruption.
+release_slot() {
+  local ticket="$1"
+  [[ -n "$BOARD_DRY_RUN" ]] && { printf 'DRY RUN: would release the slot for %s\n' "$ticket"; return 0; }
+  card_log "$ticket" '{"action":"released","by":"sweep"}'
+}
+
 [[ "${1:-}" == "--orphans" || $# -gt 0 ]] || die "usage: sweep.sh <TICKET...> | --orphans"
 
 # Read ONCE, and read the same way, for BOTH modes. This used to be built only
@@ -235,6 +259,7 @@ else
     for extra in "$REPO"/.claude/worktrees/foreman-"$INSTANCE"-"$ticket"-*/; do
       [[ -d "$extra" ]] && remove_tree_unless_live "${extra%/}"
     done
+    release_slot "$ticket"
   done
 fi
 
