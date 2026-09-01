@@ -2,7 +2,14 @@
 # right: until a card walks from Todo to merged on a repository that is not the
 # one this code grew up in, the seam is a hypothesis.
 [linear]
-team = "PRA"
+# The team NAME, not its key. bin/resolve-ids.py looks these up by name --
+# see bin/contract.py, which calls them LINEAR_TEAM_NAME and
+# LINEAR_PROJECT_NAME. "PRA" is the key, and resolving it fails with
+# "no team named 'PRA'". Never caught before because nothing had resolved this
+# repository's own ids.
+team = "Praveenvnktsh"
+# NOTE: this project does not exist in the workspace yet, so resolving these
+# ids fails. foreman cannot build itself until it is created.
 project = "foreman"
 
 [checks]
