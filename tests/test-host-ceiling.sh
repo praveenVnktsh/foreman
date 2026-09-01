@@ -396,8 +396,18 @@ fi
 kill -9 "$pid"
 wait "$pid" 2>/dev/null || true
 
-wait_lock_state "$lockfile" free 5 ||
-  fail "the probe lock was NOT released within 5s of SIGKILL -- a lock that survives a kill wedges every future dispatch on this machine, which is worse than the race it prevents"
+# 30s, not 5. The property under test is that the lock is released at all --
+# a lock that survives a kill wedges every future dispatch on this machine,
+# which is worse than the race it prevents. It is NOT a performance assertion.
+#
+# `kill -9` reaps the wrapper, not the 512MB write probe it spawned, and that
+# child holds the lock until its write finishes. Five seconds was calibrated on
+# a developer's SSD and failed on a loaded CI runner against the same code that
+# had passed minutes earlier. A flaky test in a repository whose whole premise
+# is unattended merging is not a nuisance: it fails real builds at random and
+# costs a card an attempt for nothing.
+wait_lock_state "$lockfile" free 30 ||
+  fail "the probe lock was NOT released within 30s of SIGKILL -- a lock that survives a kill wedges every future dispatch on this machine, which is worse than the race it prevents"
 echo "ok  the probe lock is released when preflight is killed mid-probe (SIGKILL)"
 
 # --- 6. probe sizes come from the contract, not from a constant -------------
