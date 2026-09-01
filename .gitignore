@@ -2,5 +2,8 @@
 *.pyc
 __pycache__/
 
-# Local diagram renders. Source of truth is the mermaid in docs/*.md.
+# Local diagram renders. Source of truth is the mermaid in the .md beside them.
+# Two patterns, not one: /docs/*.html misses docs/plans/, which is where every
+# plan's render actually lands.
 /docs/*.html
+/docs/**/*.html

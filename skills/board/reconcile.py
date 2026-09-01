@@ -833,42 +833,65 @@ def card_holds_slot(history_path: str, stale_minutes: float | None) -> bool:
     return True
 
 
+BOARDS_PY = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
+    "bin", "boards.py",
+)
+
+
+def declared_boards(foreman_home: str) -> list[str]:
+    """Board names from `<foreman_home>/boards.toml`, via `bin/boards.py --list`.
+
+    A directory under `instances/` used to BE the roster: `host_slots()` just
+    walked whatever was there. Now `boards.toml` is what declares a board, so a
+    runtime directory a removed (or never-declared) board left behind must stop
+    counting — otherwise removing a board from `boards.toml` silently shrinks
+    what this machine will ever dispatch, forever, with nothing saying so.
+
+    Tolerant like the rest of this module: a `boards.toml` that fails to load
+    (missing, malformed, refused by `boards.py`) reads as "no boards declared"
+    rather than raising. `--host-slots` is advisory input to a ceiling — a
+    machine not yet carrying a valid `boards.toml` must not take the tick down
+    over it.
+    """
+    code, out = run([BOARDS_PY, "--file", os.path.join(foreman_home, "boards.toml"), "--list"])
+    if code != 0:
+        return []
+    return [name for name in out.split("\0") if name]
+
+
 def host_slots(foreman_home: str, stale_minutes: float | None = HOST_SLOT_STALE_MINUTES) -> dict:
-    """Cards holding a slot, counted across every instance on this machine.
+    """Cards holding a slot, counted across every DECLARED board on this machine.
 
     `{"instances": {name: count, ...}, "total": N}`. This is the host-wide
     ceiling's input: `HOST_MAX_CONCURRENT` bounds the total across every
-    instance sharing this machine's RAM and disk, the same way a single
+    board sharing this machine's RAM and disk, the same way a single
     instance's `MAX_CONCURRENT` bounds its own cards — see config.sh.
 
-    Reads only the local sidecar under `<foreman_home>/instances/*/cards/`.
-    No Linear, no `gh`, no `claude agents`: this has to be cheap enough to
-    check before every dispatch, for every instance, and none of those three
-    are namespaced by instance in a way that would make asking them once
-    cover the whole machine cheaply.
+    The board roster comes from `declared_boards()`, i.e. `boards.toml`, not
+    from listing `<foreman_home>/instances/`. Each declared board's runtime
+    directory still keeps its name and its `cards/` subdirectory — that part
+    of the layout survives — so the read itself is unchanged: no Linear, no
+    `gh`, no `claude agents`, cheap enough to check before every dispatch.
 
     Tolerant by design, per its one caller (a tick deciding whether IT may
-    dispatch): an instance directory with no `cards/` at all, a `cards/` with
-    no entries, a card with no `history.jsonl`, or a `history.jsonl` holding
+    dispatch): a declared board with no runtime directory yet, no `cards/` at
+    all, a card with no `history.jsonl`, or a `history.jsonl` holding
     unparseable lines must never raise. This is advisory input to a ceiling,
     not a fact the tick depends on being able to fetch — failing to read one
-    instance's slots must not take down the tick that asked about all of them.
+    board's slots must not take down the tick that asked about all of them.
     """
     instances_dir = os.path.join(foreman_home, "instances")
     result: dict = {"instances": {}, "total": 0}
-    try:
-        names = sorted(os.listdir(instances_dir))
-    except OSError:
-        return result
-    for name in names:
+    for name in declared_boards(foreman_home):
         cards_dir = os.path.join(instances_dir, name, "cards")
         try:
             tickets = sorted(os.listdir(cards_dir))
         except OSError:
-            # No cards/ at all -- a freshly-created instance that has never
-            # dispatched anything. Present in the report at 0, not absent:
-            # an absent key would be indistinguishable from a listing failure
-            # for `instances_dir` itself.
+            # No cards/ at all -- a declared board that has never dispatched
+            # anything yet, or has no runtime directory at all. Present in the
+            # report at 0, not absent: an absent key would be indistinguishable
+            # from a listing failure for `instances_dir` itself.
             result["instances"][name] = 0
             continue
         count = 0

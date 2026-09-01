@@ -36,15 +36,36 @@ command = "true"
 TOML
 }
 
-# fixture_add_instance <home> <name> [repo_dir]
-# Ensures <home>/.foreman/instances/<name>/ exists, so config.sh stops
-# refusing to load. When <repo_dir> is given, writes instance.env declaring
-# REPO=<repo_dir> -- omit it when every caller overrides REPO itself, since an
-# explicit environment REPO always wins over instance.env (config.sh reads
-# instance.env with `-`, not `:-`, for exactly that reason).
-fixture_add_instance() {
-  local home="$1" name="$2" repo_dir="${3:-}"
-  local inst="$home/.foreman/instances/$name"
-  mkdir -p "$inst"
-  [[ -z "$repo_dir" ]] || printf 'REPO=%s\n' "$repo_dir" > "$inst/instance.env"
+# fixture_add_board <home> <name> [repo_dir]
+# Declares board <name> in <home>/.foreman/boards.toml and creates its runtime
+# directory, so config.sh stops refusing to load.
+#
+# A board used to be a directory holding instance.env. It is now a table in one
+# file, and the runtime directory holds only cards/, HALT and the ids cache. A
+# fixture that still writes instance.env produces the failure every test in this
+# suite hit at once: "boards: no board declarations", from a loader that is
+# correct and a fixture that is stale.
+#
+# APPENDS rather than truncates. Several callers declare two boards to prove
+# they stay separated on a shared repository, and a fixture that rewrote the file
+# per board would silently leave only the last one.
+#
+# <repo_dir> is optional for the same reason it always was: an explicit
+# environment REPO wins over the declared one, because config.sh reads with `-`
+# and not `:-`. A board with no repo_dir gets the caller's own directory, since
+# boards.py refuses a repo that is not a directory -- refusing rather than
+# degrading, which is what that loader is for.
+fixture_add_board() {
+  local home="$1" name="$2" repo_dir="${3:-$home}"
+  local fh="$home/.foreman"
+  mkdir -p "$fh/instances/$name"
+  # One credential per workspace, at the foreman root. It used to be copied into
+  # every instance directory.
+  [[ -f "$fh/linear.key" ]] || printf 'fixture-key\n' > "$fh/linear.key"
+  chmod 600 "$fh/linear.key"
+  printf '[boards.%s]\nrepo = "%s"\n' "$name" "$repo_dir" >> "$fh/boards.toml"
 }
+
+# Kept so a caller written against the old name still works while the tests that
+# use it are updated. It is the same fixture; only the layout underneath moved.
+fixture_add_instance() { fixture_add_board "$@"; }

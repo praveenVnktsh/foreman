@@ -2,15 +2,26 @@
 # Shared configuration for the board orchestrator.
 # Every value is overridable from the environment so a tick can be throttled
 # without editing the skill.
-
-# The repository this installation serves, and where its state lives.
 #
-# It used to be derived from this file's own `--git-common-dir`, which is right
-# for a skill committed into the repository it builds and wrong for one
+# Sourced once per board, in a subshell. ONE tick agent walks every board on
+# this machine, so it must never hold every board's values -- or every board's
+# credential -- in one environment. That is why KEY_FILE below is a PATH and
+# why nothing here opens it: the key stays out of the calling process, and the
+# subprocess that actually talks to Linear is the only thing that reads it.
+
+# Which board this is, where its repository is, and where its runtime lives.
+#
+# REPO used to be derived from this file's own `--git-common-dir`, which is
+# right for a skill committed into the repository it builds and wrong for one
 # installed once and pointed at many. The wrong answer was silent: the board
-# would cut its worktrees inside its own installation. The instance is now told,
-# and refuses to guess.
+# would cut its worktrees inside its own installation. The board is now told
+# which repository it serves, and refuses to guess.
 FOREMAN_HOME="${FOREMAN_HOME:-$HOME/.foreman}"
+# Exported here rather than with the rest at the end: bin/boards.py below reads
+# $FOREMAN_HOME itself to find boards.toml, and a test that points this at a
+# temporary directory has to move both halves at once or the loader and its
+# parser disagree about which machine's boards they are reading.
+export FOREMAN_HOME
 INSTANCE="${FOREMAN_INSTANCE:-}"
 if [[ -z "$INSTANCE" ]]; then
   printf 'foreman: FOREMAN_INSTANCE is unset; refusing to guess which repository to build\n' >&2
@@ -30,20 +41,68 @@ fi
 # worktree delimiter -- any separator can be absorbed by an unconstrained
 # name, so the name is what actually has to be closed. Underscores stay legal
 # so `target_staging` is still sayable.
+#
+# Checked HERE and not left to bin/boards.py, which applies the same rule to
+# every name it reads: boards.py refuses an UNDECLARED alpha-x with "no board
+# named alpha-x", which is a different, weaker answer. A name this shell will
+# later paste into a glob is refused before anything downstream is reached.
 if [[ ! "$INSTANCE" =~ ^[A-Za-z0-9_]+$ ]]; then
   printf 'foreman: instance name %s is invalid; only letters, digits and underscore are allowed (no hyphen, no slash)\n' "$INSTANCE" >&2
   if [[ $- == *i* ]]; then return 1; else exit 1; fi
 fi
+# The per-board runtime directory: cards/, HALT, and the ids.env cache.
+#
+# Its absence is not a refusal any more. ~/.foreman/boards.toml is what
+# declares which boards exist, so bin/boards.py is what refuses an unknown
+# board, by name. This directory is derived state that a board which has never
+# run has never created, and every writer of it -- card_log below,
+# bin/resolve-ids.py -- makes it on first use. Refusing here would fail a
+# freshly declared board's first tick with "no instance", which names the
+# wrong problem.
 INSTANCE_HOME="$FOREMAN_HOME/instances/$INSTANCE"
-if [[ ! -d "$INSTANCE_HOME" ]]; then
-  printf 'foreman: no instance %s at %s\n' "$INSTANCE" "$INSTANCE_HOME" >&2
-  if [[ $- == *i* ]]; then return 1; else exit 1; fi
-fi
 BOARD_HOME="${BOARD_HOME:-$INSTANCE_HOME}"
 
-# instance.env and ids.env are KEY=VALUE, written by boardctl, never by hand and
-# never by a target repository. Read line by line rather than sourced: the same
-# rule the contract follows, for the same reason.
+# This installation's own bin/. Derived once, from this file's location:
+# config.sh lives in skills/board/, so the root is two directories up. The
+# target repository is not obliged to ship any of these scripts.
+_foreman_root="$(dirname -- "$(dirname -- "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)")")"
+
+# Read one of this installation's loaders -- bin/boards.py, bin/contract.py --
+# into this shell. Both emit NUL-separated KEY, VALUE pairs and always emit
+# every key.
+#
+# Through a TEMP FILE, never a `$(...)` capture: bash 3.2 silently discards NUL
+# bytes in command substitution (measured on this machine -- `printf 'a\0b\0'`
+# captured through `$(...)` comes back 2 bytes, not 4), which would make every
+# key end up unset with a zero exit status. A file preserves the NUL delimiters
+# and lets the read loop and the exit-status check both work.
+#
+# The locals are lowercase and the key regex is uppercase-only, so a loader can
+# never emit a key that overwrites this function's own state.
+_foreman_load_pairs() { # <what> <loader> [args...]
+  local what="$1"; shift
+  local file key value
+  file="$(mktemp)" || {
+    printf 'foreman: mktemp failed; cannot read %s\n' "$what" >&2
+    return 1
+  }
+  if ! "$@" >"$file"; then
+    rm -f "$file"
+    printf 'foreman: %s did not load (see above)\n' "$what" >&2
+    return 1
+  fi
+  while IFS= read -r -d '' key && IFS= read -r -d '' value; do
+    [[ "$key" =~ ^[A-Z_][A-Z0-9_]*$ ]] || continue
+    # Environment wins. `-` and not `:-`: an explicitly empty override must
+    # mean empty, the same distinction HIGH_RISK_PATHS depends on.
+    eval "$key=\"\${$key-\$value}\""
+  done <"$file"
+  rm -f "$file"
+}
+
+# ids.env is KEY=VALUE, written by bin/resolve-ids.py, never by hand and never
+# by a target repository. Read line by line rather than sourced: the same rule
+# the contract follows, for the same reason.
 _foreman_read_env() {
   local file="$1" line key value
   [[ -r "$file" ]] || return 0
@@ -56,39 +115,49 @@ _foreman_read_env() {
     eval "$key=\"\${$key-\$value}\""
   done <"$file"
 }
-_foreman_read_env "$INSTANCE_HOME/instance.env"
+
+# What this machine declares about this board: REPO, and the KEY_FILE holding
+# the credential for the Linear workspace that board lives in. Two facts, one
+# file, ~/.foreman/boards.toml -- the Linear team and project come from the
+# target repository's own board.toml below, because the repository declares
+# itself and a second copy on this machine would drift.
+if ! _foreman_load_pairs "$FOREMAN_HOME/boards.toml" "$_foreman_root/bin/boards.py" "$INSTANCE"; then
+  if [[ $- == *i* ]]; then return 1; else exit 1; fi
+fi
+
+# The ids the board moves cards by. A CACHE of what bin/resolve-ids.py read out
+# of Linear, never truth: every id in it is derived from the target's board.toml
+# plus Linear, so an absent ids.env costs one re-resolve and never a broken
+# board. _foreman_read_env returns quietly when the file is not there.
 _foreman_read_env "$INSTANCE_HOME/ids.env"
 
+# boards.py emits both keys for every board and refuses to emit either one
+# empty, so an empty value here can only come from an explicitly empty
+# environment override, which the `-` above honours. Both refuse rather than
+# degrade.
 if [[ -z "${REPO:-}" ]]; then
-  printf 'foreman: instance %s declares no REPO\n' "$INSTANCE" >&2
+  # An empty REPO resolves every worktree path, glob and git command below
+  # against "/", quietly.
+  printf 'foreman: board %s resolved an empty REPO\n' "$INSTANCE" >&2
   if [[ $- == *i* ]]; then return 1; else exit 1; fi
 fi
+if [[ -z "${KEY_FILE:-}" ]]; then
+  # An empty KEY_FILE reads downstream as "use the default credential", which
+  # is the wrong Linear workspace for the one board that declares a key of its
+  # own -- the mix-up boards.py refuses `key = ""` to prevent.
+  printf 'foreman: board %s resolved an empty KEY_FILE\n' "$INSTANCE" >&2
+  if [[ $- == *i* ]]; then return 1; else exit 1; fi
+fi
+# Whether that file EXISTS is deliberately not checked here. config.sh is
+# sourced by sweeps, preflights and dispatches that never talk to Linear, and
+# failing all of them on a missing credential would name the wrong problem.
+# The one process that reads the key refuses by path when it cannot.
 
 # The target's own contract. Everything a repository knows about itself.
-#
-# A temp file, not a `$(...)` capture: bash 3.2 silently discards NUL bytes in
-# command substitution (measured on this machine -- `printf 'a\0b\0'` captured
-# through `$(...)` comes back 2 bytes, not 4), which would make every contract
-# key end up unset with a zero exit status. A file preserves the NUL delimiters
-# and lets the read loop and the exit-status check both work.
-_foreman_skill_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
-_foreman_contract="$(dirname -- "$(dirname -- "$_foreman_skill_dir")")/bin/contract.py"
-_foreman_pairs_file="$(mktemp)" || {
-  printf 'foreman: mktemp failed; cannot read the contract\n' >&2
-  if [[ $- == *i* ]]; then return 1; else exit 1; fi
-}
-if ! "$_foreman_contract" "$REPO/board.toml" >"$_foreman_pairs_file"; then
-  rm -f "$_foreman_pairs_file"
-  printf 'foreman: %s/board.toml did not load (see above)\n' "$REPO" >&2
+if ! _foreman_load_pairs "$REPO/board.toml" "$_foreman_root/bin/contract.py" "$REPO/board.toml"; then
   if [[ $- == *i* ]]; then return 1; else exit 1; fi
 fi
-while IFS= read -r -d '' _k && IFS= read -r -d '' _v; do
-  [[ "$_k" =~ ^[A-Z_][A-Z0-9_]*$ ]] || continue
-  eval "$_k=\"\${$_k-\$_v}\""
-done <"$_foreman_pairs_file"
-rm -f "$_foreman_pairs_file"
-unset _foreman_skill_dir _foreman_contract _foreman_pairs_file _k _v
-export REPO INSTANCE INSTANCE_HOME BOARD_HOME FOREMAN_HOME
+export REPO KEY_FILE INSTANCE INSTANCE_HOME BOARD_HOME
 
 MAX_BUDGET_USD="${MAX_BUDGET_USD:-}"
 
@@ -160,12 +229,19 @@ AGENT_SKIP_PERMISSIONS="${AGENT_SKIP_PERMISSIONS-1}"
 
 # The self-looping tick agent, and the watchdog that keeps it alive.
 #
-# The board runs as ONE long-lived background agent executing `/loop <interval>
+# This machine runs ONE long-lived background agent executing `/loop <interval>
 # /board`. Cron does not run ticks — it runs supervise.sh, which only ensures
 # that agent exists and is healthy. Keeping dispatch out of cron is deliberate:
 # a watchdog that could also dispatch would double-dispatch the moment it
 # misjudged liveness.
-TICK_AGENT_NAME="${TICK_AGENT_NAME:-foreman/$INSTANCE/tick}"
+#
+# The name carries NO board segment, unlike agent_name, branch_name,
+# worktree_path and evidence_ref below. There is ONE tick for every board on
+# this machine -- it walks them in turn -- so a per-board name would ask
+# supervise.sh to keep N agents alive and let N ticks dispatch against one
+# machine-wide HOST_MAX_CONCURRENT. The per-CARD names keep their board
+# segment, which is what stops two boards reaping each other's work.
+TICK_AGENT_NAME="${TICK_AGENT_NAME:-foreman/tick}"
 TICK_INTERVAL_MINUTES="${TICK_INTERVAL_MINUTES:-20}"
 TICK_MODEL="${TICK_MODEL:-fable}"
 
@@ -238,10 +314,11 @@ BOARD_DRY_RUN="${BOARD_DRY_RUN:-}"
 # under `set -euo pipefail` (dispatch.sh's `mkdir -p "$(agent_tmp_for
 # "$WORKTREE")"`) or silently reap nothing (sweep.sh's `remove_agent_tmp
 # "$(agent_tmp_for "$path")"`, where an empty argument passes
-# `[[ -d "" ]] || return 0` and reports success). Computed once and kept (not
-# unset like the contract-loading temporaries above) because agent_tmp_for()
-# below needs the identical path.
-_foreman_tmp_dir_sh="$(dirname -- "$(dirname -- "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)")")/bin/tmp-dir.sh"
+# `[[ -d "" ]] || return 0` and reports success). Named here from
+# $_foreman_root and kept, rather than derived a second time, because
+# agent_tmp_for() below needs the identical path: two independent derivations
+# of one path agree only until one of them is edited.
+_foreman_tmp_dir_sh="$_foreman_root/bin/tmp-dir.sh"
 if ! AGENT_TMP_ROOT="$(BOARD_HOME="$BOARD_HOME" "$_foreman_tmp_dir_sh" --root)"; then
   printf 'foreman: bin/tmp-dir.sh failed; cannot derive the agent scratch root\n' >&2
   if [[ $- == *i* ]]; then return 1; else exit 1; fi

@@ -29,6 +29,7 @@ trap 'rm -rf "$work_dir"' EXIT
 shim_root="$work_dir/shim-repo"
 mkdir -p "$shim_root/bin" "$shim_root/skills/board"
 ln -s "$repo_root/bin/contract.py" "$shim_root/bin/contract.py"
+ln -s "$repo_root/bin/boards.py" "$shim_root/bin/boards.py"
 ln -s "$repo_root/bin/tmp-dir.sh" "$shim_root/bin/tmp-dir.sh"
 shim="$shim_root/skills/board"
 ln -s "$board_dir/config.sh" "$shim/config.sh"

@@ -59,6 +59,7 @@ install_root="$work_dir/dot-foreman-install"
 mkdir -p "$install_root/skills/board" "$install_root/bin"
 cp "$repo_root/skills/board/config.sh" "$install_root/skills/board/config.sh"
 cp "$repo_root/bin/contract.py" "$install_root/bin/contract.py"
+cp "$repo_root/bin/boards.py" "$install_root/bin/boards.py"
 cp "$repo_root/bin/tmp-dir.sh" "$install_root/bin/tmp-dir.sh"
 chmod +x "$install_root/bin/tmp-dir.sh"
 
@@ -79,7 +80,10 @@ TOML
 foreman_home="$work_dir/foreman-home"
 inst="$foreman_home/instances/demo"
 mkdir -p "$inst"
-printf 'REPO=%s\n' "$target" >"$inst/instance.env"
+# A board is declared in one file now, not as a directory holding
+# instance.env. The runtime directory still exists; it just no longer
+# carries the declaration.
+printf '[boards.demo]\nrepo = "%s"\n' "$target" >"$foreman_home/boards.toml"
 
 if out="$(env FOREMAN_HOME="$foreman_home" FOREMAN_INSTANCE=demo bash -c \
      ". '$install_root/skills/board/config.sh'; printf '%s' \"\$TEST_COMMAND\"" 2>&1)"; then

@@ -1,23 +1,28 @@
 #!/usr/bin/env bash
-# boardctl -- create and control foreman instances.
+# boardctl -- declare and control this machine's boards.
 #
-#     boardctl add <name> --repo <path> --linear-key-file <path>
+#     boardctl add <name> --repo <path> [--key-file <path>]
+#     boardctl remove <name>
 #     boardctl list
 #     boardctl status <name>
 #     boardctl halt <name>
 #     boardctl resume <name>
+#     boardctl migrate
 #
-# An instance is a directory under $FOREMAN_HOME/instances/<name>/ -- the same
-# state skills/board/config.sh reads (see that file for INSTANCE_HOME,
-# instance.env and ids.env). This is the only writer of instance.env and
-# linear.key; config.sh and bin/resolve-ids.py only ever read them.
+# A board is ONE declared fact: the local path of the repository it builds.
+# boardctl is the only writer of $FOREMAN_HOME/boards.toml; bin/boards.py
+# (see that file) only ever reads it. The Linear team, the project, and every
+# resolved state and label id come from the target repository's own
+# board.toml and from Linear itself -- read fresh by config.sh and
+# bin/resolve-ids.py, never written by boardctl. This used to build a whole
+# instance directory per board (instance.env, a copy of the Linear key,
+# resolved ids); now `add` and `remove` touch one file.
 #
-# `add` writes instance.env BEFORE calling bin/resolve-ids.py, because
-# resolution shells out to config.sh, which needs REPO to find the target's
-# board.toml. If anything after that point fails -- the key file, or
-# resolve-ids.py itself -- the whole instance directory is removed. A
-# half-created instance that a later tick picks up (a REPO with no ids, or an
-# ids.env left over from nothing) is worse than no instance at all.
+# $FOREMAN_HOME/instances/<name>/ still exists, as the per-board RUNTIME
+# directory (cards/, ids.env, HALT). boardctl touches only HALT there.
+# `add` never creates it and `remove` never deletes it, so removing a board's
+# declaration never costs an operator its card history by accident -- that is
+# a separate, deliberate act.
 set -euo pipefail
 
 FOREMAN_HOME="${FOREMAN_HOME:-$HOME/.foreman}"
@@ -25,40 +30,42 @@ export FOREMAN_HOME
 
 here="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 root="$(dirname -- "$here")"
+boards_py="$root/bin/boards.py"
+boards_toml="$FOREMAN_HOME/boards.toml"
 
 die() { printf 'boardctl: %s\n' "$*" >&2; exit 1; }
 
 usage() {
   cat >&2 <<'USAGE'
 usage:
-  boardctl add <name> --repo <path> --linear-key-file <path>
+  boardctl add <name> --repo <path> [--key-file <path>]
+  boardctl remove <name>
   boardctl list
   boardctl status <name>
   boardctl halt <name>
   boardctl resume <name>
+  boardctl migrate
 USAGE
   exit 2
 }
 
 instance_home() { printf '%s/instances/%s\n' "$FOREMAN_HOME" "$1"; }
 
-# Same constraint config.sh enforces at load: no hyphen, no slash. It matters
-# here for the identical reason it matters there -- sweep.sh's worktree glob
-# joins INSTANCE and the ticket with a hyphen, so an unconstrained name can
-# absorb another instance's boundary. config.sh would refuse this instance on
-# its very first tick regardless; checking it here means the operator learns
-# at creation, not at the first tick.
+# Same constraint bin/boards.py and config.sh both enforce on a board name --
+# see boards.py's own comment for the failure this prevents: an unconstrained
+# name lets one board's worktree glob absorb another's, because
+# worktree_path and sweep.sh's glob join the name and a ticket with a hyphen.
 validate_name() {
   local name="$1"
   [[ "$name" =~ ^[A-Za-z0-9_]+$ ]] || \
-    die "instance name '$name' is invalid; only letters, digits and underscore are allowed (no hyphen, no slash)"
+    die "board name '$name' is invalid; only letters, digits and underscore are allowed (no hyphen, no slash)"
 }
 
-# read_env_key <file> <KEY> -- the same line-oriented convention config.sh's
-# own _foreman_read_env uses: KEY=VALUE, comments and blanks skipped, first
-# match wins. Not sourced, for the same reason config.sh does not source
-# instance.env either -- it is untrusted enough to be worth a real parser, not
-# `eval`.
+# read_env_key <file> <KEY> -- KEY=VALUE, comments and blanks skipped, first
+# match wins. Not sourced: a config boardctl itself once wrote is still
+# outside this run, and `migrate` is the one command that still has to read
+# it. Only `migrate` calls this; `add`/`remove`/`list`/`status` read boards
+# through bin/boards.py instead.
 read_env_key() {
   local file="$1" want="$2" line key value
   [[ -r "$file" ]] || return 1
@@ -72,6 +79,103 @@ read_env_key() {
   return 1
 }
 
+# toml_string <value> -- <value> as a TOML basic string. Paths are the only
+# values boardctl ever writes, so escaping backslash and double-quote is
+# every case that can occur.
+toml_string() {
+  local s="$1"
+  s="${s//\\/\\\\}"
+  s="${s//\"/\\\"}"
+  printf '"%s"' "$s"
+}
+
+# boards_py_call <args...> -- runs bin/boards.py, leaves its NUL-separated
+# stdout in a temp file named by $reply, and dies on its stderr if it failed.
+#
+# A temp file, not $(...): bash 3.2 silently drops NUL bytes inside command
+# substitution (measured; see skills/board/config.sh's own comment), which
+# would make every field boards.py emits come back empty rather than fail
+# loudly.
+boards_py_call() {
+  local out err
+  out="$(mktemp)"; err="$(mktemp)"
+  if ! "$boards_py" "$@" >"$out" 2>"$err"; then
+    local msg; msg="$(cat "$err")"
+    rm -f "$out" "$err"
+    die "$msg"
+  fi
+  rm -f "$err"
+  reply="$out"
+}
+
+# nul_fields <file> -- reads a boards_py_call output file into the global
+# array `fields`, then removes the file. `read -d ''` on a NUL-terminated
+# stream, since this project's bash 3.2 floor has no `mapfile`.
+nul_fields() {
+  fields=()
+  local field
+  while IFS= read -r -d '' field; do
+    fields+=("$field")
+  done <"$1"
+  rm -f "$1"
+}
+
+# board_names -- every board bin/boards.py knows about, or an empty list if
+# boards.toml does not exist yet.
+board_names() {
+  fields=()
+  [[ -f "$boards_toml" ]] || return 0
+  boards_py_call --list
+  nul_fields "$reply"
+}
+
+# raw_board_declared <name> -- true if boards.toml's raw text already has a
+# [boards.<name>] header. A text check, not bin/boards.py, on purpose: add's
+# and remove's "does this name exist" question must still get a real answer
+# even when boards.toml currently fails to load for a reason that has
+# nothing to do with <name> -- a different board's repo that got deleted out
+# from under it, say. Whether the WRITE that follows is safe is a separate
+# question, answered by revert_unless_valid against the file that write
+# actually produces.
+raw_board_declared() {
+  local name="$1"
+  [[ -f "$boards_toml" ]] || return 1
+  grep -qxF "[boards.$name]" "$boards_toml"
+}
+
+# board_repo <name> -- REPO for a declared board, or dies naming it unknown.
+# Used by status/halt/resume, none of which write boards.toml, to confirm the
+# board is declared before touching its runtime directory.
+board_repo() {
+  local name="$1"
+  boards_py_call "$name"
+  nul_fields "$reply"
+  # fields = REPO, <repo>, KEY_FILE, <key_file> -- see bin/boards.py's emit().
+  [[ ${#fields[@]} -ge 2 ]] || die "bin/boards.py returned no REPO for '$name'"
+  printf '%s' "${fields[1]}"
+}
+
+# revert_unless_valid <tmp> <fail-message> -- if bin/boards.py cannot load
+# <tmp>, deletes it and dies with <fail-message> plus boards.py's own error.
+# The ORIGINAL boards.toml is never touched until this passes, and nothing
+# here ever leaves a bad <tmp> where a later read could find it -- a
+# boards.toml that does not parse breaks EVERY board on the machine, not just
+# the one whose write triggered this.
+revert_unless_valid() {
+  local tmp="$1" message="$2" err_out
+  if ! err_out="$("$boards_py" --file "$tmp" --list 2>&1 >/dev/null)"; then
+    rm -f "$tmp"
+    die "$message: $err_out"
+  fi
+}
+
+# new_tmp -- a temp file next to boards.toml, so the final `mv` is a rename on
+# one filesystem rather than a copy across two.
+new_tmp() {
+  mkdir -p "$FOREMAN_HOME"
+  mktemp "$boards_toml.XXXXXX"
+}
+
 cmd_add() {
   [[ $# -ge 1 ]] || usage
   local name="$1"; shift
@@ -83,115 +187,203 @@ cmd_add() {
       --repo)
         [[ $# -ge 2 ]] || die "add: --repo needs a value"
         repo="$2"; shift 2 ;;
-      --linear-key-file)
-        [[ $# -ge 2 ]] || die "add: --linear-key-file needs a value"
+      --key-file)
+        [[ $# -ge 2 ]] || die "add: --key-file needs a value"
         key_file="$2"; shift 2 ;;
       *) die "add: unrecognized argument '$1'" ;;
     esac
   done
   [[ -n "$repo" ]] || die "add: --repo is required"
-  [[ -n "$key_file" ]] || die "add: --linear-key-file is required"
-
-  local inst; inst="$(instance_home "$name")"
-  [[ -e "$inst" ]] && \
-    die "instance '$name' already exists at $inst -- refusing to overwrite its ids"
 
   [[ -d "$repo" ]] || die "no such repository directory: $repo"
   repo="$(cd -- "$repo" && pwd)"
   [[ -f "$repo/board.toml" ]] || \
     die "$repo has no board.toml -- not a foreman target"
 
-  [[ -f "$key_file" ]] || die "no such linear key file: $key_file"
-
-  mkdir -p "$inst"
-  # Write REPO before anything that reads it. resolve-ids.py shells out to
-  # config.sh, which reads REPO from instance.env to find board.toml.
-  printf 'REPO=%s\n' "$repo" > "$inst/instance.env"
-
-  local install_err; install_err="$(mktemp)"
-  if ! install -m 600 "$key_file" "$inst/linear.key" 2>"$install_err"; then
-    local err; err="$(cat "$install_err" 2>/dev/null)"
-    rm -f "$install_err"
-    rm -rf "$inst"
-    die "could not install the linear key file: $err"
-  fi
-  rm -f "$install_err"
-
-  # Forwarded only when set: an operator's real install never sets this, and
-  # bin/resolve-ids.py's own default (api.linear.app) applies. Tests point it
-  # at a local stub so `add` never has to reach the real Linear API to be
-  # exercised.
-  local api_url_args=()
-  [[ -n "${FOREMAN_LINEAR_API_URL:-}" ]] && \
-    api_url_args=(--api-url "$FOREMAN_LINEAR_API_URL")
-
-  # `${arr[@]+"${arr[@]}"}`, not `"${arr[@]}"`: bash 3.2 (this project's own
-  # floor -- macOS ships nothing newer) treats `"${arr[@]}"` on an EMPTY array
-  # as an unset variable under `set -u` and dies "unbound variable". The `+`
-  # form only expands the alternate value when the array is set, empty or
-  # not, so the ordinary case -- no FOREMAN_LINEAR_API_URL, which is every
-  # real install -- does not crash before resolve-ids.py is even reached.
-  if ! "$root/bin/resolve-ids.py" --instance "$name" \
-      ${api_url_args[@]+"${api_url_args[@]}"}; then
-    rm -rf "$inst"
-    die "resolving ids failed; instance '$name' was not created (see above)"
+  if [[ -n "$key_file" ]]; then
+    [[ -f "$key_file" ]] || die "no such linear key file: $key_file"
+    key_file="$(cd -- "$(dirname -- "$key_file")" && pwd)/$(basename -- "$key_file")"
   fi
 
-  printf 'boardctl: instance %s created, serving %s\n' "$name" "$repo"
+  raw_board_declared "$name" && \
+    die "board '$name' already exists in $boards_toml"
+
+  local tmp; tmp="$(new_tmp)"
+  [[ -f "$boards_toml" ]] && cat "$boards_toml" >"$tmp"
+  {
+    [[ -s "$tmp" ]] && printf '\n'
+    printf '[boards.%s]\n' "$name"
+    printf 'repo = %s\n' "$(toml_string "$repo")"
+    [[ -n "$key_file" ]] && printf 'key = %s\n' "$(toml_string "$key_file")"
+  } >>"$tmp"
+
+  revert_unless_valid "$tmp" \
+    "boards.toml would not parse after adding '$name'; nothing written"
+  mv -f "$tmp" "$boards_toml"
+
+  printf 'boardctl: board %s added, serving %s\n' "$name" "$repo"
+}
+
+cmd_remove() {
+  [[ $# -eq 1 ]] || usage
+  local name="$1"
+  raw_board_declared "$name" || die "no board named '$name' in $boards_toml"
+
+  local tmp; tmp="$(new_tmp)"
+  # Removes the block from "[boards.$name]" up to (not including) the next
+  # "[...]" header or end of file. Safe because boardctl is the only writer
+  # of this file and never emits anything inside a board's table but plain
+  # KEY = VALUE lines -- there is no nested table to mistake for the next
+  # board's header.
+  awk -v header="[boards.$name]" '
+    $0 == header { skip = 1; next }
+    skip && /^\[/ { skip = 0 }
+    skip { next }
+    { print }
+  ' "$boards_toml" >"$tmp"
+
+  revert_unless_valid "$tmp" \
+    "removing '$name' would leave boards.toml unparseable; nothing written"
+  mv -f "$tmp" "$boards_toml"
+
+  local inst; inst="$(instance_home "$name")"
+  printf 'boardctl: board %s removed from %s\n' "$name" "$boards_toml"
+  printf 'boardctl: its runtime directory is untouched at %s\n' "$inst"
 }
 
 cmd_list() {
-  local dir="$FOREMAN_HOME/instances"
-  [[ -d "$dir" ]] || return 0
-  local inst name repo
-  for inst in "$dir"/*/; do
-    [[ -d "$inst" ]] || continue
-    name="$(basename -- "$inst")"
-    repo="$(read_env_key "$inst/instance.env" REPO || true)"
-    printf '%s\t%s\n' "$name" "${repo:-(no REPO declared)}"
+  board_names
+  local name
+  for name in ${fields[@]+"${fields[@]}"}; do
+    printf '%s\t%s\n' "$name" "$(board_repo "$name")"
   done | sort
 }
 
 cmd_status() {
   [[ $# -eq 1 ]] || usage
-  local name="$1" inst; inst="$(instance_home "$name")"
-  [[ -d "$inst" ]] || die "no instance '$name' at $inst"
+  local name="$1"
+  local repo; repo="$(board_repo "$name")"
+  local inst; inst="$(instance_home "$name")"
 
-  local repo; repo="$(read_env_key "$inst/instance.env" REPO || true)"
   local ids_state="not resolved"
   [[ -f "$inst/ids.env" ]] && ids_state="resolved"
   local halt_state="running"
   [[ -f "$inst/HALT" ]] && halt_state="halted"
 
-  printf 'instance: %s\n' "$name"
-  printf 'repo:     %s\n' "${repo:-(none declared)}"
-  printf 'ids:      %s\n' "$ids_state"
-  printf 'state:    %s\n' "$halt_state"
+  printf 'board: %s\n' "$name"
+  printf 'repo:  %s\n' "$repo"
+  printf 'ids:   %s\n' "$ids_state"
+  printf 'state: %s\n' "$halt_state"
 }
 
 cmd_halt() {
   [[ $# -eq 1 ]] || usage
-  local name="$1" inst; inst="$(instance_home "$name")"
-  [[ -d "$inst" ]] || die "no instance '$name' at $inst"
+  local name="$1"
+  board_repo "$name" >/dev/null
+  # mkdir, not a plain touch: `add` never creates the runtime directory, so
+  # halting a board before its first tick must still be able to place HALT
+  # where that first tick will look for it.
+  local inst; inst="$(instance_home "$name")"
+  mkdir -p "$inst"
   : > "$inst/HALT"
-  printf 'boardctl: instance %s halted\n' "$name"
+  printf 'boardctl: board %s halted\n' "$name"
 }
 
 cmd_resume() {
   [[ $# -eq 1 ]] || usage
-  local name="$1" inst; inst="$(instance_home "$name")"
-  [[ -d "$inst" ]] || die "no instance '$name' at $inst"
+  local name="$1"
+  board_repo "$name" >/dev/null
+  local inst; inst="$(instance_home "$name")"
   rm -f "$inst/HALT"
-  printf 'boardctl: instance %s resumed\n' "$name"
+  printf 'boardctl: board %s resumed\n' "$name"
+}
+
+cmd_migrate() {
+  [[ $# -eq 0 ]] || usage
+  [[ -f "$boards_toml" ]] && \
+    die "boards.toml already exists at $boards_toml -- migrate is a one-time step; edit it by hand instead"
+
+  local dir="$FOREMAN_HOME/instances"
+  local names=() inst
+  if [[ -d "$dir" ]]; then
+    for inst in "$dir"/*/; do
+      [[ -f "$inst/instance.env" ]] && names+=("$(basename -- "$inst")")
+    done
+  fi
+  if [[ ${#names[@]} -eq 0 ]]; then
+    printf 'boardctl: nothing to migrate; no %s/*/instance.env found\n' "$dir"
+    return 0
+  fi
+
+  # Every board is validated before anything is written -- a migrate that
+  # writes nine of ten boards and dies on the tenth leaves an operator with a
+  # boards.toml that looks complete and is not. See revert_unless_valid for
+  # the same principle applied to the file as a whole, below.
+  local repos=() keys=()
+  local name repo
+  for name in "${names[@]}"; do
+    validate_name "$name"
+    inst="$(instance_home "$name")"
+    repo="$(read_env_key "$inst/instance.env" REPO || true)"
+    [[ -n "$repo" ]] || die "migrate: $inst/instance.env declares no REPO"
+    [[ -d "$repo" ]] || die "migrate: board $name: repo is not a directory: $repo"
+    repo="$(cd -- "$repo" && pwd)"
+    [[ -f "$repo/board.toml" ]] || die "migrate: board $name: $repo has no board.toml"
+    repos+=("$repo")
+
+    # A per-board linear.key is carried forward only when it differs from
+    # the shared default -- an identical copy is exactly what the shared
+    # credential replaces, and carrying it forward anyway would make every
+    # migrated board look like it lives in its own Linear workspace.
+    local key_line=""
+    if [[ -f "$inst/linear.key" ]]; then
+      if [[ -f "$FOREMAN_HOME/linear.key" ]] && cmp -s "$inst/linear.key" "$FOREMAN_HOME/linear.key"; then
+        key_line=""
+      else
+        key_line="$inst/linear.key"
+      fi
+    fi
+    keys+=("$key_line")
+  done
+
+  local tmp; tmp="$(new_tmp)"
+  : >"$tmp"
+  local i=0
+  for name in "${names[@]}"; do
+    [[ -s "$tmp" ]] && printf '\n' >>"$tmp"
+    printf '[boards.%s]\n' "$name" >>"$tmp"
+    printf 'repo = %s\n' "$(toml_string "${repos[$i]}")" >>"$tmp"
+    [[ -n "${keys[$i]}" ]] && printf 'key = %s\n' "$(toml_string "${keys[$i]}")" >>"$tmp"
+    i=$((i + 1))
+  done
+
+  revert_unless_valid "$tmp" "migrated boards.toml would not parse; nothing written"
+  mv -f "$tmp" "$boards_toml"
+
+  for name in "${names[@]}"; do
+    printf 'boardctl: migrated board %s\n' "$name"
+  done
+  i=0
+  for name in "${names[@]}"; do
+    if [[ -n "${keys[$i]}" ]]; then
+      printf 'boardctl: board %s keeps its own linear.key (differs from %s): %s\n' \
+        "$name" "$FOREMAN_HOME/linear.key" "${keys[$i]}"
+    fi
+    i=$((i + 1))
+  done
+  printf 'boardctl: nothing was deleted -- once %s looks right, remove %s/*/instance.env and any per-board linear.key by hand\n' \
+    "$boards_toml" "$dir"
 }
 
 [[ $# -ge 1 ]] || usage
 cmd="$1"; shift
 case "$cmd" in
   add) cmd_add "$@" ;;
+  remove) cmd_remove "$@" ;;
   list) cmd_list "$@" ;;
   status) cmd_status "$@" ;;
   halt) cmd_halt "$@" ;;
   resume) cmd_resume "$@" ;;
+  migrate) cmd_migrate "$@" ;;
   *) usage ;;
 esac
