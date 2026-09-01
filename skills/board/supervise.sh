@@ -60,6 +60,23 @@ source "$SKILL_DIR/config.sh"
 # failure this lock exists to prevent.
 SUPERVISE_LOCK="${SUPERVISE_LOCK:-$FOREMAN_HOME/supervise.lock}"
 
+# The tick's own control plane, and it must be foreman's rather than inherited.
+#
+# Claude Code resolves MCP servers PER PROJECT, keyed on the working directory.
+# The tick runs from the install directory and serves every board, so it inherits
+# no target's servers -- measured on a real host on 2026-09-01, where the Linear
+# server was configured against one checkout and the tick, started elsewhere,
+# reported "No MCP servers configured" and could not move a single card. It read
+# the board correctly and then had no write path at all.
+#
+# Inheriting the working directory's servers would be worse, not better: which
+# servers the board may use would then depend on which directory it happened to
+# start in, and a target repository could hand the tick a server of its choosing.
+# One file, owned by this installation, next to the credential it already owns.
+MCP_CONFIG="${MCP_CONFIG:-$FOREMAN_HOME/mcp.json}"
+MCP_ARGS=()
+[[ -r "$MCP_CONFIG" ]] && MCP_ARGS=(--mcp-config "$MCP_CONFIG")
+
 # Cron runs with PATH=/usr/bin:/bin and no profile. `claude` lives in
 # ~/.local/bin, so without this the watchdog silently finds nothing to run and
 # the board simply stops, with a log full of "command not found".
@@ -132,7 +149,7 @@ start_agent() {
   # the staleness thresholds below.
   local prompt="/loop /board"
   if [[ -n "$BOARD_DRY_RUN" ]]; then
-    log "DRY RUN: would start $TICK_AGENT_NAME: $prompt (model=$TICK_MODEL cwd=$INSTALL_ROOT)"
+    log "DRY RUN: would start $TICK_AGENT_NAME: $prompt (model=$TICK_MODEL cwd=$INSTALL_ROOT mcp=${MCP_ARGS[1]:-none})"
     return 0
   fi
   # `--permission-mode` is non-variadic and sits immediately before the prompt,
@@ -154,10 +171,15 @@ start_agent() {
   # script's own process exits.
   ( exec 9>&-
     # The tick serves every board, so there is no single repository to start it
-  # in. It runs from the install and cds per board inside its own slices.
-  cd "$INSTALL_ROOT" && claude --bg \
+    # in. It runs from the install and cds per board inside its own slices.
+    #
+    # ORDER IS LOAD-BEARING, same rule dispatch.sh documents: `--mcp-config` is
+    # VARIADIC, so anything after it is eaten as another config path. Keep the
+    # non-variadic `--permission-mode` immediately before the prompt.
+    cd "$INSTALL_ROOT" && claude --bg \
       --name "$TICK_AGENT_NAME" \
       --model "$TICK_MODEL" \
+      ${MCP_ARGS[@]+"${MCP_ARGS[@]}"} \
       --permission-mode bypassPermissions \
       "$prompt" >/dev/null )
   log "started $TICK_AGENT_NAME: $prompt"

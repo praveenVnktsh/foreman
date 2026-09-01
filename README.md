@@ -20,6 +20,7 @@ foreman is installed once and pointed at repositories.
     git clone <url> ~/.foreman/install
     ~/.foreman/install/bin/install-skills.sh
     install -m 600 ~/.config/linear.key ~/.foreman/linear.key
+    cp <your linear mcp config> ~/.foreman/mcp.json
     ~/.foreman/install/bin/boardctl add myproject --repo ~/Developer/myproject
 
 `install-skills.sh` is not optional and not cosmetic. A tick runs `/board`, and
@@ -30,6 +31,14 @@ another project has left a skill of the same name there, the tick runs that one
 instead. `install-skills.sh` refuses to replace a skill it did not put there.
 
 The key is one file per Linear workspace, not one per board.
+
+`~/.foreman/mcp.json` is the tick's control plane, and it has to be foreman's own
+rather than inherited. Claude Code resolves MCP servers per project, keyed on the
+working directory; the tick runs from the install and serves every board, so it
+inherits none. Without it the tick reads a board correctly and then has no way to
+move a card. Inheriting the working directory's servers would be worse: which
+servers the board may use would depend on where it started, and a target
+repository could hand the tick a server of its choosing.
 
 **The running loop uses the installed clone, never a working tree** — including
 when the repository it is building is foreman itself. A board that reads its own
