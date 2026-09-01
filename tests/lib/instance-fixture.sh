@@ -56,7 +56,13 @@ TOML
 # boards.py refuses a repo that is not a directory -- refusing rather than
 # degrading, which is what that loader is for.
 fixture_add_board() {
-  local home="$1" name="$2" repo_dir="${3:-$home}"
+  # Do NOT default repo_dir to "$home" inside this same `local` statement.
+  # bash 3.2 tolerates referring to a name being declared alongside it; bash 5
+  # under `set -u` calls it unbound and kills the test with no assertion having
+  # run. macOS ships 3.2 and CI runs 5, so the suite was green locally and dead
+  # in CI, in three tests, with no FAIL line to point at.
+  local home="$1" name="$2" repo_dir="${3:-}"
+  [[ -n "$repo_dir" ]] || repo_dir="$home"
   local fh="$home/.foreman"
   mkdir -p "$fh/instances/$name"
   # One credential per workspace, at the foreman root. It used to be copied into
