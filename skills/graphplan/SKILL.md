@@ -112,11 +112,16 @@ It is kept because the agents that execute it hold no memory of writing it, and
 because the next person to touch this feature has nothing else that says why the
 work was cut up this way.
 
-## How the graph is executed
+## Execute the graph with the Workflow tool
 
-This belongs here rather than in `AGENTS.md` because it is a property of the
-artifact: a graph that cannot be mapped to execution is a picture. The mapping
-is mechanical, which is the whole return on writing the plan as a graph.
+**Call the Workflow tool. Do not ask first, and do not execute the graph
+sequentially by hand when the tool is available.** Invoking this skill is the
+authorisation: a graph exists to be built in parallel, and building it one node
+at a time discards the only thing the graph was drawn for.
+
+This section lives here rather than in `AGENTS.md` because it is a property of
+the artifact: a graph that cannot be mapped to execution is a picture. The
+mapping is mechanical, which is the whole return on writing the plan as a graph.
 
 - a `NEW` or `CHANGE` node → `agent(prompt, {label, model, effort})`
 - an untouched node → context in the prompt, never an agent
@@ -133,8 +138,21 @@ Each node's prompt is its label plus what a stranger needs: the component's
 neighbours in the graph, the files it owns, the acceptance check, and an
 instruction to read `STYLEGUIDE.md` first.
 
-If the session has no Workflow tool, say so and execute the changed nodes in
-dependency order yourself. Do not silently serialise and call it done.
+Three rules for the prompts, each from a way this fails:
+
+- **No agent runs the full suite.** They are editing different files at the same
+  time, so a suite run mid-flight reads every other agent's half-finished state
+  and reports noise. Each agent runs only its own test; verification is its own
+  stage.
+- **No agent commits.** Changes land in the working tree, so the whole diff can
+  be read at once.
+- **State each agent's owned files in its prompt.** The graph already proves they
+  do not overlap. Saying it again is what keeps an agent from wandering into a
+  neighbour's file and having its work silently overwritten.
+
+If the session genuinely has no Workflow tool, say so out loud and execute the
+changed nodes in dependency order yourself. Do not silently serialise and call it
+done.
 
 ## Red flags
 
@@ -147,3 +165,4 @@ dependency order yourself. Do not silently serialise and call it done.
 | "I will add an edge to be safe" | An edge is a claim about the system. A false one is a false claim. |
 | "Only the new parts belong in the graph" | Then it is a task list. Untouched components are how a stranger reads it. |
 | "Now let me work out the build order" | Read it off the diagram. That is what the diagram is for. |
+| "Should I use a workflow for this?" | Yes. Invoking this skill already answered that. |

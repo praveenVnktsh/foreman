@@ -24,8 +24,11 @@
 | Implement | execute the graph | every node is done |
 | Test | run the target's own test command | it ran, and it passed |
 
-- No Workflow tool in this session? Say so and execute in rank order by hand.
-  Never serialise silently and report it as done.
+- **Invoke `graphplan` as a skill, not from memory.** Its instructions authorise
+  the Workflow tool, so invoking it is what makes stage 2 run in parallel. Reading
+  the file without invoking it leaves the work serial.
+- No Workflow tool in this session? Say so and execute in dependency order by
+  hand. Never serialise silently and report it as done.
 - A test you did not watch run is not a passing test. Quote the output.
 - Then stop and report: what you did, what you did not, what you assumed.
 - Some failures are not about the code: no disk, a quota, a missing credential.
