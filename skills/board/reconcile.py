@@ -863,7 +863,12 @@ def declared_boards(foreman_home: str) -> list[str]:
 def host_slots(foreman_home: str, stale_minutes: float | None = HOST_SLOT_STALE_MINUTES) -> dict:
     """Cards holding a slot, counted across every DECLARED board on this machine.
 
-    `{"instances": {name: count, ...}, "total": N}`. This is the host-wide
+    `{"instances": {name: count, ...}, "tickets": {name: [id, ...]}, "total": N}`.
+    The counts are the ceiling's input; `tickets` is what lets a caller tell a
+    card ENTERING the board from one already on it. `dispatch.sh` needs that
+    distinction: a resume or a reviewer for a card that already holds a slot
+    must not be refused for consuming a slot it is already counted in, or every
+    fix-dispatch blocks itself. This is the host-wide
     ceiling's input: `HOST_MAX_CONCURRENT` bounds the total across every
     board sharing this machine's RAM and disk, the same way a single
     instance's `MAX_CONCURRENT` bounds its own cards — see config.sh.
@@ -882,7 +887,7 @@ def host_slots(foreman_home: str, stale_minutes: float | None = HOST_SLOT_STALE_
     board's slots must not take down the tick that asked about all of them.
     """
     instances_dir = os.path.join(foreman_home, "instances")
-    result: dict = {"instances": {}, "total": 0}
+    result: dict = {"instances": {}, "tickets": {}, "total": 0}
     for name in declared_boards(foreman_home):
         cards_dir = os.path.join(instances_dir, name, "cards")
         try:
@@ -893,14 +898,16 @@ def host_slots(foreman_home: str, stale_minutes: float | None = HOST_SLOT_STALE_
             # report at 0, not absent: an absent key would be indistinguishable
             # from a listing failure for `instances_dir` itself.
             result["instances"][name] = 0
+            result["tickets"][name] = []
             continue
-        count = 0
+        holding = []
         for ticket in tickets:
             history_path = os.path.join(cards_dir, ticket, "history.jsonl")
             if card_holds_slot(history_path, stale_minutes):
-                count += 1
-        result["instances"][name] = count
-        result["total"] += count
+                holding.append(ticket)
+        result["instances"][name] = len(holding)
+        result["tickets"][name] = holding
+        result["total"] += len(holding)
     return result
 
 
