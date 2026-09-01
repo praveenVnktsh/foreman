@@ -38,10 +38,12 @@ TOML
 done
 
 spawn_log="$work/spawned.log"
+argv_log="$work/argv.log"
 cat > "$work/bin/claude" <<STUB
 #!/usr/bin/env bash
 if [[ "\$1" == "agents" ]]; then echo '[]'; exit 0; fi
 if [[ "\$1" == "--bg" ]]; then
+  printf '%s\n' "\$*" >>"$argv_log"
   shift
   while [[ \$# -gt 0 ]]; do
     if [[ "\$1" == "--name" ]]; then printf '%s\n' "\$2" >>"$spawn_log"; fi
@@ -86,5 +88,38 @@ name="$(head -1 "$spawn_log" 2>/dev/null || true)"
 [[ "$name" == "foreman/tick" ]] \
   && ok "the tick carries no board in its name" \
   || bad "tick was named '$name', expected foreman/tick"
+
+# --- the tick is given foreman's OWN mcp config, not the cwd's ---------------
+#
+# Claude Code resolves MCP servers per project, keyed on the working directory.
+# The tick runs from the install and serves every board, so it inherits none --
+# measured on a real host, where it read the board correctly and then had no
+# write path to move a single card.
+: >"$argv_log"; : >"$spawn_log"
+printf '{"mcpServers":{}}\n' > "$fh/mcp.json"
+run_supervise >/dev/null
+if grep -q -- "--mcp-config $fh/mcp.json" "$argv_log"; then
+  ok "the tick is started with this installation's own mcp config"
+else
+  bad "no --mcp-config in: $(cat "$argv_log")"
+fi
+
+# and the prompt must still survive: --mcp-config is variadic, so anything after
+# it is eaten as another config path. dispatch.sh documents the same trap.
+if grep -qE -- "--permission-mode [a-zA-Z]+ /loop /board|--permission-mode [a-zA-Z]+ /board" "$argv_log"; then
+  ok "a non-variadic flag sits between --mcp-config and the prompt"
+else
+  bad "the prompt may have been swallowed by --mcp-config: $(cat "$argv_log")"
+fi
+
+# --- absent mcp.json is not an error; a dry run still starts --------------
+rm -f "$fh/mcp.json"
+: >"$argv_log"; : >"$spawn_log"
+out="$(run_supervise)"
+if grep -q -- "--mcp-config" "$argv_log"; then
+  bad "passed --mcp-config with no config file present"
+else
+  ok "no config file means no flag, not a failure"
+fi
 
 exit "$fail"
