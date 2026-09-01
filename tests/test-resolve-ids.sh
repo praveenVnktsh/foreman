@@ -3,6 +3,12 @@
 # everything it resolves, refuses on the two mismatches that matter, refuses
 # on ambiguity, and never corrupts ids.env on a partial failure.
 #
+# Also prove where the credential comes from and what ids.env is. The key is
+# per Linear WORKSPACE ($FOREMAN_HOME/linear.key, or --key-file for a board in
+# another workspace), not per board -- ten boards used to mean ten copies of
+# one secret to rotate. ids.env is a CACHE: deleting it must cost one
+# re-resolve, never a broken board.
+#
 # Every case here runs against tests/lib/linear-stub.py, a local http.server
 # standing in for Linear's GraphQL endpoint. No case reaches api.linear.app --
 # a test that needed a real credential to pass would fail in CI and get
@@ -51,13 +57,20 @@ mkdir -p "$target"
 fixture_board_toml "$target"   # [linear] team = "PRA", project = "fixture"
 fixture_add_instance "$home" fixture "$target"
 inst_home="$home/.foreman/instances/fixture"
-printf 'test-linear-key\n' > "$inst_home/linear.key"
-chmod 600 "$inst_home/linear.key"
+
+# The workspace credential, one copy for every board in this FOREMAN_HOME.
+# FOREMAN_HOME is a temporary directory here; the real ~/.foreman is never
+# read or written by this test.
+foreman_home="$home/.foreman"
+workspace_key="$foreman_home/linear.key"
+printf 'test-linear-key\n' > "$workspace_key"
+chmod 600 "$workspace_key"
 
 run_resolve() {
-  # run_resolve <api-url>  -- exit code and stdout/stderr land in $work_dir/out.*
-  HOME="$home" FOREMAN_INSTANCE=fixture \
-    "$resolve_ids" --instance fixture --api-url "$1" \
+  # run_resolve <api-url> [extra args...]  -- output lands in $work_dir/out.*
+  local api_url="$1"; shift
+  HOME="$home" FOREMAN_HOME="$foreman_home" FOREMAN_INSTANCE=fixture \
+    "$resolve_ids" --instance fixture --api-url "$api_url" "$@" \
     >"$work_dir/out.log" 2>"$work_dir/err.log"
 }
 
@@ -177,6 +190,85 @@ if run_resolve "$STUB_URL"; then
   baseline_content="$(cat "$ids_env")"
 else
   fail_hard "the happy-path run itself failed: $(cat "$work_dir/err.log")"
+fi
+
+# =============================================================================
+# Case: ids.env is a cache -- deleting it costs one re-resolve, not a board
+#
+# Every id in it is derived from the target's own board.toml plus Linear, so
+# absence must be recoverable rather than fatal. Same stub, still running, so
+# the rebuilt file must come back byte-identical to the one just deleted.
+# =============================================================================
+
+rm -f "$inst_home/ids.env"
+if run_resolve "$STUB_URL"; then
+  rebuilt="$(cat "$inst_home/ids.env" 2>/dev/null || true)"
+  if [[ "$rebuilt" == "$baseline_content" ]]; then
+    ok "a missing ids.env is re-resolved, not fatal"
+  else
+    not_ok "a missing ids.env is re-resolved, not fatal: rebuilt=[$rebuilt] expected=[$baseline_content]"
+  fi
+else
+  not_ok "a missing ids.env is re-resolved, not fatal: the run refused: $(cat "$work_dir/err.log")"
+fi
+
+# =============================================================================
+# Case: REFUSES when the workspace key file is missing, naming its path
+#
+# A stale per-board copy is left at the old $INSTANCE_HOME/linear.key on
+# purpose. Reading that one back would make a rotated workspace key look
+# applied while one board kept authenticating with the revoked secret --
+# exactly the failure moving the key to one place per workspace removes.
+# =============================================================================
+
+mv "$workspace_key" "$work_dir/workspace.key.hidden"
+printf 'stale-per-board-key\n' > "$inst_home/linear.key"
+chmod 600 "$inst_home/linear.key"
+if run_resolve "$STUB_URL"; then
+  not_ok "REFUSES when the workspace key file is missing: exited 0, and a stale per-board key is still readable at $inst_home/linear.key"
+else
+  if grep -q "$workspace_key" "$work_dir/err.log"; then
+    ok "REFUSES when the workspace key file is missing, naming its path"
+  else
+    not_ok "REFUSES when the workspace key file is missing: did not name $workspace_key: $(cat "$work_dir/err.log")"
+  fi
+fi
+
+# =============================================================================
+# Case: --key-file is read instead of the workspace default
+#
+# This is how a board in a DIFFERENT Linear workspace gets its own credential.
+# The workspace default is still moved away, so a run that succeeds can only
+# have read the path that was passed.
+# =============================================================================
+
+other_key="$work_dir/other-workspace.key"
+printf 'other-workspace-key\n' > "$other_key"
+chmod 600 "$other_key"
+if run_resolve "$STUB_URL" --key-file "$other_key"; then
+  ok "--key-file is read instead of the workspace default"
+else
+  not_ok "--key-file is read instead of the workspace default: $(cat "$work_dir/err.log")"
+fi
+
+# =============================================================================
+# Case: REFUSES when --key-file names a missing file, rather than falling back
+#
+# The workspace default is restored first, so falling back would succeed and
+# resolve against the wrong workspace's credential without saying so.
+# =============================================================================
+
+mv "$work_dir/workspace.key.hidden" "$workspace_key"
+rm -f "$inst_home/linear.key"
+missing_key="$work_dir/no-such.key"
+if run_resolve "$STUB_URL" --key-file "$missing_key"; then
+  not_ok "REFUSES when --key-file names a missing file: exited 0, so it fell back to $workspace_key"
+else
+  if grep -q "$missing_key" "$work_dir/err.log"; then
+    ok "REFUSES when --key-file names a missing file, rather than falling back"
+  else
+    not_ok "REFUSES when --key-file names a missing file: did not name $missing_key: $(cat "$work_dir/err.log")"
+  fi
 fi
 stop_stub
 
@@ -338,8 +430,7 @@ command = "true"
 TOML
 fixture_add_instance "$home" leaky "$leaky_target"
 leaky_home="$home/.foreman/instances/leaky"
-printf 'test-linear-key\n' > "$leaky_home/linear.key"
-chmod 600 "$leaky_home/linear.key"
+# No key of its own: both boards share the one workspace credential.
 
 cat >"$work_dir/leak_check.json" <<'JSON'
 {
@@ -364,7 +455,7 @@ JSON
 start_stub "$work_dir/leak_check.json"
 # REPO is set in the ENVIRONMENT, ambient, the way an export from a previous
 # `config.sh` load would be -- not passed by resolve-ids.py's own logic.
-if HOME="$home" FOREMAN_INSTANCE=leaky REPO="$target" \
+if HOME="$home" FOREMAN_HOME="$foreman_home" FOREMAN_INSTANCE=leaky REPO="$target" \
     "$resolve_ids" --instance leaky --api-url "$STUB_URL" \
     >"$work_dir/leak.out.log" 2>"$work_dir/leak.err.log"; then
   leaky_ids="$leaky_home/ids.env"

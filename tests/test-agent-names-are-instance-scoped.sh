@@ -60,13 +60,20 @@ evref_beta="$(ask_fn beta evidence_ref 12345)"
 
 check "alpha build agent has the expected shape" "foreman/alpha/PRA-1/build-1" "$build_agent_alpha"
 check "beta build agent has the expected shape"  "foreman/beta/PRA-1/build-1"  "$build_agent_beta"
-check "alpha tick has the expected shape" "foreman/alpha/tick" "$tick_alpha"
-check "beta tick has the expected shape"  "foreman/beta/tick"  "$tick_beta"
+# The tick is the ONE name that is deliberately NOT board-scoped. There is a
+# single tick for the machine, walking every board a slice at a time, so two
+# boards resolving the same tick name is the design and not a collision.
+#
+# Every other name below still carries the board, and that is what this file is
+# really protecting: `claude agents` is one flat registry, so a shared
+# agent/branch/worktree/evidence name would let one board reap another's work.
+check "alpha resolves the shared tick name" "foreman/tick" "$tick_alpha"
+check "beta resolves the same shared tick"  "foreman/tick" "$tick_beta"
 check "alpha branch has the expected shape" "foreman/alpha/PRA-1" "$branch_alpha"
 check "alpha evidence ref has the expected shape" "refs/foreman/alpha/evidence/12345" "$evref_alpha"
 
 check_ne "alpha and beta build agents differ" "$build_agent_alpha" "$build_agent_beta"
-check_ne "alpha and beta ticks differ"        "$tick_alpha"        "$tick_beta"
+check "alpha and beta share one tick"        "$tick_alpha"        "$tick_beta"
 check_ne "alpha and beta worktrees differ"    "$worktree_alpha"    "$worktree_beta"
 check_ne "alpha and beta branches differ"     "$branch_alpha"      "$branch_beta"
 check_ne "alpha and beta evidence refs differ" "$evref_alpha"      "$evref_beta"
@@ -104,8 +111,7 @@ _dispatched = ns["_dispatched"]
 cases = [
     "foreman/alpha/PRA-1/build-1",
     "foreman/beta/PRA-1/build-1",
-    "foreman/alpha/tick",
-    "foreman/beta/tick",
+    "foreman/tick",
     "foreman/alpha/PRA-1/review-2a",
 ]
 print("|".join("1" if _dispatched(c) is not None else "0" for c in cases))
@@ -119,9 +125,7 @@ check "watching as alpha: alpha's build agent matches"      "1" "${watch_as_alph
 rest="${watch_as_alpha#*|}"
 check "watching as alpha: beta's build agent is filtered out" "0" "${rest%%|*}"
 rest="${rest#*|}"
-check "watching as alpha: alpha's own tick never matches"     "0" "${rest%%|*}"
-rest="${rest#*|}"
-check "watching as alpha: beta's tick never matches"          "0" "${rest%%|*}"
+check "watching as alpha: the shared tick never matches"      "0" "${rest%%|*}"
 rest="${rest#*|}"
 check "watching as alpha: alpha's review agent matches"       "1" "${rest%%|*}"
 

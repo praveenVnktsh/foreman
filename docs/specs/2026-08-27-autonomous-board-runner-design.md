@@ -1,5 +1,13 @@
 # An autonomous board runner, outside any one project
 
+> **Corrected 2026-08-31.** This spec said `board.toml` throughout. The
+> implementation is `board.toml`. The change was deliberate. `tomllib` is stdlib
+> from Python 3.11 and `pyyaml` is not. TOML therefore keeps the property that
+> made the original installable anywhere: no install step before the config can
+> be read. References and the example below are corrected. Everything else is
+> the design as written.
+
+
 **Status:** awaiting review. Working name `foreman` — the repo name is
 not decided and every occurrence below is that placeholder.
 
@@ -32,45 +40,53 @@ place.
 ## The repository is both the tool and the template
 
 Forking `foreman` yields a repository that contains the runner *and* is itself a
-valid target: `board.yaml`, CI, the doctrine documents an agent is told to read.
+valid target: `board.toml`, CI, the doctrine documents an agent is told to read.
 `init` rewrites the identity — new Linear project, new labels, new instance —
 and the fork is building within minutes.
 
 The cost is the ordinary cost of a forked template. Your project's history is
 `foreman`'s history, and an upstream fix arrives only if you add an upstream
-remote and merge it. The alternative — `foreman` as a dependency plus a thin
-separate template — keeps histories clean and was rejected because it makes the
-common case ("fork this, get a builder") a multi-step install, and because the
-dogfooding below depends on the tool and the target being one repository.
+remote and merge it. The alternative is `foreman` as a dependency plus a
+thin separate template. It keeps histories clean. It was rejected for two
+reasons. It turns the common case, "fork this, get a builder", into a multi-step
+install. And the dogfooding below depends on the tool and the target being one
+repository.
 
-## The contract: `board.yaml`
+## The contract: `board.toml`
 
 One file in the target repository. Everything the loop needs to know about a
 project that is not derivable from Linear, `gh` or `git`.
 
-```yaml
-linear:
-  team: PRA                       # by NAME; resolved to an id at init
-  project: "murmr."
-checks:
-  required: [Operations, Backend, Node integrations]
-  ci_workflow: CI                 # workflow NAME, matching `name:` in the yml
-deploy:
-  workflow: deploy-mango.yml      # optional
-  step: Deploy and verify murmr   # the step, not the job — see below
-risk:
-  paths: [backend/app/events/migrations/]
-test:
-  command: just test-all
-bootstrap:
-  command: uv sync                # run in a fresh worktree before building
-docs:
-  required: [ENGINEERING.md, CLAUDE.md]
-limits:
-  max_concurrent: 1
-  max_build_attempts: 3
-  max_review_rounds: 2
-  reviewers_per_round: 2
+```toml
+[linear]
+team = "ABC"                      # by NAME; resolved to an id at init
+project = "example"
+
+[checks]
+required = ["Tests"]
+ci_workflow = "CI"                # workflow NAME, matching `name:` in the yml
+
+[deploy]                          # optional
+workflow = "deploy.yml"
+step = "Deploy and verify"        # the step, not the job -- see below
+
+[risk]
+paths = ["migrations/"]
+
+[test]
+command = "tests/run-all.sh"
+
+[bootstrap]
+command = "uv sync"               # run in a fresh worktree before building
+
+[docs]
+required = ["STYLEGUIDE.md"]
+
+[limits]
+max_concurrent = 1
+max_build_attempts = 3
+max_review_rounds = 2
+reviewers_per_round = 2
 ```
 
 **Parsed, never sourced.** Today's `config.sh` is shell and every knob is an
@@ -104,9 +120,8 @@ describe what a *machine* can sustain and the same repository may be built on
 two different machines.
 
 **The scratch root and the halt file are not in here.** Both are properties of
-an installation rather than of a repository: the same checkout built on two
-machines has two scratch roots, and the halt file stops *this machine's*
-dispatch. They live in instance state. A target whose CI writes the halt file on
+an installation, not of a repository. The same checkout built on two machines has
+two scratch roots. The halt file stops *this machine's* dispatch. They live in instance state. A target whose CI writes the halt file on
 a failed deploy is told the path by the instance; a repository cannot know it.
 
 ## Names in the file, ids at runtime
@@ -139,7 +154,7 @@ only here is a design failure, and is reported as one.
    `--git-common-dir`, which is correct for a skill checked into the repository
    it builds and wrong for a skill installed once and pointed at many. The
    instance names the repository.
-2. **`config.sh` becomes defaults plus a loader** over `board.yaml` and instance
+2. **`config.sh` becomes defaults plus a loader** over `board.toml` and instance
    state. Every value keeps its environment-variable override.
 3. **Agent names carry the instance.** `board/tick` and
    `board/build/PRA-28-1` are matched by prefix against one flat, host-global
@@ -168,13 +183,13 @@ machine accumulates whatever its targets need to build.
 
 ## Instance #1 is this repository
 
-`foreman` gets its own Linear project, `board.yaml`, CI and test suite, and its
+`foreman` gets its own Linear project, `board.toml`, CI and test suite, and its
 own instance builds it. Until a card walks from `Todo` to merged on a repository
 that is not murmr, the contract is a hypothesis.
 
 **The running instance builds from a pinned install, never from the working
 tree.** A board that reads its own uncommitted code cannot survive merging a
-broken change to itself: the tick that would notice is the tick that just
+broken change to itself. The tick that would notice is the tick that just
 replaced itself. `boardctl upgrade` moves the pin, deliberately by hand.
 
 ## Tests

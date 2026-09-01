@@ -1,15 +1,26 @@
 #!/usr/bin/env python3
 """Turn the names in a contract into the ids the board moves cards by.
 
-    resolve-ids.py --instance <name> [--api-url URL]
+    resolve-ids.py --instance <name> [--api-url URL] [--key-file PATH]
 
 The contract names a team, a project and nothing else, because a fork must not
 inherit somebody else's project UUID (see bin/contract.py). The running loop
 moves cards by id and never by name, because renaming a column must not
 silently change which column the orchestrator is allowed to write to. This
 script is the one moment those two requirements meet, and therefore the one
-moment a name is trusted -- run once, at instance-creation time, against
-$INSTANCE_HOME/linear.key, writing $INSTANCE_HOME/ids.env.
+moment a name is trusted.
+
+The credential is per Linear WORKSPACE, not per board: $FOREMAN_HOME/linear.key
+by default, or the --key-file path for a board in a different workspace. It
+used to be $INSTANCE_HOME/linear.key, so ten boards in one workspace meant ten
+identical copies of one secret, and rotating it meant finding all ten. One copy
+missed is a board that keeps authenticating with a key the operator believes is
+revoked.
+
+$INSTANCE_HOME/ids.env is a CACHE, not state. Every id in it is derived from
+the target repository's own board.toml plus Linear, so it can always be rebuilt
+by running this script again. It may be absent -- deleting it costs one
+re-resolve, never a broken board -- so nothing may treat its absence as fatal.
 
 Everything it resolves, it verifies, and every mismatch fails closed:
 
@@ -28,7 +39,7 @@ never a name.
 ids.env is written atomically: a sibling temp file, chmod 0600, os.replace. A
 run that fails partway must leave the previous ids.env byte-identical -- a
 half-written id file is a board moving cards into a column nobody is
-watching. See write_ids().
+watching. Absent is recoverable; half-written is not. See write_ids().
 """
 
 from __future__ import annotations
@@ -322,7 +333,7 @@ def write_ids(instance_home: str, ids: dict) -> None:
 
 
 def _load_instance_config(instance: str) -> dict:
-    """Read INSTANCE_HOME and the contract's Linear names from config.sh.
+    """Read INSTANCE_HOME, FOREMAN_HOME and the contract's Linear names.
 
     Sourced through skills/board/config.sh the way reconcile.py and
     preflight.py already read their settings -- not re-implemented here,
@@ -349,7 +360,7 @@ def _load_instance_config(instance: str) -> dict:
     there is no legitimate reason for it to inherit an ambient REPO from
     whatever ran before it in this process's environment.
     """
-    keys = ("INSTANCE_HOME", "LINEAR_TEAM_NAME", "LINEAR_PROJECT_NAME")
+    keys = ("INSTANCE_HOME", "FOREMAN_HOME", "LINEAR_TEAM_NAME", "LINEAR_PROJECT_NAME")
     script = os.path.join(
         os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
         "skills",
@@ -358,6 +369,10 @@ def _load_instance_config(instance: str) -> dict:
     )
     printf = 'printf "%s\\0" ' + " ".join(f'"${k}"' for k in keys)
     env = dict(os.environ)
+    # FOREMAN_HOME is deliberately NOT scrubbed here. It names the machine's
+    # foreman root, not one board's derived state, and an operator (and every
+    # test) sets it on purpose to move every board at once. The three below
+    # are per-board values config.sh exports, which is what makes them a leak.
     for leaked in ("REPO", "BOARD_HOME", "INSTANCE_HOME"):
         env.pop(leaked, None)
     env["FOREMAN_INSTANCE"] = instance
@@ -378,6 +393,11 @@ def main(argv: list) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--instance", required=True, help="instance name (FOREMAN_INSTANCE)")
     parser.add_argument("--api-url", default=DEFAULT_API_URL, help="Linear GraphQL endpoint")
+    parser.add_argument(
+        "--key-file",
+        default=None,
+        help="Linear API key file; defaults to $FOREMAN_HOME/linear.key",
+    )
     args = parser.parse_args(argv)
 
     try:
@@ -386,7 +406,14 @@ def main(argv: list) -> int:
         team_name = cfg["LINEAR_TEAM_NAME"]
         project_name = cfg["LINEAR_PROJECT_NAME"]
 
-        key_path = os.path.join(instance_home, "linear.key")
+        # One credential per Linear workspace, in the machine's foreman root.
+        # --key-file exists for the one board that lives in a DIFFERENT
+        # workspace and therefore needs a different key; boards.toml carries
+        # that path per board. No fallback to the old per-board copy and no
+        # fallback to an empty key: a key read as "" reaches Linear as an
+        # unauthenticated request, and the operator reads the resulting error
+        # as "Linear is down", not "the key file moved".
+        key_path = args.key_file or os.path.join(cfg["FOREMAN_HOME"], "linear.key")
         try:
             with open(key_path) as handle:
                 key = handle.read().strip()

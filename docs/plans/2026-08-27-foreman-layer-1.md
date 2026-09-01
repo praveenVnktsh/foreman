@@ -1,6 +1,8 @@
 # Foreman Layer 1 — the contract seam
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **For agentic workers:** implement this task-by-task, in order. Each task ends
+> green and committed before the next begins. Steps use checkbox (`- [ ]`) syntax
+> for tracking. This plan depends on no skill being installed anywhere.
 
 **Goal:** A standalone repository holding a target-agnostic autonomous build loop, driven by one declarative contract file in the target repo, proven by building itself.
 

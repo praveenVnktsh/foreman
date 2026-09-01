@@ -19,8 +19,46 @@
 set -euo pipefail
 
 SKILL_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+INSTALL_ROOT="$(dirname -- "$(dirname -- "$SKILL_DIR")")"
+
+# There is ONE tick for this machine, walking every board a slice at a time, so
+# this watchdog is no longer run once per board and needs no board of its own.
+#
+# It still sources config.sh, which requires a board, because every knob it
+# reads -- TICK_AGENT_NAME, TICK_MODEL and the four staleness thresholds --
+# describes the machine's tick and not any one board, and duplicating them here
+# would be a second copy that drifts. Any declared board yields the same values,
+# so it takes the first one. If the operator named a board explicitly, that is
+# honoured instead; it changes nothing but keeps the old invocation working.
+#
+# No boards declared means nothing to supervise. Stand down quietly rather than
+# starting a tick that would wake up with no work forever.
+if [[ -z "${FOREMAN_INSTANCE:-}" ]]; then
+  # `|| true` is load-bearing under `set -euo pipefail`: boards.py exits
+  # non-zero when boards.toml is missing, which is the ordinary state of a
+  # machine that has declared nothing yet. Without it the watchdog dies here
+  # with no message at all, and cron mails an empty failure every ten minutes.
+  _first_board="$("$INSTALL_ROOT/bin/boards.py" --list 2>/dev/null | tr '\0' '\n' | head -1 || true)"
+  if [[ -z "$_first_board" ]]; then
+    printf '%s supervise: no boards declared; nothing to supervise\n' \
+      "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    exit 0
+  fi
+  FOREMAN_INSTANCE="$_first_board"
+  export FOREMAN_INSTANCE
+  unset _first_board
+fi
+
 # shellcheck source=config.sh
 source "$SKILL_DIR/config.sh"
+
+# The lock is MACHINE-level, not board-level, and that is load-bearing now.
+# It used to be $BOARD_HOME/supervise.lock, which was right when each board had
+# its own tick. With one tick for every board, two cron fires that resolved
+# different boards would take two different locks, both see no tick, and both
+# start one -- two ticks dispatching into the same slots, which is the exact
+# failure this lock exists to prevent.
+SUPERVISE_LOCK="${SUPERVISE_LOCK:-$FOREMAN_HOME/supervise.lock}"
 
 # Cron runs with PATH=/usr/bin:/bin and no profile. `claude` lives in
 # ~/.local/bin, so without this the watchdog silently finds nothing to run and
@@ -94,7 +132,7 @@ start_agent() {
   # the staleness thresholds below.
   local prompt="/loop /board"
   if [[ -n "$BOARD_DRY_RUN" ]]; then
-    log "DRY RUN: would start $TICK_AGENT_NAME: $prompt (model=$TICK_MODEL cwd=$REPO)"
+    log "DRY RUN: would start $TICK_AGENT_NAME: $prompt (model=$TICK_MODEL cwd=$INSTALL_ROOT)"
     return 0
   fi
   # `--permission-mode` is non-variadic and sits immediately before the prompt,
@@ -115,7 +153,9 @@ start_agent() {
   # flock on it) is untouched and still released the ordinary way, when this
   # script's own process exits.
   ( exec 9>&-
-    cd "$REPO" && claude --bg \
+    # The tick serves every board, so there is no single repository to start it
+  # in. It runs from the install and cds per board inside its own slices.
+  cd "$INSTALL_ROOT" && claude --bg \
       --name "$TICK_AGENT_NAME" \
       --model "$TICK_MODEL" \
       --permission-mode bypassPermissions \
@@ -169,8 +209,8 @@ fi
 # supervisor holds the lock" and stood down on every single fire, forever. A
 # board that never starts and says something reassuring is the worst outcome
 # available here, so this no longer tolerates a failure to open the lock.
-mkdir -p "$BOARD_HOME" || die "cannot create $BOARD_HOME"
-exec 9>"$BOARD_HOME/supervise.lock" || die "cannot open $BOARD_HOME/supervise.lock"
+mkdir -p "$(dirname -- "$SUPERVISE_LOCK")" || die "cannot create $(dirname -- "$SUPERVISE_LOCK")"
+exec 9>"$SUPERVISE_LOCK" || die "cannot open $SUPERVISE_LOCK"
 # `! flock -n 9` is true both when the lock is held and when flock(1) does not
 # exist — and macOS has no flock(1), which is the entire reason the sibling
 # withlock.py exists. Reading "no such command" as "someone else is running"

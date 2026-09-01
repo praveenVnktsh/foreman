@@ -108,9 +108,10 @@ monotonic() { python3 -c 'import time; print(time.monotonic())'; }
 #
 # One "current" instance is enough to make config.sh (and therefore
 # reconcile.py's module-level load) happy; --host-slots itself never reads
-# config through it for any instance but this one -- it walks
-# FOREMAN_HOME/instances/*/cards/ directly on disk, which is the whole point:
-# it must work for instances this process has no config for at all.
+# config through it for any board but this one -- it reads the board roster
+# from boards.toml (via bin/boards.py --list) and each board's runtime
+# directory directly on disk, which is the whole point: it must work for
+# boards this process has no config for at all.
 
 slots_home="$work_dir/slots-home"
 slots_target="$work_dir/slots-target"
@@ -127,6 +128,21 @@ write_history() { # instance ticket line...
   mkdir -p "$dir"
   local line
   for line in "$@"; do printf '%s\n' "$line" >> "$dir/history.jsonl"; done
+}
+
+# write_boards_toml <home> <repo> <board-name>...
+# The roster --host-slots now reads: a board only counts if it is declared
+# here. One shared repo dir is fine for every name -- boards.py only checks
+# that it exists, and nothing in this suite reads board.toml through it.
+write_boards_toml() {
+  local home="$1" repo="$2"; shift 2
+  local out="$home/.foreman/boards.toml"
+  mkdir -p "$(dirname -- "$out")"
+  : > "$out"
+  local name
+  for name in "$@"; do
+    { printf '[boards.%s]\n' "$name"; printf 'repo = "%s"\n' "$repo"; } >> "$out"
+  done
 }
 
 expect() {
@@ -166,6 +182,15 @@ mkdir -p "$slots_home/.foreman/instances/epsilon/cards/PRA-NOHIST"
 zeta_dir="$slots_home/.foreman/instances/zeta/cards/PRA-BAD"
 mkdir -p "$zeta_dir"
 printf '%s\n{not json at all\n' "$SPAWN" > "$zeta_dir/history.jsonl"
+# theta: a leftover RUNTIME directory for a board that is not in boards.toml
+# -- either removed after being declared, or never declared at all -- with
+# one card still in flight. Must not count: a board's declaration, not the
+# directory a past tick left behind, is what makes it part of the machine
+# ceiling now.
+write_history theta PRA-77 "$SPAWN"
+
+write_boards_toml "$slots_home" "$slots_target" \
+  alpha beta current delta epsilon gamma zeta
 
 host_json="$(HOME="$slots_home" FOREMAN_INSTANCE=current "$reconcile" --host-slots)"
 
@@ -194,6 +219,12 @@ echo "ok  --host-slots survives a card directory with no history.jsonl"
 expect "1" "$(verdict_field "$host_json" 'v["instances"]["zeta"]')" \
   "a corrupt trailing line must not crash the read -- it falls back to the last line that DID parse"
 echo "ok  --host-slots survives a malformed trailing line in history.jsonl"
+
+expect "False" "$(verdict_field "$host_json" '"theta" in v["instances"]')" \
+  "an undeclared board's leftover runtime directory must not even appear in the report"
+expect "3" "$(verdict_field "$host_json" 'v["total"]')" \
+  "theta's in-flight card must not raise the total above alpha (1) + beta (1) + zeta (1) -- a board removed from boards.toml must not silently pin the machine ceiling forever"
+echo "ok  --host-slots does not count a leftover runtime directory for an undeclared board"
 
 # ============================================================================
 # Regression coverage added in review round 1: the CRITICAL finding
@@ -247,6 +278,11 @@ done
 for n in 1 2 3 4; do
   write_wedge_history kappa "PRA-K$n" "$SPAWN" "$RELEASED"
 done
+
+# mu and nu (written below, for the backstop case) share this boards.toml, so
+# they are declared here too -- boards.toml does not change between the two
+# --host-slots calls in this section, only the cards on disk do.
+write_boards_toml "$wedge_home" "$wedge_target" current lambda kappa mu nu
 
 wedge_json="$(HOME="$wedge_home" FOREMAN_INSTANCE=current "$reconcile" --host-slots)"
 
@@ -305,6 +341,10 @@ TOML
 git_q -C "$lock_target" add board.toml
 git_q -C "$lock_target" commit -q -m "Seed"
 fixture_add_instance "$lock_home" fixture "$lock_target"
+# config.sh now resolves REPO from boards.toml (bin/boards.py), not from
+# instance.env -- fixture_add_instance still stands up the runtime directory,
+# but this is what makes FOREMAN_INSTANCE=fixture resolve at all.
+write_boards_toml "$lock_home" "$lock_target" fixture
 
 lockfile="$lock_home/.foreman/preflight.lock"
 
@@ -356,8 +396,18 @@ fi
 kill -9 "$pid"
 wait "$pid" 2>/dev/null || true
 
-wait_lock_state "$lockfile" free 5 ||
-  fail "the probe lock was NOT released within 5s of SIGKILL -- a lock that survives a kill wedges every future dispatch on this machine, which is worse than the race it prevents"
+# 30s, not 5. The property under test is that the lock is released at all --
+# a lock that survives a kill wedges every future dispatch on this machine,
+# which is worse than the race it prevents. It is NOT a performance assertion.
+#
+# `kill -9` reaps the wrapper, not the 512MB write probe it spawned, and that
+# child holds the lock until its write finishes. Five seconds was calibrated on
+# a developer's SSD and failed on a loaded CI runner against the same code that
+# had passed minutes earlier. A flaky test in a repository whose whole premise
+# is unattended merging is not a nuisance: it fails real builds at random and
+# costs a card an attempt for nothing.
+wait_lock_state "$lockfile" free 30 ||
+  fail "the probe lock was NOT released within 30s of SIGKILL -- a lock that survives a kill wedges every future dispatch on this machine, which is worse than the race it prevents"
 echo "ok  the probe lock is released when preflight is killed mid-probe (SIGKILL)"
 
 # --- 6. probe sizes come from the contract, not from a constant -------------

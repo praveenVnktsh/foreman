@@ -50,13 +50,25 @@ root="$(dirname -- "$here")"
 self="$(basename -- "${BASH_SOURCE[0]}")"
 banned='murmr|mango|Praveen|MURMR_|just test-all|deploy-mango|\.murmr-|backend/|design/build_system|test_design_invariants|ops/'
 banned_ci='whatsapp|baileys'
+
+# STYLEGUIDE.md and AGENTS.md are in scope even though they sit at the root.
+# Both instruct an agent -- STYLEGUIDE.md through board.toml's docs.required,
+# AGENTS.md through whatever harness reads it -- and both state this very rule.
+# A rule that does not bind the file stating it is a suggestion. README.md
+# stays out for the reason given above: naming the source project there is
+# accurate provenance.
+extra=""
+for f in "$root/STYLEGUIDE.md" "$root/AGENTS.md"; do
+  [[ -f "$f" ]] && extra="$extra $f"
+done
+
 hits=""
-if part="$(grep -rInE "$banned" "$root/skills" "$root/bin" "$root/tests" \
+if part="$(grep -rInE "$banned" "$root/skills" "$root/bin" "$root/tests" $extra \
      --exclude-dir=__pycache__ --exclude="$self" \
      --exclude="legacy-strings.sh" 2>/dev/null)"; then
   hits="$hits$part"$'\n'
 fi
-if part="$(grep -rInEi "$banned_ci" "$root/skills" "$root/bin" "$root/tests" \
+if part="$(grep -rInEi "$banned_ci" "$root/skills" "$root/bin" "$root/tests" $extra \
      --exclude-dir=__pycache__ --exclude="$self" \
      --exclude="legacy-strings.sh" 2>/dev/null)"; then
   hits="$hits$part"$'\n'
@@ -65,4 +77,4 @@ if [[ -n "$hits" ]]; then
   printf 'FAIL target-specific identifiers survive generalisation:\n%s' "$hits"
   exit 1
 fi
-printf 'ok   no target-specific identifiers outside docs/\n'
+printf 'ok   no target-specific identifiers outside docs/ and README.md\n'

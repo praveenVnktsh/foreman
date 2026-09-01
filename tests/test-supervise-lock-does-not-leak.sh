@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
-# supervise.sh's own concurrency lock (fd 9 on $BOARD_HOME/supervise.lock) must
+# supervise.sh's own concurrency lock (fd 9 on $SUPERVISE_LOCK, which defaults to
+# $FOREMAN_HOME/supervise.lock -- machine-level, because one tick serves every
+# board) must
 # not leak into the agent it spawns.
 #
-# `exec 9>"$BOARD_HOME/supervise.lock"` opens fd 9 in supervise.sh's own
+# `exec 9>"$SUPERVISE_LOCK"` opens fd 9 in supervise.sh's own
 # process; bash does not mark it close-on-exec. `start_agent()` then runs
 # `claude --bg ...` -- which returns as soon as the agent is SPAWNED, not when
 # it finishes, per this script's own header comment -- so the fd (and the
@@ -74,9 +76,9 @@ exit 0
 STUB
 chmod +x "$home/.local/bin/claude"
 
-run_out="$(HOME="$home" FOREMAN_INSTANCE=demo BOARD_HOME="$board_home" "$supervise" 2>&1)" \
+run_out="$(HOME="$home" FOREMAN_INSTANCE=demo SUPERVISE_LOCK="$board_home/supervise.lock" "$supervise" 2>&1)" \
   || { bad "supervise.sh exited non-zero: $run_out"; exit "$fail"; }
-grep -q "started foreman/demo/tick" <<<"$run_out" \
+grep -q "started foreman/tick" <<<"$run_out" \
   || bad "supervise.sh did not report starting the tick agent: $run_out"
 
 # The real-world symptom, checked FIRST and time-critical: the stub's

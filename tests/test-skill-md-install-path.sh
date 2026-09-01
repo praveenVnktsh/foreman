@@ -19,17 +19,34 @@ fail=0
 ok() { printf 'ok   %s\n' "$1"; }
 bad() { printf 'FAIL %s\n' "$1"; fail=1; }
 
-if grep -q '~/.claude/skills/board' "$repo_root/skills/board/SKILL.md"; then
+# Both spellings. The tilde form was the only one checked, and the cron line in
+# this same file said `$HOME/.claude/skills/board/supervise.sh` for months
+# underneath a passing test -- a documented watchdog path that does not exist
+# under the documented install.
+if grep -qE '(~|\$HOME)/\.claude/skills/board' "$repo_root/skills/board/SKILL.md"; then
   bad "SKILL.md still tells the tick agent to use ~/.claude/skills/board -- README.md's only documented install path is ~/.foreman/install"
 else
   ok "SKILL.md no longer hardcodes ~/.claude/skills/board"
 fi
 
-hits="$(grep -c '~/.foreman/install/skills/board' "$repo_root/skills/board/SKILL.md" || true)"
-if [[ "$hits" -ge 10 ]]; then
-  ok "SKILL.md consistently uses ~/.foreman/install/skills/board ($hits references)"
+# Named at all, and no OTHER install root named beside it.
+#
+# This used to assert "at least 10 references". A count is not a behaviour: it
+# fails when somebody legitimately adds an eleventh, passes when ten of them are
+# wrong, and tells a reader nothing about what must be true. What must be true
+# is that SKILL.md names one install root and it is the documented one.
+if grep -q '~/.foreman/install/skills/board' "$repo_root/skills/board/SKILL.md"; then
+  ok "SKILL.md names the documented install root"
 else
-  bad "expected SKILL.md to reference ~/.foreman/install/skills/board at least 10 times, found $hits"
+  bad "SKILL.md never references ~/.foreman/install/skills/board"
+fi
+
+others="$(grep -oE '(~|\$HOME)/[A-Za-z0-9._/-]*/skills/board' "$repo_root/skills/board/SKILL.md" \
+  | sed 's|^[$]HOME|~|' | sort -u | grep -v '^~/.foreman/install/skills/board$' || true)"
+if [[ -z "$others" ]]; then
+  ok "SKILL.md names no other install root"
+else
+  bad "SKILL.md also names: $others"
 fi
 
 # The end-to-end proof: build the EXACT layout SKILL.md now tells the tick
@@ -46,6 +63,7 @@ install_root="$work_dir/dot-foreman-install"
 mkdir -p "$install_root/skills/board" "$install_root/bin"
 cp "$repo_root/skills/board/config.sh" "$install_root/skills/board/config.sh"
 cp "$repo_root/bin/contract.py" "$install_root/bin/contract.py"
+cp "$repo_root/bin/boards.py" "$install_root/bin/boards.py"
 cp "$repo_root/bin/tmp-dir.sh" "$install_root/bin/tmp-dir.sh"
 chmod +x "$install_root/bin/tmp-dir.sh"
 
@@ -66,7 +84,10 @@ TOML
 foreman_home="$work_dir/foreman-home"
 inst="$foreman_home/instances/demo"
 mkdir -p "$inst"
-printf 'REPO=%s\n' "$target" >"$inst/instance.env"
+# A board is declared in one file now, not as a directory holding
+# instance.env. The runtime directory still exists; it just no longer
+# carries the declaration.
+printf '[boards.demo]\nrepo = "%s"\n' "$target" >"$foreman_home/boards.toml"
 
 if out="$(env FOREMAN_HOME="$foreman_home" FOREMAN_INSTANCE=demo bash -c \
      ". '$install_root/skills/board/config.sh'; printf '%s' \"\$TEST_COMMAND\"" 2>&1)"; then

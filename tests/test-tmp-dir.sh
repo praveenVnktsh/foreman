@@ -78,7 +78,7 @@ status=0
 # installation and is never copied into a target checkout, so the fixture here
 # is a stub *installation* -- config.sh and contract.py copied unchanged, and
 # bin/tmp-dir.sh replaced with a sentinel -- pointed at a separate, minimal
-# target directory through instance.env, the same wiring
+# target directory through boards.toml, the same wiring
 # test-config-resolves-instance.sh exercises.
 
 stub_installation() {
@@ -88,6 +88,7 @@ stub_installation() {
   chmod +x "$dir/bin/tmp-dir.sh"
   cp "$repo_root/skills/board/config.sh" "$dir/skills/board/config.sh"
   cp "$repo_root/bin/contract.py" "$dir/bin/contract.py"
+  cp "$repo_root/bin/boards.py" "$dir/bin/boards.py"
   echo "$dir"
 }
 
@@ -109,7 +110,8 @@ TOML
 instance_home() {
   local dir="$work_dir/$1" target="$2"
   mkdir -p "$dir/.foreman/instances/demo"
-  printf 'REPO=%s\n' "$target" >"$dir/.foreman/instances/demo/instance.env"
+  # The runtime directory still exists; the declaration moved to one file.
+  printf '[boards.demo]\nrepo = "%s"\n' "$target" >"$dir/.foreman/boards.toml"
   echo "$dir"
 }
 
