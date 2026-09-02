@@ -771,9 +771,12 @@ Only the column moves are new:
 - **`plan.state: unknown`** → change nothing, and say so in the report. The
   lookup failed, so this pass learned nothing about the plan.
 - **card in `Plan` that already has a pull request** → judge it on the pull
-  request, exactly as an `In Progress` card below. The agent reached the end
-  inside one turn, and the card leaves `Plan` on that same move rather than
-  stopping in `In Progress` first.
+  request, exactly as an `In Progress` card below, and move it out of `Plan` on
+  that same judgement: to `In Review` when the checks are green, to
+  `In Progress` for every other answer. The agent reached the end inside one
+  turn, so the card does not stop in `In Progress` on its way to review. This is
+  the only route out of `Plan` that a pull request takes; nothing ever moves a
+  card back into `Plan`.
 - **a build agent that died while planning** → an ordinary failed attempt. The
   environmental write-off rules below decide whether it costs the budget, on the
   same evidence as any other death.
@@ -1374,7 +1377,15 @@ A tick where no board changed anything says so in one line and stops.
   check `reconcile.py --host-slots` against it in the slice, immediately before
   each spawn. A board's own `MAX_CONCURRENT` still caps that board, and both
   must allow the dispatch.
-- **The lock is the card.** Move to `Plan` before spawning, always.
+- **The lock is the card, and only a fresh dispatch takes it.** Move the card to
+  `Plan`, then spawn — in that order, because a spawn that precedes the move
+  gets dispatched twice. A resume takes no lock, because the card already holds
+  one: it stays where steps 2 and 3 put it, `In Progress`, and never goes back
+  to `Plan`. Sending a reviewed card back to `Plan` hands it to step 2's "card
+  in `Plan` that already has a pull request" bullet, which starts review again
+  at round 1. `MAX_REVIEW_ROUNDS` is then never reached, and a card with an open
+  blocking finding cycles `In Review` → `Plan` → `In Review` instead of going
+  back to `Backlog` with its findings.
 - **Never write into `Todo`, never move anything out of `Backlog`.** Those
   are the operator's.
 - **Never move a card to `Done` on a claim.** An agent will report a green PR it

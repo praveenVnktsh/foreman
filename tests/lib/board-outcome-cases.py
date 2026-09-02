@@ -64,7 +64,7 @@ class World:
 
     def __init__(self, *, deploy_runs=(), views=None, ancestors=(),
                  ci_runs=(), attempt=1, prs=(), diff=(0, ""),
-                 ls_remote=(2, ""), compare=(0, "")):
+                 ls_remote=(2, ""), compare=(0, "[]")):
         self.deploy_runs = deploy_runs
         self.views = views or {}
         self.ancestors = set(ancestors)
@@ -401,18 +401,38 @@ p = plan(ls_remote=(128, ""))
 check(p["state"] == "unknown", "any other non-zero is `unknown`", json.dumps(p))
 check("ls-remote" in p["reason"], "and it names the lookup that failed", p["reason"])
 
+def compared(*files) -> tuple[int, str]:
+    """What `gh api .../compare` answers: one `status` per changed path."""
+    return 0, json.dumps([{"status": s, "filename": f} for s, f in files])
+
+
 print("==> a branch adding a file under the plan directory has planned")
 p = plan(ls_remote=(0, "sha\trefs/heads/x"),
-         compare=(0, f"{reconcile.PLAN_DIR}/2026-01-02-a-card.md\n"
-                     "skills/board/reconcile.py\n"))
+         compare=compared(("added", f"{reconcile.PLAN_DIR}/2026-01-02-a-card.md"),
+                          ("modified", "skills/board/reconcile.py")))
 check(p["state"] == "present", "a plan file is `present`", json.dumps(p))
 check(p["files"] == [f"{reconcile.PLAN_DIR}/2026-01-02-a-card.md"],
       "and only the plan file is reported", json.dumps(p.get("files")))
 
 print("==> a branch adding only other files has not planned yet")
 p = plan(ls_remote=(0, "sha\trefs/heads/x"),
-         compare=(0, "skills/board/reconcile.py\ntests/run-all.sh\n"))
+         compare=compared(("added", "skills/board/reconcile.py"),
+                          ("modified", "tests/run-all.sh")))
 check(p["state"] == "absent", "code with no plan beside it is `absent`", json.dumps(p))
+
+print("==> EDITING somebody else's plan is not this card's plan")
+# A card about the plan directory itself — this one was — changes a path under
+# PLAN_DIR and adds no plan of its own. Counting a changed path releases it from
+# the plan column before its build agent has planned anything.
+p = plan(ls_remote=(0, "sha\trefs/heads/x"),
+         compare=compared(("modified", f"{reconcile.PLAN_DIR}/2026-01-02-a-card.md"),
+                          ("removed", f"{reconcile.PLAN_DIR}/2025-12-31-old.md")))
+check(p["state"] == "absent",
+      "a changed plan file that nobody added is `absent`", json.dumps(p))
+
+print("==> compare output nothing can parse is unknown, not absent")
+p = plan(ls_remote=(0, "sha\trefs/heads/x"), compare=(0, "not json"))
+check(p["state"] == "unknown", "unreadable JSON is `unknown`", json.dumps(p))
 
 print("==> a failed compare on a branch that EXISTS is unknown, not absent")
 # The branch was confirmed a line earlier, so an empty file list here can only

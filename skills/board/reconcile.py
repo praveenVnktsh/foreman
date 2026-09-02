@@ -266,9 +266,9 @@ def plan_pushed(branch: str) -> dict:
     """Has this card's plan reached origin? `present`, `absent` or `unknown`.
 
     The build agent commits its graph under PLAN_DIR and pushes it before it
-    writes any implementation code, so a pushed file under PLAN_DIR is the only
-    evidence the board has that planning finished. Step 2 moves the card out of
-    the plan column on it.
+    writes any implementation code, so a file the branch ADDS under PLAN_DIR is
+    the only evidence the board has that planning finished. Step 2 moves the
+    card out of the plan column on it.
 
     The comparison is against `main`. After the card's pull request merges the
     branch adds nothing main does not already have, so this field reads `absent`
@@ -296,9 +296,14 @@ def plan_pushed(branch: str) -> dict:
         return {"state": "unknown",
                 "reason": f"git ls-remote failed for {branch}; whether the "
                           "branch exists is unknown"}
+    # Status as well as filename, because "changed" and "added" are different
+    # answers. A card whose diff EDITS an existing plan — a card about the plan
+    # directory itself, or one correcting a sibling card's graph — changes a
+    # path under PLAN_DIR while adding no plan of its own, and reading that as
+    # `present` releases the card from the plan column before it has planned.
     code, out = run(
         ["gh", "api", f"repos/{{owner}}/{{repo}}/compare/main...{branch}",
-         "--jq", ".files[].filename"],
+         "--jq", "[.files[] | {status: .status, filename: .filename}]"],
         cwd=REPO,
     )
     if code != 0:
@@ -307,9 +312,22 @@ def plan_pushed(branch: str) -> dict:
         return {"state": "unknown",
                 "reason": f"gh api compare failed for {branch}; what it adds "
                           "was never read"}
+    try:
+        files = json.loads(out)
+    except json.JSONDecodeError:
+        # Exit 0 with output nothing can parse is still a read that did not
+        # happen, and it takes the same answer as a non-zero exit above.
+        return {"state": "unknown",
+                "reason": f"gh api compare returned unreadable JSON for "
+                          f"{branch}; what it adds was never read"}
     under = PLAN_DIR.rstrip("/") + "/"
-    files = [f.strip() for f in out.splitlines() if f.strip()]
-    plans = [f for f in files if f.startswith(under)]
+    plans = [
+        f["filename"]
+        for f in files
+        if isinstance(f, dict)
+        and f.get("status") == "added"
+        and str(f.get("filename", "")).startswith(under)
+    ]
     if not plans:
         return {"state": "absent", "reason": f"{branch} adds nothing under {PLAN_DIR}"}
     return {"state": "present",
