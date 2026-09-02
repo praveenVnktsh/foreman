@@ -63,7 +63,8 @@ class World:
     """
 
     def __init__(self, *, deploy_runs=(), views=None, ancestors=(),
-                 ci_runs=(), attempt=1, prs=(), diff=(0, "")):
+                 ci_runs=(), attempt=1, prs=(), diff=(0, ""),
+                 ls_remote=(2, ""), compare=(0, "")):
         self.deploy_runs = deploy_runs
         self.views = views or {}
         self.ancestors = set(ancestors)
@@ -71,6 +72,10 @@ class World:
         self.attempt = attempt
         self.prs = prs
         self.diff = diff
+        # A card with no branch on origin is the default, so a case about
+        # something else never has to say anything about the plan.
+        self.ls_remote = ls_remote
+        self.compare = compare
         self.calls: list[list[str]] = []
 
     def run_json(self, args, cwd=None):
@@ -93,6 +98,13 @@ class World:
             return (0, "") if (args[3], args[4]) in self.ancestors else (1, "")
         if args[:3] == ["gh", "pr", "diff"]:
             return self.diff
+        if args[:2] == ["git", "ls-remote"]:
+            return self.ls_remote
+        # Matched on the compare path, not on `gh api` alone: a later `gh api`
+        # asking something else must still hit the AssertionError below rather
+        # than quietly collect this answer.
+        if args[:2] == ["gh", "api"] and "/compare/" in args[2]:
+            return self.compare
         raise AssertionError(f"unstubbed run: {args}")
 
     def install(self):
@@ -362,6 +374,66 @@ record = reconcile.reconcile("PRA-8", [])
 check(record["worktree"] == wt_dir,
       "the worktree path reconcile() looks for is the one dispatch.sh creates",
       record["worktree"])
+
+
+# --- plan_pushed ------------------------------------------------------------
+#
+# The plan column is where a card waits, and this field is the only thing that
+# releases it. So the failed lookup matters more here than anywhere else in this
+# file: read "GitHub did not answer" as `absent` and the card waits for a plan
+# that was pushed an hour ago, for as long as GitHub is unreachable. Read it as
+# `present` and the board declares a plan that was never written.
+
+BRANCH = f"foreman/{reconcile.INSTANCE}/PRA-9"
+
+
+def plan(**world) -> dict:
+    World(**world).install()
+    return reconcile.plan_pushed(BRANCH)
+
+
+print("==> a branch origin does not have is a plan that is not pushed")
+p = plan(ls_remote=(2, ""))
+check(p["state"] == "absent", "git's own exit 2 is `absent`", json.dumps(p))
+
+print("==> an `ls-remote` that FAILED is unknown, and never absent")
+p = plan(ls_remote=(128, ""))
+check(p["state"] == "unknown", "any other non-zero is `unknown`", json.dumps(p))
+check("ls-remote" in p["reason"], "and it names the lookup that failed", p["reason"])
+
+print("==> a branch adding a file under the plan directory has planned")
+p = plan(ls_remote=(0, "sha\trefs/heads/x"),
+         compare=(0, f"{reconcile.PLAN_DIR}/2026-01-02-a-card.md\n"
+                     "skills/board/reconcile.py\n"))
+check(p["state"] == "present", "a plan file is `present`", json.dumps(p))
+check(p["files"] == [f"{reconcile.PLAN_DIR}/2026-01-02-a-card.md"],
+      "and only the plan file is reported", json.dumps(p.get("files")))
+
+print("==> a branch adding only other files has not planned yet")
+p = plan(ls_remote=(0, "sha\trefs/heads/x"),
+         compare=(0, "skills/board/reconcile.py\ntests/run-all.sh\n"))
+check(p["state"] == "absent", "code with no plan beside it is `absent`", json.dumps(p))
+
+print("==> a failed compare on a branch that EXISTS is unknown, not absent")
+# The branch was confirmed a line earlier, so an empty file list here can only
+# be a lookup that did not happen — the same distinction the unreadable diff in
+# pr_for makes, where folding it merged a migration.
+p = plan(ls_remote=(0, "sha\trefs/heads/x"), compare=(1, ""))
+check(p["state"] == "unknown", "a failed compare is `unknown`", json.dumps(p))
+check("compare" in p["reason"], "and it names the lookup that failed", p["reason"])
+
+print("==> reconcile() asks about the plan on the branch pr_for looks the PR up by")
+# Same reasoning as the --head case above: the stub answers regardless of the
+# branch it is handed, so a wrong branch has to be caught by reading the
+# recorded call. A card whose plan is looked for on a branch nobody pushed
+# reads `absent` forever and never leaves the plan column.
+w = World(prs=[], ls_remote=(2, "")).install()
+record = reconcile.reconcile("PRA-9", [])
+check(record["plan"]["state"] == "absent",
+      "the record carries the plan evidence", json.dumps(record.get("plan")))
+ls_calls = [c for c in w.calls if c[:2] == ["git", "ls-remote"]]
+check(len(ls_calls) == 1 and ls_calls[-1][-1] == BRANCH,
+      "and it asks origin for this card's own branch", str(ls_calls))
 
 
 if FAILURES:

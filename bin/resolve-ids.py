@@ -54,15 +54,19 @@ import urllib.request
 
 DEFAULT_API_URL = "https://api.linear.app/graphql"
 
-# The five workflow states the board moves cards through (skills/board/
+# The six workflow states the board moves cards through (skills/board/
 # SKILL.md), and the Linear state name each one resolves from. The role name
 # on the left is the board's own vocabulary and never changes; the name on the
 # right is what an operator sees in Linear and is free to rename -- which is
 # exactly why this script exists, and why nothing downstream of it reads a
 # name again.
+#
+# The rows are in board order, so the list reads as the walk a card takes. A
+# new state belongs at its place in that walk, not appended at the end.
 STATE_ROLES = [
     ("STATE_PLANNED", "Backlog"),
     ("STATE_TO_PICK_UP", "Todo"),
+    ("STATE_IN_PLAN", "Plan"),
     ("STATE_IN_PROGRESS", "In Progress"),
     ("STATE_IN_REVIEW", "In Review"),
     ("STATE_MERGED", "Done"),
@@ -242,12 +246,32 @@ def resolve_project(api_url: str, key: str, team_id: str, name: str) -> str:
 
 
 def resolve_states(api_url: str, key: str, team_id: str) -> dict:
-    """Resolve the five workflow states, and verify the to-pick-up one.
+    """Resolve the six workflow states, and verify the to-pick-up one.
 
     Returns {role: id} for every role in STATE_ROLES.
     """
     data = query(api_url, key, STATES_QUERY, {"teamId": team_id})
     nodes = data.get("team", {}).get("states", {}).get("nodes", [])
+
+    # Name every missing column in one message, before resolving any of them.
+    # _pick_unique on its own answers `no state named 'Plan'`: true, but it
+    # leaves the operator to work out that the fix is a column in Linear, and
+    # it stops at the first absence, so a team missing two columns costs two
+    # runs to learn both. Adding the Plan column made that concrete -- every
+    # board that existed before it hit this path.
+    present = {node.get("name") for node in nodes}
+    missing = [name for _, name in STATE_ROLES if name not in present]
+    if missing:
+        plural = len(missing) > 1
+        die(
+            f"this team has no workflow {'columns' if plural else 'column'} "
+            f"named {', '.join(repr(name) for name in missing)} -- create "
+            f"{'them' if plural else 'it'} in Linear, then run this again. A "
+            "missing label is created here; a missing column never is. A "
+            "column is the operator's own board layout, and one the board "
+            "invented is one nobody agreed to."
+        )
+
     ids: dict = {}
     for role, state_name in STATE_ROLES:
         node = _pick_unique(nodes, "state", state_name)

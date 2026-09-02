@@ -35,8 +35,23 @@ MAX_FINDING_CHARS = 2000
 STANDING_TEMPLATE = """\
 Read {docs_sentence} before making non-trivial changes.
 
+**Plan before you implement.** Invoke the `graphplan` skill as a skill, not \
+from memory. Invoking it is what authorises the Workflow tool, so a plan \
+written from memory leaves the whole build running serially. Write the graph \
+under `{plan_dir}/`, then commit and push it before you write any \
+implementation code. That push is the only evidence the board has that \
+planning finished: it moves the card out of the plan column once the pushed \
+branch adds a file under `{plan_dir}/`. A plan left in the worktree leaves the \
+card sitting in that column with the work already done. Plan every card, \
+including one that looks like a one-liner — a stage an agent may skip is a \
+column nobody can read.
+
 Implement the ticket. Run `{test_command}`. Open a pull request whose body \
 links the ticket.
+
+**Do not review your own diff.** The board reviews it with sessions that did \
+not write it, using the `adversarial-reviewer` skill. A self-review shares the \
+author's blind spots, which are the ones a review exists to find.
 
 **Open it ready for review, never as a draft.** A draft cannot be merged, so \
 one blocks the board after its checks are green and two reviewers have \
@@ -89,7 +104,7 @@ def _load_build_config(ticket: str) -> dict[str, str]:
     agent to create a branch (`board/{ticket}`) that nothing else looked for,
     after every other branch name moved to `foreman/<instance>/<ticket>`.
     """
-    keys = ("TEST_COMMAND", "REQUIRED_DOCS")
+    keys = ("TEST_COMMAND", "REQUIRED_DOCS", "PLAN_DIR")
     script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.sh")
     printf = (
         'printf "%s\\0" ' + " ".join(f'"${k}"' for k in keys) + ' "$(branch_name "$1")"'
@@ -127,6 +142,7 @@ def build(args) -> str:
     standing = STANDING_TEMPLATE.format(
         docs_sentence=_docs_sentence(cfg["REQUIRED_DOCS"]),
         test_command=cfg["TEST_COMMAND"],
+        plan_dir=cfg["PLAN_DIR"],
     )
     return f"""\
 You are implementing Linear ticket {args.ticket} in the target repository.
@@ -166,6 +182,14 @@ Use the `adversarial-reviewer` skill. Read the diff with \
 `gh pr diff {args.pr}` and review it as someone who did not write it and expects \
 it to be wrong.
 
+Run all four of its personas: Saboteur, New Hire, Security Auditor and \
+Maintainer. The fourth asks what should not exist. It is the only one that \
+catches a change that is correct, well tested, and did not need to be written.
+
+That skill grades findings CRITICAL, WARNING and NOTE. This board reads its own \
+severities, so map them: CRITICAL is `blocking`, WARNING is `warning`, NOTE is \
+`note`.
+
 Every finding must carry a concrete failure path — specific inputs or state that \
 produce a wrong result. A finding nobody can reproduce costs the build for \
 nothing, so drop it rather than padding the list.
@@ -188,6 +212,9 @@ as JSON exactly this shape:
         "summary": "one sentence naming the defect",
         "failure": "concrete inputs or state -> wrong output"}}
     ]}}
+
+That file is the only output the board parses. It never reads the skill's own \
+markdown report, so a finding that lives only there reaches nobody.
 
 An empty `findings` list is a valid and useful answer. Do not modify any file in \
 the repository — this worktree is thrown away and any edit you make is lost."""

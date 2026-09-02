@@ -54,7 +54,7 @@ flowchart TD
 
     subgraph AGENTS[" DETACHED AGENTS · own worktree "]
         direction LR
-        bld["build<br/><small>implement · test · PR</small>"]
+        bld["build<br/><small>plan · implement · test · PR</small><br/><i>pushed plan is what moves the card out of Plan</i>"]
         rev["review<br/><small>read the diff</small>"]
         fix["fix<br/><small>answer findings</small>"]
     end

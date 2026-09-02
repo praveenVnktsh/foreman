@@ -2,8 +2,9 @@
 # Spawn (or resume) one detached board agent in its own git worktree.
 #
 # The card in Linear is the lock. This script assumes the caller has ALREADY
-# moved the card into In progress — a spawn that precedes the move gets
-# dispatched twice by the next tick.
+# moved the card out of Todo — into Plan for a fresh build, since that is where
+# a dispatched card starts. A spawn that precedes the move gets dispatched twice
+# by the next tick.
 #
 #   dispatch.sh --ticket MUR-42 --role build  --attempt 1 --prompt-file brief.md
 #   dispatch.sh --ticket MUR-42 --role review --attempt 1 --slot a \

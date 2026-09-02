@@ -159,6 +159,22 @@ if ! _foreman_load_pairs "$REPO/board.toml" "$_foreman_root/bin/contract.py" "$R
 fi
 export REPO KEY_FILE INSTANCE INSTANCE_HOME BOARD_HOME
 
+# Where a build agent's plan lands, relative to REPO.
+#
+# The one place this path is written. brief.py renders it into the build
+# prompt, and reconcile.py reads the pushed branch for a file under it. A
+# prompt that names one path and a check that reads another leaves every card
+# stuck in the Plan column, with its plan committed and pushed and sitting
+# right there.
+#
+# skills/graphplan/SKILL.md writes to this same path by default. An override
+# therefore moves the instruction and the check together, and does not move
+# the skill's own default.
+#
+# `-`, not `:-`: an explicitly empty override must mean empty, the same
+# distinction every other override in this file makes.
+PLAN_DIR="${PLAN_DIR-docs/plans}"
+
 MAX_BUDGET_USD="${MAX_BUDGET_USD:-}"
 
 BUILD_MODEL="${BUILD_MODEL:-opus}"
