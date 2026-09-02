@@ -20,10 +20,13 @@
 
 | Stage | Do | Done when |
 |---|---|---|
-| Plan | invoke `graphplan` | the graph exists under `docs/plans/` |
+| Plan | invoke `graphplan` | the graph is committed and pushed on your branch |
 | Implement | execute the graph | every node is done |
 | Test | run the target's own test command | it ran, and it passed |
 
+- The board watches your branch, not your worktree. Your card sits in `Plan`
+  until the pushed commit adds a file under `docs/plans/`, so a plan you never
+  push is a card that never moves.
 - **Invoke `graphplan` as a skill, not from memory.** Its instructions authorise
   the Workflow tool, so invoking it is what makes stage 2 run in parallel. Reading
   the file without invoking it leaves the work serial.

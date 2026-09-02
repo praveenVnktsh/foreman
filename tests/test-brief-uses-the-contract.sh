@@ -84,8 +84,8 @@ ask_brief() { # subcommand and args...
 }
 
 # ============================================================================
-# Part 1 -- brief.py build: the prompt comes from the contract, not a
-# hardcoded project.
+# Part 1 -- brief.py build and review: the prompt comes from the contract and
+# from the skills the board relies on, not from a hardcoded project.
 # ============================================================================
 
 TICKET="ACME-7"
@@ -155,6 +155,82 @@ else
   bad "the no-merge / no-auto-merge instruction is missing or was softened:
 $prompt"
 fi
+
+# The Plan stage has to reach the agent as an instruction, because the board
+# reads its result off the branch: it moves the card out of the Plan column
+# only once the pushed branch adds a file under the plan directory. An agent
+# that plans in its head, or that plans and leaves the graph in the worktree,
+# parks the card in that column with the work already finished.
+case "$prompt" in
+  *'`graphplan`'*) ok "the build prompt names the graphplan skill" ;;
+  *) bad "the build prompt never names the graphplan skill:
+$prompt" ;;
+esac
+
+# The plan directory is asked of config.sh, which owns that one path -- not
+# re-typed here. A prompt naming one directory and a board check reading
+# another is the drift that leaves a card stuck in the Plan column forever.
+# The fixture's board.toml declares no plan directory, so what arrives here is
+# config.sh's own default travelling the whole way to the prompt.
+expected_plan_dir="$(env HOME="$home" FOREMAN_INSTANCE=demo \
+  bash -c ". '$board_dir/config.sh' >/dev/null; printf '%s' \"\$PLAN_DIR\"" _)"
+[[ -n "$expected_plan_dir" ]] || bad "could not read PLAN_DIR from config.sh itself"
+if [[ "$prompt" == *"$expected_plan_dir"* ]]; then
+  ok "the build prompt names config.sh's plan directory ($expected_plan_dir)"
+else
+  bad "the build prompt does not name the plan directory config.sh declares (expected $expected_plan_dir):
+$prompt"
+fi
+
+if [[ "$prompt" == *"before you write any implementation code"* \
+      && "$prompt" == *"out of the plan column"* ]]; then
+  ok "the build prompt requires the plan to be pushed before any implementation code, and says why"
+else
+  bad "the build prompt does not require the plan pushed before implementation, or does not say what the push buys:
+$prompt"
+fi
+
+# A self-review shares the author's blind spots, which are the ones review
+# exists to find. The board reviews with sessions that did not write the diff,
+# so the build prompt has to send the author away rather than let a build end
+# with the author declaring its own diff clean.
+if [[ "$prompt" == *"Do not review your own diff"* && "$prompt" == *"blind spots"* ]]; then
+  ok "the build prompt forbids reviewing your own diff, with its argument"
+else
+  bad "the build prompt does not forbid the author reviewing their own diff:
+$prompt"
+fi
+
+review_prompt="$(ask_brief review --ticket "$TICKET" --pr 91 --round 1 \
+  --out "$work/review-findings.json")"
+
+# Naming the skill is not using it. The fourth persona is the one the other
+# three cannot stand in for: it asks what should not exist, and it is what
+# catches a change that is correct, well tested and did not need writing.
+missing=""
+for persona in "Saboteur" "New Hire" "Security Auditor" "Maintainer"; do
+  [[ "$review_prompt" == *"$persona"* ]] || missing="$missing $persona"
+done
+if [[ -z "$missing" ]]; then
+  ok "the review prompt names all four adversarial-reviewer personas"
+else
+  bad "the review prompt never names these adversarial-reviewer personas:$missing
+$review_prompt"
+fi
+
+# The skill grades CRITICAL/WARNING/NOTE and the board parses
+# blocking/warning/note. Without the mapping spelled out, a reviewer writes the
+# skill's own grade into the JSON and the board reads a severity it does not
+# recognise.
+mapping=1
+for pair in 'CRITICAL is `blocking`' 'WARNING is `warning`' 'NOTE is `note`'; do
+  case "$review_prompt" in
+    *"$pair"*) ;;
+    *) bad "the review prompt does not map the skill's grade onto this board's severity: $pair"
+       mapping=0 ;;
+  esac
+done
+[[ "$mapping" == 1 ]] && ok "the review prompt maps CRITICAL/WARNING/NOTE onto blocking/warning/note"
 
 # ============================================================================
 # Part 2 -- quote_untrusted: agent-written text must still be wrapped in a tag

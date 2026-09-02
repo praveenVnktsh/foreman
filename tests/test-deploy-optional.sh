@@ -105,6 +105,12 @@ reconcile.pr_for = lambda t: {
     "url": "https://example/pr/7", "checks": {},
 }
 reconcile.commit_on_main = lambda sha: True
+# `plan_pushed` asks origin for the card's branch, for the same reason `pr_for`
+# asks gh for the pull request: it is a reader this file is not about. The
+# claim here is that the DEPLOY path makes no call when no deploy is
+# configured, and `run = explode` is how that is caught -- so every other
+# reader reconcile() legitimately uses is stubbed, exactly as the two above are.
+reconcile.plan_pushed = lambda branch: {"state": "absent", "reason": "stubbed"}
 
 record = reconcile.reconcile(ticket, agents=[])
 check(record["merged"] is True, "reconcile() sees the card as merged")

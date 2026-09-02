@@ -35,7 +35,7 @@ def _load_config() -> dict[str, str]:
     keys = (
         "REPO", "BOARD_HOME", "REQUIRED_CHECKS", "HIGH_RISK_PATHS",
         "DEPLOY_WORKFLOW", "DEPLOY_STEP", "CI_WORKFLOW", "INSTANCE",
-        "FOREMAN_HOME", "HOST_SLOT_STALE_MINUTES",
+        "FOREMAN_HOME", "HOST_SLOT_STALE_MINUTES", "PLAN_DIR",
     )
     script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.sh")
     printf = 'printf "%s\\0" ' + " ".join(f'"${k}"' for k in keys)
@@ -82,6 +82,17 @@ if not _CFG["CI_WORKFLOW"]:
     )
 CI_WORKFLOW = _CFG["CI_WORKFLOW"]
 FOREMAN_HOME = _CFG["FOREMAN_HOME"]
+# The directory the build agent pushes its plan into. config.sh defaults it to
+# a real path, so blank here means an environment override (PLAN_DIR=) blanked
+# it out. Refuse instead of carrying it: `f.startswith("")` is true of every
+# path, so a blank would read the first pushed source file as the card's plan
+# and move the card out of the plan column before any plan existed.
+if not _CFG["PLAN_DIR"]:
+    raise SystemExit(
+        "reconcile: PLAN_DIR is empty -- config.sh defaults it to a real "
+        "directory, so this can only mean an environment override blanked it"
+    )
+PLAN_DIR = _CFG["PLAN_DIR"]
 # Empty means "disabled" -- see host_slots()'s docstring for why that is a
 # real, supported value and not just an unset-variable accident.
 HOST_SLOT_STALE_MINUTES = (
@@ -240,8 +251,92 @@ def check_rollup(pr: dict) -> dict:
     }
 
 
+def branch_for(ticket: str) -> str:
+    """The branch dispatch.sh cuts for a card.
+
+    One function because two callers need it. `pr_for` looks the pull request up
+    by this branch and `plan_pushed` asks origin for it, so a second copy of the
+    format string sends them at different branches — and each reads its own miss
+    as an absence: no pull request, and no plan.
+    """
+    return f"foreman/{INSTANCE}/{ticket}"
+
+
+def plan_pushed(branch: str) -> dict:
+    """Has this card's plan reached origin? `present`, `absent` or `unknown`.
+
+    The build agent commits its graph under PLAN_DIR and pushes it before it
+    writes any implementation code, so a file the branch ADDS under PLAN_DIR is
+    the only evidence the board has that planning finished. Step 2 moves the
+    card out of the plan column on it.
+
+    The comparison is against `main`. After the card's pull request merges the
+    branch adds nothing main does not already have, so this field reads `absent`
+    — correctly: it answers a question only a card that has not opened a pull
+    request needs asked.
+    """
+    # A network read on purpose, and never `origin/<branch>` or the working
+    # tree. No fetch is guaranteed to have refreshed a local remote-tracking ref
+    # — the reason skills/board/evidence.sh exists — and a stale "not pushed"
+    # here parks a card in the plan column with its plan already pushed and its
+    # build agent already off implementing.
+    code, _ = run(
+        ["git", "ls-remote", "--exit-code", "--heads", "origin", branch], cwd=REPO
+    )
+    # Three answers, never two. Exit 2 is git's own code for "no matching ref";
+    # any OTHER non-zero is the lookup failing — no network, no credential, a
+    # timeout — and folding that into `absent` is this file's characteristic
+    # defect, the same one load_agents(), pr_for() and the diff read each carry a
+    # comment about. It costs more here than a wrong report: the card sits in the
+    # plan column for as long as GitHub is unreachable, and the tick keeps
+    # waiting for a plan that was pushed an hour ago.
+    if code == 2:
+        return {"state": "absent", "reason": f"origin has no branch {branch}"}
+    if code != 0:
+        return {"state": "unknown",
+                "reason": f"git ls-remote failed for {branch}; whether the "
+                          "branch exists is unknown"}
+    # Status as well as filename, because "changed" and "added" are different
+    # answers. A card whose diff EDITS an existing plan — a card about the plan
+    # directory itself, or one correcting a sibling card's graph — changes a
+    # path under PLAN_DIR while adding no plan of its own, and reading that as
+    # `present` releases the card from the plan column before it has planned.
+    code, out = run(
+        ["gh", "api", f"repos/{{owner}}/{{repo}}/compare/main...{branch}",
+         "--jq", "[.files[] | {status: .status, filename: .filename}]"],
+        cwd=REPO,
+    )
+    if code != 0:
+        # ls-remote already answered that the branch exists, so this is a failed
+        # lookup and never a branch that adds nothing.
+        return {"state": "unknown",
+                "reason": f"gh api compare failed for {branch}; what it adds "
+                          "was never read"}
+    try:
+        files = json.loads(out)
+    except json.JSONDecodeError:
+        # Exit 0 with output nothing can parse is still a read that did not
+        # happen, and it takes the same answer as a non-zero exit above.
+        return {"state": "unknown",
+                "reason": f"gh api compare returned unreadable JSON for "
+                          f"{branch}; what it adds was never read"}
+    under = PLAN_DIR.rstrip("/") + "/"
+    plans = [
+        f["filename"]
+        for f in files
+        if isinstance(f, dict)
+        and f.get("status") == "added"
+        and str(f.get("filename", "")).startswith(under)
+    ]
+    if not plans:
+        return {"state": "absent", "reason": f"{branch} adds nothing under {PLAN_DIR}"}
+    return {"state": "present",
+            "reason": f"{branch} adds {len(plans)} file(s) under {PLAN_DIR}",
+            "files": plans}
+
+
 def pr_for(ticket: str) -> dict | None:
-    branch = f"foreman/{INSTANCE}/{ticket}"
+    branch = branch_for(ticket)
     prs = run_json(
         [
             "gh", "pr", "list", "--head", branch, "--state", "all",
@@ -1314,6 +1409,7 @@ def reconcile(ticket: str, agents: list[dict]) -> dict:
         "worktree": worktree if os.path.isdir(worktree) else None,
         "pr": pr,
         "merged": bool(pr and pr.get("state") == "MERGED"),
+        "plan": plan_pushed(branch_for(ticket)),
         "deploy": {"verified": False, "reason": "not merged"},
     }
     if record["merged"]:

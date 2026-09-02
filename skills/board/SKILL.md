@@ -314,13 +314,14 @@ These are resolved by NAME once per board (`resolve-ids.py`), cached in that
 board's `ids.env`, and moved by ID forever after — pass the id from `ids.env` to
 Linear MCP directly, never match on name. Renaming a column in Linear must not
 silently change which column the board is allowed to write to. Two boards
-resolve two different sets of ids for the same five role names, so read them
+resolve two different sets of ids for the same six role names, so read them
 inside the slice and never reuse the previous board's.
 
 | Role | Env var (`ids.env`) | Linear state (by name, at resolve time) | May move **in** | May move **out** |
 |---|---|---|---|---|
 | planned | `STATE_PLANNED` | `Backlog` | yes | **never** |
 | to-pick-up | `STATE_TO_PICK_UP` | `Todo` | **never** | yes |
+| in-plan | `STATE_IN_PLAN` | `Plan` | yes | yes |
 | in-progress | `STATE_IN_PROGRESS` | `In Progress` | yes | yes |
 | in-review | `STATE_IN_REVIEW` | `In Review` | yes | yes |
 | merged | `STATE_MERGED` | `Done` | yes | never |
@@ -792,7 +793,7 @@ whether you may use a disk is to use it.
 
 ### 1. Adopt
 
-Read every card in `Todo`, `In Progress`, `In Review` **in this board's
+Read every card in `Todo`, `Plan`, `In Progress`, `In Review` **in this board's
 project** from Linear — filter by that board's project ID, not by scanning the
 team. For anything in `Todo` you might dispatch, read it again with
 `includeRelations: true`; step 6 gates on `blockedBy` and `list_issues` cannot
@@ -812,7 +813,7 @@ slice's environment and answers about that board's repository, so a ticket from
 another board handed to it gets a confident answer built from the wrong `gh` and
 the wrong agents.
 
-Four fields carry more than their names suggest:
+Five fields carry more than their names suggest:
 
 - **`build_attempts`** — attempts actually charged to this card, counted from
   `history.jsonl`. Use this, never the number in an agent's name. A spawn plus
@@ -825,9 +826,36 @@ Four fields carry more than their names suggest:
   `unanswered_tool` naming it. An agent that stops of its own accord does not
   look like this, so the field is how you tell "the build failed" from "something
   killed the build" — see step 2.
+- **`plan`** — whether the branch pushed for this card adds a file under
+  `PLAN_DIR`: `present`, `absent` or `unknown`. **`unknown` is a failed lookup,
+  never "no plan"** — the same distinction `pr.lookup_failed` draws below.
+  Reading it as `absent` reports a card as unplanned on evidence nobody
+  gathered.
 - **`pr.risk`** — computed from the diff, never the ticket text.
 
-### 2. Reconcile `In Progress`
+### 2. Reconcile `Plan` and `In Progress`
+
+**One step, because it is one agent.** The build agent plans and implements in
+a single session, so everything below — phase classification, stalls,
+environmental write-offs, attempts, resume — reads identically in both columns.
+Only the column moves are new:
+
+- **card in `Plan`, `plan.state: present`, no pull request** → move it to
+  `In Progress` and leave the agent running. Its plan is pushed and it is now
+  writing code, so the move is bookkeeping and never a resume: the card keeps
+  its session and its attempt.
+- **`plan.state: unknown`** → change nothing, and say so in the report. The
+  lookup failed, so this pass learned nothing about the plan.
+- **card in `Plan` that already has a pull request** → judge it on the pull
+  request, exactly as an `In Progress` card below, and move it out of `Plan` on
+  that same judgement: to `In Review` when the checks are green, to
+  `In Progress` for every other answer. The agent reached the end inside one
+  turn, so the card does not stop in `In Progress` on its way to review. This is
+  the only route out of `Plan` that a pull request takes; nothing ever moves a
+  card back into `Plan`.
+- **a build agent that died while planning** → an ordinary failed attempt. The
+  environmental write-off rules below decide whether it costs the budget, on the
+  same evidence as any other death.
 
 Read the agent marked **`current: true`**, and classify on **`phase`**.
 
@@ -1235,10 +1263,15 @@ commit, and the wait keeps going until its budget runs out.
 
 ### 6. Dispatch
 
-This board's free slots = its `MAX_CONCURRENT` − (its cards in `In Progress`) −
-(its cards in `In Review` with a live reviewer). Parked-for-the-operator cards do
-not count. `MAX_CONCURRENT` is that board's own number, from its own
-`board.toml`.
+This board's free slots = its `MAX_CONCURRENT` − (its cards in `Plan`) − (its
+cards in `In Progress`) − (its cards in `In Review` with a live reviewer).
+Parked-for-the-operator cards do not count. `MAX_CONCURRENT` is that board's own
+number, from its own `board.toml`.
+
+**A card in `Plan` holds an agent.** It was dispatched and its build agent is
+running; the only difference from `In Progress` is which stage that one agent is
+in. Counting only `In Progress` would let a board dispatch a second card into a
+machine that is already full of planners.
 
 **Recount here, after steps 2–5 have run.** A card that reached `Done` earlier in
 this same slice has already released its slot, and the whole point of running the
@@ -1311,8 +1344,8 @@ ends and the next board takes its turn. A board with six free slots fills them
 over six passes rather than six spawns in a row, and every other board is served
 in between.
 
-**Move the card to `In Progress` first, then spawn.** In that order — the card
-is the lock, and a spawn that precedes the move gets dispatched twice.
+**Move the card to `Plan` first, then spawn.** In that order — the card is the
+lock, and a spawn that precedes the move gets dispatched twice.
 
 Never hand-write a prompt. `brief.py` renders all four, and it is the only thing
 that quotes agent-written text correctly:
@@ -1420,7 +1453,15 @@ A tick where no board changed anything says so in one line and stops.
   check `reconcile.py --host-slots` against it in the slice, immediately before
   each spawn. A board's own `MAX_CONCURRENT` still caps that board, and both
   must allow the dispatch.
-- **The lock is the card.** Move to `In Progress` before spawning, always.
+- **The lock is the card, and only a fresh dispatch takes it.** Move the card to
+  `Plan`, then spawn — in that order, because a spawn that precedes the move
+  gets dispatched twice. A resume takes no lock, because the card already holds
+  one: it stays where steps 2 and 3 put it, `In Progress`, and never goes back
+  to `Plan`. Sending a reviewed card back to `Plan` hands it to step 2's "card
+  in `Plan` that already has a pull request" bullet, which starts review again
+  at round 1. `MAX_REVIEW_ROUNDS` is then never reached, and a card with an open
+  blocking finding cycles `In Review` → `Plan` → `In Review` instead of going
+  back to `Backlog` with its findings.
 - **Never write into `Todo`, never move anything out of `Backlog`.** Those
   are the operator's.
 - **Never move a card to `Done` on a claim.** An agent will report a green PR it

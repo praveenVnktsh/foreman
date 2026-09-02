@@ -113,7 +113,7 @@ print(oct(stat.S_IMODE(os.stat(sys.argv[1]).st_mode))[2:])
 }
 
 # =============================================================================
-# Case A: the happy path -- team, project, five states, and both label paths
+# Case A: the happy path -- team, project, six states, and both label paths
 # (reuse an existing one, create a missing one) all in one resolved ids.env.
 # =============================================================================
 
@@ -125,6 +125,7 @@ cat >"$work_dir/happy.json" <<JSON
   "states": [
     {"id": "state-backlog",    "name": "Backlog",     "type": "backlog"},
     {"id": "state-todo",       "name": "Todo",        "type": "unstarted"},
+    {"id": "state-plan",       "name": "Plan",        "type": "started"},
     {"id": "state-inprogress", "name": "In Progress", "type": "started"},
     {"id": "state-inreview",   "name": "In Review",   "type": "started"},
     {"id": "state-done",       "name": "Done",        "type": "completed"}
@@ -153,12 +154,13 @@ if run_resolve "$STUB_URL"; then
 
   if [[ "$(read_id "$ids_env" STATE_PLANNED)" == "state-backlog" && \
         "$(read_id "$ids_env" STATE_TO_PICK_UP)" == "state-todo" && \
+        "$(read_id "$ids_env" STATE_IN_PLAN)" == "state-plan" && \
         "$(read_id "$ids_env" STATE_IN_PROGRESS)" == "state-inprogress" && \
         "$(read_id "$ids_env" STATE_IN_REVIEW)" == "state-inreview" && \
         "$(read_id "$ids_env" STATE_MERGED)" == "state-done" ]]; then
-    ok "resolves the five states by name"
+    ok "resolves the six states by name"
   else
-    not_ok "resolves the five states by name: $(cat "$ids_env")"
+    not_ok "resolves the six states by name: $(cat "$ids_env")"
   fi
 
   created_id="$(read_id "$ids_env" LABEL_BOARD_FAILED)"
@@ -283,6 +285,7 @@ cat >"$work_dir/bad_state_type.json" <<JSON
   "states": [
     {"id": "state-backlog",    "name": "Backlog",     "type": "backlog"},
     {"id": "state-todo",       "name": "Todo",        "type": "started"},
+    {"id": "state-plan",       "name": "Plan",        "type": "started"},
     {"id": "state-inprogress", "name": "In Progress", "type": "started"},
     {"id": "state-inreview",   "name": "In Review",   "type": "started"},
     {"id": "state-done",       "name": "Done",        "type": "completed"}
@@ -303,6 +306,43 @@ fi
 stop_stub
 
 # =============================================================================
+# Case: REFUSES when the team has no `Plan` column, and says to create it in
+# Linear
+#
+# Every board that already existed when the Plan stage landed reaches this
+# path on its next resolve. `no state named 'Plan'` is true and useless: it
+# leaves the operator guessing what to do. The fix is a column the operator
+# adds to their own board, because this script creates a missing label and
+# never a missing column.
+# =============================================================================
+
+cat >"$work_dir/no_plan_state.json" <<'JSON'
+{
+  "teams": [{"id": "team-1", "name": "PRA"}],
+  "projects": [{"id": "proj-1", "name": "fixture", "teamId": "team-1"}],
+  "states": [
+    {"id": "state-backlog",    "name": "Backlog",     "type": "backlog"},
+    {"id": "state-todo",       "name": "Todo",        "type": "unstarted"},
+    {"id": "state-inprogress", "name": "In Progress", "type": "started"},
+    {"id": "state-inreview",   "name": "In Review",   "type": "started"},
+    {"id": "state-done",       "name": "Done",        "type": "completed"}
+  ],
+  "labels": []
+}
+JSON
+start_stub "$work_dir/no_plan_state.json"
+if run_resolve "$STUB_URL"; then
+  not_ok "REFUSES when the team has no \`Plan\` column: exited 0"
+else
+  if grep -q "'Plan'" "$work_dir/err.log" && grep -q 'Linear' "$work_dir/err.log"; then
+    ok "REFUSES when the team has no \`Plan\` column, and says to create it in Linear"
+  else
+    not_ok "REFUSES when the team has no \`Plan\` column: wrong message: $(cat "$work_dir/err.log")"
+  fi
+fi
+stop_stub
+
+# =============================================================================
 # Case: REFUSES when a resolved label id belongs to a differently-named label
 # =============================================================================
 
@@ -313,6 +353,7 @@ cat >"$work_dir/label_mismatch.json" <<JSON
   "states": [
     {"id": "state-backlog",    "name": "Backlog",     "type": "backlog"},
     {"id": "state-todo",       "name": "Todo",        "type": "unstarted"},
+    {"id": "state-plan",       "name": "Plan",        "type": "started"},
     {"id": "state-inprogress", "name": "In Progress", "type": "started"},
     {"id": "state-inreview",   "name": "In Review",   "type": "started"},
     {"id": "state-done",       "name": "Done",        "type": "completed"}
@@ -373,6 +414,7 @@ cat >"$work_dir/fails_third_query.json" <<JSON
   "states": [
     {"id": "state-backlog",    "name": "Backlog",     "type": "backlog"},
     {"id": "state-todo",       "name": "Todo",        "type": "unstarted"},
+    {"id": "state-plan",       "name": "Plan",        "type": "started"},
     {"id": "state-inprogress", "name": "In Progress", "type": "started"},
     {"id": "state-inreview",   "name": "In Review",   "type": "started"},
     {"id": "state-done",       "name": "Done",        "type": "completed"}
@@ -445,6 +487,7 @@ cat >"$work_dir/leak_check.json" <<'JSON'
   "states": [
     {"id": "state-backlog",    "name": "Backlog",     "type": "backlog"},
     {"id": "state-todo",       "name": "Todo",        "type": "unstarted"},
+    {"id": "state-plan",       "name": "Plan",        "type": "started"},
     {"id": "state-inprogress", "name": "In Progress", "type": "started"},
     {"id": "state-inreview",   "name": "In Review",   "type": "started"},
     {"id": "state-done",       "name": "Done",        "type": "completed"}
