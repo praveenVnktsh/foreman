@@ -759,22 +759,39 @@ def history(ticket: str) -> list[dict]:
     return _read_jsonl(os.path.join(BOARD_HOME, "cards", ticket, "history.jsonl"))
 
 
-def _entry_age_minutes(entry: dict) -> float | None:
-    """Minutes since `entry["at"]`, or None if it is missing or unparseable.
+CARD_LOG_STAMP = "%Y-%m-%dT%H:%M:%SZ"
+
+
+def _entry_stamp(entry: dict) -> datetime | None:
+    """`entry["at"]` as an aware datetime, or None if it is missing or unparseable.
 
     `at` is stamped by `config.sh:card_log` as `date -u +%Y-%m-%dT%H:%M:%SZ`
-    -- always this one format, always UTC. `None` on anything else (a hand-
-    edited line, a future format change) rather than raising, and the caller
-    treats `None` as "cannot judge staleness" and falls back to NOT stale --
-    the safe direction, because the failure mode this guards against is a
-    slot that never gets released, not one released a little early.
+    -- always this one format, always UTC. Two readers need it: staleness in
+    `_entry_age_minutes()` and fairness in `board_last_served()`. One format,
+    one parser, per the styleguide's "one fact, one place" -- a second copy of
+    a timestamp format is a copy that drifts, and the drift shows up as a
+    board that silently never sorts first.
     """
     at = entry.get("at")
     if not isinstance(at, str):
         return None
     try:
-        stamp = datetime.strptime(at, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+        return datetime.strptime(at, CARD_LOG_STAMP).replace(tzinfo=timezone.utc)
     except ValueError:
+        return None
+
+
+def _entry_age_minutes(entry: dict) -> float | None:
+    """Minutes since `entry["at"]`, or None if it is missing or unparseable.
+
+    `None` on anything `_entry_stamp()` cannot read (a hand-edited line, a
+    future format change) rather than raising, and the caller treats `None` as
+    "cannot judge staleness" and falls back to NOT stale -- the safe
+    direction, because the failure mode this guards against is a slot that
+    never gets released, not one released a little early.
+    """
+    stamp = _entry_stamp(entry)
+    if stamp is None:
         return None
     return (datetime.now(timezone.utc) - stamp).total_seconds() / 60
 
@@ -992,6 +1009,94 @@ def host_slots(foreman_home: str, stale_minutes: float | None = HOST_SLOT_STALE_
     return result
 
 
+def board_last_served(foreman_home: str, board: str) -> datetime | None:
+    """When a slice last moved something on `board`, or None if it never has.
+
+    THE EVIDENCE. `config.sh:card_log` appends a line to
+    `instances/<board>/cards/<T>/history.jsonl` every time a slice does
+    something to a card -- a spawn, a resume, a void, a released. So the
+    NEWEST `at` across every card on the board is when that board was last
+    served, and no new state file has to exist to say so.
+
+    Read EVERY entry of every card, not each card's last line. A corrupt
+    trailing line would otherwise lose the board's real timestamp and report a
+    board served a minute ago as never served. Never filter on the event's
+    action either: a `released` card was still served at the moment it was
+    released, and a board whose only activity this tick was reaping would
+    otherwise keep jumping the queue forever.
+
+    Tolerant exactly like `host_slots()`, which walks the same files: a board
+    with no runtime directory, no `cards/`, no `history.jsonl`, or nothing but
+    unparseable lines returns None and sorts first. Failing to read one
+    board's history must not take down the tick that asked about all of them.
+    """
+    cards_dir = os.path.join(foreman_home, "instances", board, "cards")
+    try:
+        tickets = os.listdir(cards_dir)
+    except OSError:
+        return None
+    newest = None
+    for ticket in tickets:
+        for entry in _read_jsonl(os.path.join(cards_dir, ticket, "history.jsonl")):
+            stamp = _entry_stamp(entry)
+            if stamp is not None and (newest is None or stamp > newest):
+                newest = stamp
+    return newest
+
+
+def board_order(foreman_home: str) -> dict:
+    """The board order for one pass, least recently served first.
+
+    `{"order": [name, ...], "boards": [{"board": name, "last_served": stamp}]}`,
+    both in the same order, `last_served` null for a board never served.
+
+    THE PROBLEM. One tick agent works every board on this machine, a slice
+    each. It used to take that list from `bin/boards.py --list`, which prints
+    boards in NAME order, the same order on every pass of every tick.
+    `TICK_BUDGET_MINUTES` and `TICK_MAX_PASSES` bound the whole tick and not
+    each board, so a tick that runs out of budget mid-pass stops at whichever
+    board it had reached -- always the same tail of the list, tick after tick.
+    A board a tick never reached reports exactly what a board with no work
+    reports, so nothing says so. SKILL.md already called the loop round-robin,
+    but the rotation only held INSIDE a pass, and prose is not a gate.
+
+    THE RULE. Never served sorts FIRST, then oldest served first, then by
+    board name. The name breaks every tie, so the order is total and the same
+    machine prints the same lines for the same history.
+
+    WHY HISTORY AND NOT A CURSOR FILE. SKILL.md documents the sidecar as "a
+    cache, never truth -- delete it and the next tick must still reconstruct
+    every card's position." A stored "last board served" cursor would be
+    exactly the fact that exists only in the sidecar, and it would go stale the
+    moment anything wrote a card without updating it. Deleting the history here
+    costs one unrotated pass and never a wrong answer, which is what today
+    already does.
+
+    WHY NOT SLOTS HELD. A board holding three cards is the board with the most
+    work needing a merge, so sorting it last would starve the boards that most
+    need a slice -- the failure this whole mode exists to prevent. Slots held
+    is the input to the CEILING (`dispatch_verdict()`), never to the order.
+
+    The roster is `declared_boards()`, the same as `host_slots()`: a board
+    exists because `boards.toml` declares it, so a leftover runtime directory
+    for an undeclared board must not appear in a pass.
+    """
+    served = [(name, board_last_served(foreman_home, name))
+              for name in declared_boards(foreman_home)]
+    # A datetime and None do not compare, so the never-served case is its own
+    # leading key rather than a sentinel date -- a sentinel would be a second
+    # place the "never served" fact lived, and the wrong sentinel sorts a
+    # never-served board last, which is the starvation being fixed.
+    epoch = datetime.min.replace(tzinfo=timezone.utc)
+    served.sort(key=lambda item: (item[1] is not None, item[1] or epoch, item[0]))
+    return {
+        "order": [name for name, _ in served],
+        "boards": [{"board": name,
+                    "last_served": stamp.strftime(CARD_LOG_STAMP) if stamp else None}
+                   for name, stamp in served],
+    }
+
+
 def build_attempts(entries: list[dict]) -> int:
     """How many build attempts this card has actually consumed.
 
@@ -1112,6 +1217,7 @@ def main(argv: list[str]) -> int:
         print("usage: reconcile.py <TICKET> [TICKET...]\n"
               "       reconcile.py --main-ci [BRANCH]\n"
               "       reconcile.py --host-slots\n"
+              "       reconcile.py --board-order\n"
               "       reconcile.py --may-dispatch <board>", file=sys.stderr)
         return 2
     if argv[0] == "--main-ci":
@@ -1138,6 +1244,15 @@ def main(argv: list[str]) -> int:
         verdict = dispatch_verdict(FOREMAN_HOME, argv[1], host_max)
         if verdict:
             print(verdict)
+        return 0
+    if argv[0] == "--board-order":
+        # The pass order, not the roster: `boards.py --list` prints boards in
+        # name order and the tick used to loop over that, which left the same
+        # tail of the list unreached every time a tick ran out of budget
+        # mid-pass. Local files only, like --host-slots, so the tick can ask
+        # before it has spoken to Linear or gh.
+        json.dump(board_order(FOREMAN_HOME), sys.stdout, indent=2)
+        print()
         return 0
     if argv[0] == "--host-slots":
         # Same reasoning as --main-ci: this answers one question about the

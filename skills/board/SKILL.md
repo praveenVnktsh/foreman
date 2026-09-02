@@ -130,6 +130,34 @@ all: a board the tick never reached reports exactly what a board with no work
 reports. Round-robin is what makes the difference visible — every board is
 either worked or named as skipped.
 
+**The order of a pass comes from `reconcile.py --board-order`**, never from the
+order `boards.py --list` printed:
+
+```bash
+~/.foreman/install/skills/board/reconcile.py --board-order
+```
+
+It prints `{"order": [...], "boards": [{"board": …, "last_served": …}]}`. Take
+the slices in `order`: least recently served first, the board name breaking every
+tie. `boards` carries the evidence — `last_served` is the newest `at` across that
+board's `history.jsonl` files, or `null` for a board no slice has ever moved
+anything on. A board never served sorts first.
+
+`boards.py --list` prints in name order, and that order is identical on every
+pass of every tick. The budget bounds the whole tick, not each board, so a pass
+cut short always stops in the same place. The same tail of a fixed order goes
+unreached, tick after tick — and a board a tick never reached reports exactly
+what a board with no work reports. Ordering by when a board was last served puts
+the starved board at the front.
+
+Two things the mode does not do:
+
+- **It does not know about `HALT`.** Every declared board appears in `order`,
+  halted or not. The halt check stays where it is, before the config is sourced.
+- **It does not stop wanting `FOREMAN_INSTANCE`.** It sources `config.sh` like
+  every other `reconcile.py` call, even though the question is about the whole
+  machine. Ask it as any board.
+
 **A slice ends at whichever comes first:**
 
 1. **No immediately actionable card.** Everything on this board is waiting on a
@@ -467,15 +495,25 @@ that are idle in between.
 So the shape of a tick is:
 
 1. List the boards, once, at the top: `boards.py --list`.
-2. A **pass** is one slice for each board in turn, skipping halted ones. A slice
-   is steps 0–8 for that board, ending as soon as it has moved one card forward
-   or found nothing immediately actionable.
+2. A **pass** is one slice for each board in turn, skipping halted ones, in the
+   order `reconcile.py --board-order` prints for that pass. A slice is steps 0–8
+   for that board, ending as soon as it has moved one card forward or found
+   nothing immediately actionable.
 3. If a pass **changed any card's state on any board**, run another pass.
 4. Stop when a whole pass changes nothing anywhere, or the budget is spent.
 
 Re-list the boards at the top of each tick, not each pass. A board added
 mid-tick is the next tick's, and re-listing inside the loop would let a
 `boards.toml` edit shift the round-robin under a pass that is already running.
+
+Ask for the **order** once per pass, though. That is not the same question: the
+roster is who this machine runs, and the order is who goes first now. Re-asking
+is the point — a board served in the pass just finished sorts to the back of the
+next one.
+
+`--board-order` reads `boards.toml` itself, so it can name a board your roster
+does not have. That board was declared mid-tick and is the next tick's, exactly
+like any other. Order the roster you listed; ignore a name that is not in it.
 
 `TICK_BUDGET_MINUTES` and `TICK_MAX_PASSES` in `config.sh` bound the **tick**,
 across every board. Both are **budgets, not deadlines** — hitting one is normal
