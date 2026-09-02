@@ -15,20 +15,26 @@ handshake the test needs: read one line, and the stub is ready.
       "states":   [{"id": "...", "name": "...", "type": "..."}, ...],
       "labels":   [{"id": "...", "name": "..."}, ...],
       "label_id_lies": {"<id>": "<name the round-trip query lies and returns>"},
+      "state_create_lies": {"<name asked for>": "<name the create returns>"},
       "fail_after": <int, optional>,
       "log": "<path, optional>"
     }
 
 Every request is routed by matching a fixed substring of its GraphQL document
 against the operation names resolve-ids.py's own query documents carry
-(`query Team`, `query Project`, `query States`, `query Labels`,
-`mutation CreateLabel`, `query LabelById`) -- this stub does not implement
-Linear's schema, only the shapes resolve-ids.py actually sends.
+(`query Team`, `query Project`, `query States`, `mutation CreateState`,
+`query Labels`, `mutation CreateLabel`, `query LabelById`) -- this stub does
+not implement Linear's schema, only the shapes resolve-ids.py actually sends.
 
 `fail_after`: the Nth request onward gets HTTP 500. Requests are counted from
 1 across the whole run, in the order resolve-ids.py issues them (team,
-project, states, labels-list, then per-label create/verify) -- this is what
-lets a test say "fail on the third query" and mean it.
+project, states, any state create, labels-list, then per-label create/verify)
+-- this is what lets a test say "fail on the third query" and mean it.
+
+`state_create_lies`: {"name the mutation was asked for": "name it returns"}.
+A state created under one name and returned under another is the fixture for
+the REFUSE case where the board would park every question in a column nobody
+is watching.
 
 `label_id_lies`: models a Linear bug (or an attacker) where the id round-trip
 query returns a name that does not match the label that id was resolved for.
@@ -54,6 +60,7 @@ def _operation_name(document: str) -> str:
         "query Team",
         "query Project",
         "query States",
+        "mutation CreateState",
         "query Labels",
         "mutation CreateLabel",
         "query LabelById",
@@ -71,10 +78,13 @@ def main() -> int:
     with open(sys.argv[1]) as handle:
         scenario = json.load(handle)
 
-    state = {"requests": 0, "created_labels": {}}
+    state = {"requests": 0, "created_labels": {}, "created_states": {}}
 
     def all_labels() -> list:
         return list(scenario.get("labels", [])) + list(state["created_labels"].values())
+
+    def all_states() -> list:
+        return list(scenario.get("states", [])) + list(state["created_states"].values())
 
     def route(document: str, variables: dict) -> dict:
         op = _operation_name(document)
@@ -93,7 +103,15 @@ def main() -> int:
             return {"team": {"projects": {"nodes": nodes}}}
 
         if op == "query States":
-            return {"team": {"states": {"nodes": scenario.get("states", [])}}}
+            return {"team": {"states": {"nodes": all_states()}}}
+
+        if op == "mutation CreateState":
+            asked = variables.get("name")
+            returned = scenario.get("state_create_lies", {}).get(asked, asked)
+            new_id = f"created-state-{len(state['created_states']) + 1}"
+            node = {"id": new_id, "name": returned, "type": variables.get("type")}
+            state["created_states"][new_id] = node
+            return {"workflowStateCreate": {"success": True, "workflowState": node}}
 
         if op == "query Labels":
             return {"team": {"labels": {"nodes": all_labels()}}}

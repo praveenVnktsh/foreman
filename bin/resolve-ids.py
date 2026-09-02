@@ -28,6 +28,9 @@ Everything it resolves, it verifies, and every mismatch fails closed:
     mismatch there re-files every finding, every run, forever.
   - The to-pick-up state must be of type `unstarted`. A mismatch there is the
     difference between a card that waits and a card that ships.
+  - The needs-answers state must be of type `started`. A `completed` one there
+    shows every card parked for a question as finished, so the operator the
+    pause exists for never learns there is a question waiting.
   - Ambiguity is fatal. Two things sharing the requested name is not a coin
     flip -- refuse, and name both ids so the operator can disambiguate.
 
@@ -51,45 +54,106 @@ import subprocess
 import sys
 import urllib.error
 import urllib.request
+from typing import NamedTuple
 
 DEFAULT_API_URL = "https://api.linear.app/graphql"
 
-# The five workflow states the board moves cards through (skills/board/
-# SKILL.md), and the Linear state name each one resolves from. The role name
-# on the left is the board's own vocabulary and never changes; the name on the
-# right is what an operator sees in Linear and is free to rename -- which is
-# exactly why this script exists, and why nothing downstream of it reads a
-# name again.
+
+class StateRole(NamedTuple):
+    """One workflow state the board moves cards through.
+
+    `role` is the board's own vocabulary and never changes. `name` is what an
+    operator sees in Linear and is free to rename -- which is exactly why this
+    script exists, and why nothing downstream of it reads a name again.
+
+    `type` is Linear's own state type, and it is VERIFIED when declared.
+    `type_reason` is the sentence the refusal ends with, and it is a field
+    rather than one shared line because the two states that declare a type do
+    so for entirely different failures -- a refusal that cannot say which one
+    it is protecting is a refusal the operator has to go and read this file to
+    understand. Only those two declare a type at all; the other four are the
+    operator's ordinary columns, and demanding a type of them would refuse an
+    installation that has been working for months over a fact the board never
+    reads.
+
+    `create` says the board may create this column when the team does not have
+    it. Exactly one state carries it, for the same reason the labels below are
+    created: a fork's team has never had a reason to make a column the board
+    invented, and the board cannot pause a card without somewhere to put it.
+    """
+
+    role: str
+    name: str
+    type: str | None = None
+    type_reason: str = ""
+    create: bool = False
+
+
+# The six workflow states the board moves cards through (skills/board/
+# SKILL.md), in the order a card walks them.
 STATE_ROLES = [
-    ("STATE_PLANNED", "Backlog"),
-    ("STATE_TO_PICK_UP", "Todo"),
-    ("STATE_IN_PROGRESS", "In Progress"),
-    ("STATE_IN_REVIEW", "In Review"),
-    ("STATE_MERGED", "Done"),
+    StateRole("STATE_PLANNED", "Backlog"),
+    # The to-pick-up state is the one the board is never allowed to move a card
+    # OUT of on its own initiative, and never allowed to move one INTO either --
+    # it is where a human hands work to the board. `unstarted` is Linear's own
+    # marker for "not begun".
+    StateRole(
+        "STATE_TO_PICK_UP",
+        "Todo",
+        type="unstarted",
+        type_reason=(
+            "A mismatch here is the difference between a card that waits for "
+            "pickup and a card the board would ship on its own."
+        ),
+    ),
+    StateRole("STATE_IN_PROGRESS", "In Progress"),
+    # Where a card labelled `human-cobuild` waits for its operator. The board
+    # moves cards in and never out, so this column is `Todo`'s mirror: the
+    # operator answers on the card and moves it back, and that move is the
+    # dispatch authorisation all over again. `started` is Linear's marker for
+    # work that has begun, which is what a paused card is.
+    StateRole(
+        "STATE_NEEDS_ANSWERS",
+        "Needs Answers",
+        type="started",
+        type_reason=(
+            "A completed or cancelled column shows every card parked for a "
+            "question as finished, so the operator the pause exists for never "
+            "learns there is a question waiting."
+        ),
+        create=True,
+    ),
+    StateRole("STATE_IN_REVIEW", "In Review"),
+    StateRole("STATE_MERGED", "Done"),
 ]
 
-# The to-pick-up state is the one the board is never allowed to move a card
-# OUT of on its own initiative, and never allowed to move one INTO either --
-# it is where a human hands work to the board. `unstarted` is Linear's own
-# marker for "not begun"; a state of any other type here is the difference
-# between a card that waits for pickup and a card that the board would ship.
-TO_PICK_UP_ROLE = "STATE_TO_PICK_UP"
-TO_PICK_UP_TYPE = "unstarted"
+# The colour a created "Needs Answers" column gets. Linear requires one, and a
+# board that refused to create the column over an unset colour would fail the
+# whole resolve for a decoration. Amber, because the column means "waiting on a
+# person", not "broken". An operator who wants another colour changes it in
+# Linear and this script never touches it again -- it only ever creates a
+# column that is missing.
+CREATED_STATE_COLOR = "#f2994a"
 
-# Labels the board owns and only ever writes onto cards itself (skills/board/
-# SKILL.md). Unlike states, these are created if missing -- a fork's team has
-# never had a reason to create them by hand, and the board cannot function
-# without somewhere to put a follow-up or a needs-merge flag.
+# Labels the board owns and only ever writes onto cards itself, plus the one
+# label the operator owns and the board only reads (skills/board/SKILL.md).
+# All of them are created if missing -- a fork's team has never had a reason to
+# create them by hand, and the board cannot function without somewhere to put a
+# follow-up or a needs-merge flag. `human-cobuild` is created for the opposite
+# reason: an operator cannot put a label on a card that does not exist yet, so
+# a label the board never writes still has to be there before anyone can ask
+# for a co-build.
 LABEL_ROLES = [
     ("LABEL_FOLLOW_UP", "follow-up"),
     ("LABEL_FOLLOW_UPS_WRITTEN", "follow-ups-written"),
     ("LABEL_NEEDS_MERGE", "needs-merge"),
     ("LABEL_BOARD_FAILED", "board-failed"),
+    ("LABEL_HUMAN_COBUILD", "human-cobuild"),
 ]
 
 IDS_ENV_ORDER = (
     ["LINEAR_TEAM_ID", "LINEAR_PROJECT_ID"]
-    + [role for role, _ in STATE_ROLES]
+    + [state.role for state in STATE_ROLES]
     + [role for role, _ in LABEL_ROLES]
 )
 
@@ -150,6 +214,15 @@ query Labels($teamId: String!) {
     labels {
       nodes { id name }
     }
+  }
+}
+"""
+
+CREATE_STATE_MUTATION = """
+mutation CreateState($teamId: String!, $name: String!, $type: String!, $color: String!) {
+  workflowStateCreate(input: { teamId: $teamId, name: $name, type: $type, color: $color }) {
+    success
+    workflowState { id name type }
   }
 }
 """
@@ -241,24 +314,67 @@ def resolve_project(api_url: str, key: str, team_id: str, name: str) -> str:
     return node["id"]
 
 
+def _find_state(nodes: list, state: StateRole) -> dict | None:
+    """The one state named `state.name`, or None when it may be created.
+
+    Absence refuses for every state the operator owns, and answers None for
+    the one the board owns -- there is nothing to fall back to for a column
+    Linear never ships and the operator has never heard of. Ambiguity refuses
+    either way, through the same rule every other name goes through.
+    """
+    if state.create and not [n for n in nodes if n.get("name") == state.name]:
+        return None
+    return _pick_unique(nodes, "state", state.name)
+
+
+def _create_state(api_url: str, key: str, team_id: str, state: StateRole) -> dict:
+    """Create the board's own column, and check what came back is what was asked for.
+
+    The id and the name arrive in one response, so this is the same strength of
+    check the found-existing path gets from the states list: nothing here trusts
+    an id that was never seen next to its own name.
+    """
+    created = query(
+        api_url,
+        key,
+        CREATE_STATE_MUTATION,
+        {
+            "teamId": team_id,
+            "name": state.name,
+            "type": state.type,
+            "color": CREATED_STATE_COLOR,
+        },
+    )
+    result = created.get("workflowStateCreate") or {}
+    node = result.get("workflowState")
+    if not result.get("success") or not node:
+        die(f"failed to create the {state.name!r} column")
+    if node.get("name") != state.name:
+        die(
+            f"asked Linear to create the column {state.name!r} and it returned "
+            f"one named {node.get('name')!r} -- refusing. The board would move "
+            "every parked card into a column nobody is watching."
+        )
+    return node
+
+
 def resolve_states(api_url: str, key: str, team_id: str) -> dict:
-    """Resolve the five workflow states, and verify the to-pick-up one.
+    """Resolve every workflow state, creating the one the board owns.
 
     Returns {role: id} for every role in STATE_ROLES.
     """
     data = query(api_url, key, STATES_QUERY, {"teamId": team_id})
     nodes = data.get("team", {}).get("states", {}).get("nodes", [])
     ids: dict = {}
-    for role, state_name in STATE_ROLES:
-        node = _pick_unique(nodes, "state", state_name)
-        if role == TO_PICK_UP_ROLE and node.get("type") != TO_PICK_UP_TYPE:
+    for state in STATE_ROLES:
+        node = _find_state(nodes, state) or _create_state(api_url, key, team_id, state)
+        if state.type is not None and node.get("type") != state.type:
             die(
-                f"the to-pick-up state ({state_name!r}, id {node['id']!r}) has "
-                f"type {node.get('type')!r}, not {TO_PICK_UP_TYPE!r} -- refusing. "
-                "A mismatch here is the difference between a card that waits "
-                "for pickup and a card the board would ship on its own."
+                f"the {state.name!r} state (id {node['id']!r}) has type "
+                f"{node.get('type')!r}, not {state.type!r} -- refusing. "
+                f"{state.type_reason}"
             )
-        ids[role] = node["id"]
+        ids[state.role] = node["id"]
     return ids
 
 

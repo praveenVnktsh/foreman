@@ -244,12 +244,16 @@ filter is also what keeps one board's slice out of another board's cards.
 | `follow-ups-written` | `LABEL_FOLLOW_UPS_WRITTEN` | you | already emitted follow-ups; never again |
 | `needs-merge` | `LABEL_NEEDS_MERGE` | you | green and reviewed, high-risk — **the operator's** merge |
 | `board-failed` | `LABEL_BOARD_FAILED` | you | out of attempts, back in `Backlog`, needs re-triage |
+| `human-cobuild` | `LABEL_HUMAN_COBUILD` | **the operator** | ask this card's questions on the card — see [Co-build](#co-build) |
 
-These four are the ones the board owns and writes itself; `resolve-ids.py`
-creates any that do not already exist on that board's team, and writes their ids
-into that board's `ids.env` alongside the state ids below. Whatever other labels the target's own
-team uses for its own taxonomy belong to the operator — copy the parent card's
-one onto a follow-up when it still applies, never invent one.
+The first four are the ones the board owns and writes itself. `human-cobuild`
+is the operator's: read it, never write it, never remove it. `resolve-ids.py`
+creates all five if they do not already exist on that board's team — including
+the one the board never writes, because an operator cannot put a label on a
+card until the label exists — and writes their ids into that board's `ids.env`
+alongside the state ids below. Whatever other labels the target's own team uses
+for its own taxonomy belong to the operator — copy the parent card's one onto a
+follow-up when it still applies, never invent one.
 
 ## States
 
@@ -265,17 +269,86 @@ inside the slice and never reuse the previous board's.
 | planned | `STATE_PLANNED` | `Backlog` | yes | **never** |
 | to-pick-up | `STATE_TO_PICK_UP` | `Todo` | **never** | yes |
 | in-progress | `STATE_IN_PROGRESS` | `In Progress` | yes | yes |
+| needs-answers | `STATE_NEEDS_ANSWERS` | `Needs Answers` | yes | **never** |
 | in-review | `STATE_IN_REVIEW` | `In Review` | yes | yes |
 | merged | `STATE_MERGED` | `Done` | yes | never |
 
-Those two **never**s are the whole design. You cannot put work into `Todo` and
-you cannot take work out of `Backlog`, so you can never authorise yourself.
+Those three **never**s are the whole design. You cannot put work into `Todo`,
+you cannot take work out of `Backlog`, and you cannot take back a card you
+parked for a question — so you can never authorise yourself.
+
+`Needs Answers` is `Todo`'s mirror, and `resolve-ids.py` creates it when a
+team does not have it. It is the one column the board writes into and can
+never write out of: a card sits there until the operator answers on it and
+moves it back to `Todo` themselves. See [Co-build](#co-build).
 
 `Canceled` and `Duplicate` are terminal and none of your business — never read
 them, never write them, and never sweep a card out of them.
 
 **`Done` means merged *and* deployed here**, which is stronger than the usual
 reading of that column. Nothing reaches it on a report; see step 5.
+
+## Co-build
+
+A card carrying `human-cobuild` is one the operator wants to be **asked**
+rather than guessed at. The autonomous loop is not switched off on it. It
+pauses at the moment the build agent needs a decision that is not its to make,
+and the conversation happens in the card's own comments.
+
+The label is the operator's. Read it in step 1 with the rest of the card, and
+never add or remove it.
+
+One round, end to end:
+
+1. **Dispatch (step 6).** A `human-cobuild` card in `Todo` is dispatched like
+   any other, except that `brief.py build` is given
+   `--questions-file $BOARD_HOME/cards/<T>/questions/<attempt>.md`. That path
+   is what makes the prompt a co-build prompt; there is no other switch. Add
+   `--answers-file` when the card already carries a conversation.
+2. **The agent asks.** It writes its questions to that file and ends its turn
+   with no pull request.
+3. **Park (step 2).** The next pass reads the file, posts it as one comment on
+   the card, moves the card to `Needs Answers`, and releases the slot:
+   `card_log <T> '{"action":"released","reason":"parked: needs answers"}'`.
+   A card waiting on a person is not in flight, exactly like one parked with
+   `needs-merge`.
+4. **The operator answers** on the card and moves it back to `Todo`. That move
+   is the dispatch authorisation all over again, and it is theirs alone.
+5. **Dispatch again (step 6)**, with the whole comment thread in
+   `--answers-file`.
+
+**A question round never costs the card a build attempt.** The agent did
+exactly what it was told to do, and `MAX_BUILD_ATTEMPTS` exists to retire a
+ticket that cannot be built — not one that has been asked about three times.
+How you keep that true depends on which way the card is dispatched again:
+
+- **The worktree is still there** → `dispatch.sh --resume` at the **same**
+  attempt number. A spawn plus its resumes is already one attempt, so nothing
+  else is needed, and the agent keeps everything it had read.
+- **The worktree is gone** → dispatch fresh at the **next** attempt number, and
+  void the attempt it asked on:
+  `card_log <T> '{"action":"void","role":"build","attempt":"<N>","reason":"asked the operator a question"}'`.
+  Write the void when you re-dispatch, not when you park — a voided attempt
+  number that is later resumed would take the round's real cost with it.
+
+Nothing runs away as a result. A person has to answer and move the card before
+anything happens again, so the operator is the bound here, not the budget.
+
+**Void only a round that actually asked**, on a card that actually carries the
+label: a build that failed and left no questions file is an ordinary failure
+and keeps its cost.
+
+**The questions file is per attempt.** `questions/<attempt>.md`, so a file left
+behind by attempt 2 can never make attempt 3 look like it asked something it
+did not.
+
+**Writing the answers file.** Read the card's comments from Linear, oldest
+first, write them to a file with one block per comment naming who wrote it, and
+pass that path. `brief.py` refuses an empty or unreadable one rather than
+telling the agent there was a conversation and then showing it none.
+
+**A co-build card that has its answers is an ordinary card.** It builds, is
+reviewed, and merges exactly like any other. The pause is a pause.
 
 ## Dry run
 
@@ -716,11 +789,17 @@ whether you may use a disk is to use it.
 
 ### 1. Adopt
 
-Read every card in `Todo`, `In Progress`, `In Review` **in this board's
-project** from Linear — filter by that board's project ID, not by scanning the
-team. For anything in `Todo` you might dispatch, read it again with
+Read every card in `Todo`, `In Progress`, `In Review` and `Needs Answers` **in
+this board's project** from Linear — filter by that board's project ID, not by
+scanning the team. For anything in `Todo` you might dispatch, read it again with
 `includeRelations: true`; step 6 gates on `blockedBy` and `list_issues` cannot
-return it. Then:
+return it.
+
+`Needs Answers` is read and never acted on. Nothing there is dispatchable,
+because every card in it is waiting for a person — but a card nobody names in
+the report is a question the operator never learns is waiting, so name them.
+Read each card's labels too: `human-cobuild` changes how step 6 dispatches it
+and how step 2 reads its result. Then:
 
 ```bash
 ~/.foreman/install/skills/board/reconcile.py <TICKET> <TICKET> ...
@@ -792,12 +871,21 @@ write-off so a later tick can see what happened:
 card_log <TICKET> '{"action":"void","role":"build","attempt":"<N>","reason":"…"}'
 ```
 
-Void only for environment faults. A build that genuinely failed keeps its cost;
-voiding those would make the budget unenforceable and let a bad ticket loop
-forever.
+Void an attempt that told the board nothing about whether this ticket can be
+built: an environment fault, or a co-build round that ended in a question (see
+[Co-build](#co-build)). A build that genuinely failed keeps its cost; voiding
+those would make the budget unenforceable and let a bad ticket loop forever.
 
 Then, for an agent whose turn has ended:
 
+- **the card carries `human-cobuild` and `cards/<T>/questions/<attempt>.md`
+  exists** → it asked. Post the file as one comment on the card, move the card
+  to `Needs Answers`, and release the slot. Read this branch **before** the
+  ones below: a co-build agent that asked and also left a pull request open
+  built part of it on the guess the operator asked to be consulted about, so
+  the questions win and the pull request waits for the answer. See
+  [Co-build](#co-build) — no attempt is charged, and this is the board's card
+  moved forward, so the slice ends here.
 - **PR open and `checks.passing`** → move to `In Review` and start round 1
   **now**. That is this board's card moved forward, so the slice ends there and
   the next board takes its turn; step 3 reads the reviews on a later pass.
@@ -1231,6 +1319,21 @@ $B/brief.py build --ticket <T> --title "<title>" --body-file <ticket-body> > /tm
 $B/dispatch.sh --ticket <T> --role build --attempt <n> --prompt-file /tmp/b.md
 ```
 
+A card carrying `human-cobuild` is dispatched the same way, plus the two flags
+that make it a co-build — the questions file it may write, and the conversation
+already on the card:
+
+```bash
+$B/brief.py build --ticket <T> --title "<title>" --body-file <ticket-body> \
+  --questions-file "$BOARD_HOME/cards/<T>/questions/<n>.md" \
+  --answers-file <comment-thread> > /tmp/b.md
+```
+
+Leave `--answers-file` off the first dispatch, when there is no conversation
+yet; `brief.py` refuses an empty one. Never pass `--questions-file` for a card
+without the label — it tells an agent to stop and ask on a card no one has
+offered to answer. See [Co-build](#co-build).
+
 Reviewers are dispatched the same way at the PR head, `REVIEWERS_PER_ROUND` of
 them with slots `a`, `b`, …:
 
@@ -1329,8 +1432,13 @@ A tick where no board changed anything says so in one line and stops.
   each spawn. A board's own `MAX_CONCURRENT` still caps that board, and both
   must allow the dispatch.
 - **The lock is the card.** Move to `In Progress` before spawning, always.
-- **Never write into `Todo`, never move anything out of `Backlog`.** Those
-  are the operator's.
+- **Never write into `Todo`, never move anything out of `Backlog`, and never
+  move anything out of `Needs Answers`.** Those are the operator's.
+- **A `human-cobuild` card asks instead of guessing, and the asking is free.**
+  It is dispatched with a questions file, parks in `Needs Answers` when it
+  writes one, and comes back through `Todo` when the operator has answered on
+  the card. A question round never costs the ticket a build attempt — the
+  operator answering is what bounds it, not `MAX_BUILD_ATTEMPTS`.
 - **Never move a card to `Done` on a claim.** An agent will report a green PR it
   never opened. Here `Done` means merged, on `main`, and deployed — all three
   observed, never reported.

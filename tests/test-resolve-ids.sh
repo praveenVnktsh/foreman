@@ -113,8 +113,9 @@ print(oct(stat.S_IMODE(os.stat(sys.argv[1]).st_mode))[2:])
 }
 
 # =============================================================================
-# Case A: the happy path -- team, project, five states, and both label paths
-# (reuse an existing one, create a missing one) all in one resolved ids.env.
+# Case A: the happy path -- team, project, the states, the column the board
+# creates for itself, and both label paths (reuse an existing one, create a
+# missing one) all in one resolved ids.env.
 # =============================================================================
 
 happy_log="$work_dir/happy-requests.log"
@@ -156,16 +157,44 @@ if run_resolve "$STUB_URL"; then
         "$(read_id "$ids_env" STATE_IN_PROGRESS)" == "state-inprogress" && \
         "$(read_id "$ids_env" STATE_IN_REVIEW)" == "state-inreview" && \
         "$(read_id "$ids_env" STATE_MERGED)" == "state-done" ]]; then
-    ok "resolves the five states by name"
+    ok "resolves the operator's own states by name"
   else
-    not_ok "resolves the five states by name: $(cat "$ids_env")"
+    not_ok "resolves the operator's own states by name: $(cat "$ids_env")"
+  fi
+
+  # `Needs Answers` is deliberately absent from the fixture above. No Linear
+  # team ships a column the board invented, so a board that refused over its
+  # absence could never resolve its ids on a fresh fork at all -- and a card
+  # labelled human-cobuild would have nowhere to wait for its operator.
+  parked_id="$(read_id "$ids_env" STATE_NEEDS_ANSWERS)"
+  state_creates="$(grep -c '^mutation CreateState ' "$happy_log" || true)"
+  if [[ "$parked_id" == created-state-* && "$state_creates" -eq 1 ]] \
+       && grep -q '^mutation CreateState .*"name": "Needs Answers"' "$happy_log" \
+       && grep -q '^mutation CreateState .*"type": "started"' "$happy_log"; then
+    ok "creates the Needs Answers column when the team does not have one"
+  else
+    not_ok "creates the Needs Answers column: id=[$parked_id] creates=[$state_creates] log=$(cat "$happy_log")"
+  fi
+
+  # The operator sets human-cobuild and the board only ever reads it -- but a
+  # label nobody can put on a card is not a feature, so it is created like the
+  # four the board writes itself.
+  cobuild_id="$(read_id "$ids_env" LABEL_HUMAN_COBUILD)"
+  if [[ "$cobuild_id" == created-* ]] \
+       && grep -q '^mutation CreateLabel .*"human-cobuild"' "$happy_log"; then
+    ok "creates the human-cobuild label so an operator has one to apply"
+  else
+    not_ok "creates the human-cobuild label: id=[$cobuild_id] log=$(cat "$happy_log")"
   fi
 
   created_id="$(read_id "$ids_env" LABEL_BOARD_FAILED)"
+  # Two labels are missing from the fixture below on purpose: board-failed and
+  # human-cobuild. Three of the five are present, so this count is also what
+  # proves the present ones were reused rather than created a second time.
   create_calls="$(grep -c '^mutation CreateLabel ' "$happy_log" || true)"
   if [[ "$created_id" == created-* ]] \
        && grep -q "^mutation CreateLabel .*\"board-failed\"" "$happy_log" \
-       && [[ "$create_calls" -eq 1 ]]; then
+       && [[ "$create_calls" -eq 2 ]]; then
     ok "creates a label that does not exist and records its id"
   else
     not_ok "creates a label that does not exist: id=[$created_id] creates=[$create_calls] log=$(cat "$happy_log")"
@@ -174,7 +203,7 @@ if run_resolve "$STUB_URL"; then
   if [[ "$(read_id "$ids_env" LABEL_FOLLOW_UP)" == "label-followup" && \
         "$(read_id "$ids_env" LABEL_FOLLOW_UPS_WRITTEN)" == "label-followupswritten" && \
         "$(read_id "$ids_env" LABEL_NEEDS_MERGE)" == "label-needsmerge" && \
-        "$create_calls" -eq 1 ]]; then
+        "$create_calls" -eq 2 ]]; then
     ok "reuses a label that does exist rather than creating a second"
   else
     not_ok "reuses a label that does exist: $(cat "$ids_env")"
@@ -484,6 +513,103 @@ if run_resolve "$STUB_URL" && [[ -f "$foreman_home/instances/fixture/ids.env" ]]
   ok "a board with no runtime directory yet resolves, creating it"
 else
   not_ok "a board with no runtime directory yet failed to resolve: $(tail -2 "$work_dir/err.log")"
+fi
+stop_stub
+
+
+# =============================================================================
+# The Needs Answers column: created when the team lacks it (case A above),
+# reused when it has one, and refused when what is there would hide a parked
+# card from the operator it is waiting for.
+# =============================================================================
+
+reuse_log="$work_dir/reuse-requests.log"
+cat >"$work_dir/has_needs_answers.json" <<JSON
+{
+  "teams": [{"id": "team-1", "name": "PRA"}],
+  "projects": [{"id": "proj-1", "name": "fixture", "teamId": "team-1"}],
+  "states": [
+    {"id": "state-backlog",    "name": "Backlog",      "type": "backlog"},
+    {"id": "state-todo",       "name": "Todo",         "type": "unstarted"},
+    {"id": "state-inprogress", "name": "In Progress",  "type": "started"},
+    {"id": "state-needs",      "name": "Needs Answers","type": "started"},
+    {"id": "state-inreview",   "name": "In Review",    "type": "started"},
+    {"id": "state-done",       "name": "Done",         "type": "completed"}
+  ],
+  "labels": [],
+  "log": "$reuse_log"
+}
+JSON
+start_stub "$work_dir/has_needs_answers.json"
+if run_resolve "$STUB_URL"; then
+  reused="$(read_id "$inst_home/ids.env" STATE_NEEDS_ANSWERS)"
+  if [[ "$reused" == "state-needs" ]] && ! grep -q '^mutation CreateState ' "$reuse_log"; then
+    ok "reuses a Needs Answers column the team already has, creating no second one"
+  else
+    not_ok "reuses a Needs Answers column the team already has: id=[$reused] log=$(cat "$reuse_log")"
+  fi
+else
+  not_ok "reuses a Needs Answers column the team already has: the run refused: $(cat "$work_dir/err.log")"
+fi
+stop_stub
+
+# A `completed` column named Needs Answers marks every parked card as finished
+# in Linear. The operator sees a done ticket, never answers the question, and
+# the card waits forever for a person who was never told.
+cat >"$work_dir/needs_answers_completed.json" <<'JSON'
+{
+  "teams": [{"id": "team-1", "name": "PRA"}],
+  "projects": [{"id": "proj-1", "name": "fixture", "teamId": "team-1"}],
+  "states": [
+    {"id": "state-backlog",    "name": "Backlog",      "type": "backlog"},
+    {"id": "state-todo",       "name": "Todo",         "type": "unstarted"},
+    {"id": "state-inprogress", "name": "In Progress",  "type": "started"},
+    {"id": "state-needs",      "name": "Needs Answers","type": "completed"},
+    {"id": "state-inreview",   "name": "In Review",    "type": "started"},
+    {"id": "state-done",       "name": "Done",         "type": "completed"}
+  ],
+  "labels": []
+}
+JSON
+start_stub "$work_dir/needs_answers_completed.json"
+if run_resolve "$STUB_URL"; then
+  not_ok "REFUSES a Needs Answers column that marks the card completed: exited 0"
+else
+  if grep -q "Needs Answers" "$work_dir/err.log" && grep -q "started" "$work_dir/err.log"; then
+    ok "REFUSES a Needs Answers column that marks the card completed"
+  else
+    not_ok "REFUSES a Needs Answers column that marks the card completed: wrong message: $(cat "$work_dir/err.log")"
+  fi
+fi
+stop_stub
+
+# The create round-trip is checked the same way a label's is: an id that was
+# never seen beside the name it was asked for is an id the board would park
+# every question in, in a column nobody is watching.
+cat >"$work_dir/state_create_lies.json" <<'JSON'
+{
+  "teams": [{"id": "team-1", "name": "PRA"}],
+  "projects": [{"id": "proj-1", "name": "fixture", "teamId": "team-1"}],
+  "states": [
+    {"id": "state-backlog",    "name": "Backlog",     "type": "backlog"},
+    {"id": "state-todo",       "name": "Todo",        "type": "unstarted"},
+    {"id": "state-inprogress", "name": "In Progress", "type": "started"},
+    {"id": "state-inreview",   "name": "In Review",   "type": "started"},
+    {"id": "state-done",       "name": "Done",        "type": "completed"}
+  ],
+  "labels": [],
+  "state_create_lies": {"Needs Answers": "Somewhere Else"}
+}
+JSON
+start_stub "$work_dir/state_create_lies.json"
+if run_resolve "$STUB_URL"; then
+  not_ok "REFUSES when the created column comes back under another name: exited 0"
+else
+  if grep -q "Somewhere Else" "$work_dir/err.log"; then
+    ok "REFUSES when the created column comes back under another name"
+  else
+    not_ok "REFUSES when the created column comes back under another name: wrong message: $(cat "$work_dir/err.log")"
+  fi
 fi
 stop_stub
 

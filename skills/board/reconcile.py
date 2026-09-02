@@ -1000,10 +1000,13 @@ def build_attempts(entries: list[dict]) -> int:
     attempt number after an environment repair must not count twice.
 
     A `void` entry removes an attempt from the count. The attempt budget exists
-    to stop a card looping on a ticket that cannot be built; an attempt killed by
-    a full disk is evidence about the machine and none at all about the ticket,
-    so spending the budget on it retires work that was never tried. Voiding is
-    for environment faults only — a build that genuinely failed keeps its cost.
+    to stop a card looping on a ticket that cannot be built, so an attempt that
+    says nothing about whether this ticket can be built must not spend it. Two
+    do: one killed by a full disk, which is evidence about the machine, and a
+    co-build round that ended in a question, which is the agent doing exactly
+    what a `human-cobuild` card asked of it. Neither can loop unwatched — the
+    first needs the machine repaired, the second needs a person to answer on the
+    card. A build that genuinely failed keeps its cost.
     """
     seen, voided = set(), set()
     for e in entries:

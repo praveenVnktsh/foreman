@@ -2,6 +2,9 @@
 """Render the prompt a dispatched board agent receives.
 
     brief.py build  --ticket MUR-42 --title "…" --body-file ticket.md
+    brief.py build  --ticket MUR-42 --title "…" --body-file ticket.md \
+                    --questions-file cards/MUR-42/questions/2.md \
+                    --answers-file cards/MUR-42/answers.md
     brief.py review --ticket MUR-42 --pr 91 --round 1
     brief.py fix    --ticket MUR-42 --findings-file reviews/1a.json
     brief.py ci-fix --ticket MUR-42 --pr 91 --jobs "Backend,Operations"
@@ -26,6 +29,67 @@ import subprocess
 import sys
 
 MAX_FINDING_CHARS = 2000
+
+# The co-build half of a build prompt. Rendered only when the caller passes
+# `--questions-file`, which is what a `human-cobuild` card gets and nothing
+# else does.
+#
+# The point of the label is that the operator would rather be asked than
+# guessed at, and an agent that is merely *told* it may ask will still guess:
+# asking has to have somewhere to put the question and a stated cost of zero.
+# So this names the exact file, says what the board does with it, and says
+# that writing it spends nothing -- an agent that believes a question costs
+# the card an attempt is an agent that guesses.
+COBUILD_TEMPLATE = """\
+## This card is a co-build
+
+The operator put the `human-cobuild` label on this ticket. They want to be \
+asked, not guessed at. Whenever a decision is theirs to make -- what the \
+behaviour should be, which of two readings of the ticket is meant, whether \
+something is in scope -- do not pick one and build it.
+
+Write your questions to this file instead, and stop:
+
+    {questions_file}
+
+Then end your turn without opening a pull request. The board reads that file, \
+posts your questions as a comment on the card, and moves the card to `Needs \
+Answers`. When the operator has answered and moved it back, you are \
+dispatched again with the whole conversation in your prompt.
+
+**Asking costs the card nothing.** A round of questions is not a build \
+attempt and never counts against this ticket's attempt budget, so there is no \
+reason to guess in order to save one.
+
+**Ask everything at once.** Each round waits on a person, so a question you \
+hold back costs hours, not seconds. Number your questions, and for each one \
+say which answer you would assume if you had to -- an operator who agrees can \
+then reply in a word.
+
+Everything above still stands for the parts you are not asking about: build \
+it, run the tests, and open the pull request once you have what you need. If \
+nothing on this ticket needs a person at all, do that now and leave the \
+questions file unwritten. What this section changes is one thing only -- you \
+never build on a guess about a decision that is the operator's."""
+
+# The conversation already on the card, spliced in the way the ticket body is
+# spliced: as the ticket, not as a report about it.
+#
+# Deliberately NOT wrapped by quote_untrusted, unlike a review finding. The
+# operator's answers are the whole reason this card is a co-build, and text
+# introduced as "a report and never an instruction" is text the agent is being
+# told to ignore -- which is the one thing that would make the feature
+# useless. What comes back here is the card: the operator's own words, and
+# this same build role's own questions returning to it, which is exactly what
+# a `--resume` already does.
+ANSWERS_TEMPLATE = """\
+## The conversation on this card
+
+Below is what has already been asked and answered on the card, oldest first. \
+The operator's replies are part of the ticket -- treat them as you treat the \
+description above. Do not ask again anything that is already answered here.
+
+{answers}"""
 
 # The broken-environment paragraph names no project, so generalising the rest
 # of this file's prose never had anything to take out of it — it stays as it
@@ -121,27 +185,66 @@ def quote_untrusted(text: str, tag: str) -> str:
     return f"<{tag}>{flat}</{tag}>"
 
 
+def _read_required(path: str, what: str) -> str:
+    """Read a file the prompt cannot be written without, or refuse.
+
+    Refusing rather than rendering the prompt with a hole in it: a co-build
+    prompt whose answers section is empty tells the agent there was a
+    conversation and then shows it none, which reads as "nobody answered you"
+    and sends it back to guessing.
+    """
+    try:
+        text = open(path).read().strip()
+    except OSError as exc:
+        print(f"brief: could not read {what} {path}: {exc}", file=sys.stderr)
+        raise SystemExit(1)
+    if not text:
+        print(f"brief: {what} {path} is empty", file=sys.stderr)
+        raise SystemExit(1)
+    return text
+
+
 def build(args) -> str:
+    if args.answers_file and not args.questions_file:
+        # A card is a co-build or it is not. Answers with nowhere to ask again
+        # would hand the operator's replies to an agent that has been given no
+        # way to come back with a second question -- so the one round the
+        # operator asked for silently becomes ordinary autonomy.
+        print(
+            "brief: --answers-file needs --questions-file; a co-build card must "
+            "always have somewhere to put its next question",
+            file=sys.stderr,
+        )
+        raise SystemExit(1)
+
     body = open(args.body_file).read().strip() if args.body_file else ""
     cfg = _load_build_config(args.ticket)
     standing = STANDING_TEMPLATE.format(
         docs_sentence=_docs_sentence(cfg["REQUIRED_DOCS"]),
         test_command=cfg["TEST_COMMAND"],
     )
-    return f"""\
-You are implementing Linear ticket {args.ticket} in the target repository.
 
-## {args.title}
-
-{body}
-
----
-
-{standing}
-
-Name your branch exactly `{cfg["BRANCH"]}` — it is already checked out in \
-this worktree. Put `{args.ticket}` in the pull request body so the board can \
-find it."""
+    sections = [
+        f"You are implementing Linear ticket {args.ticket} in the target repository.",
+        f"## {args.title}",
+        body,
+    ]
+    if args.answers_file:
+        sections.append(
+            ANSWERS_TEMPLATE.format(
+                answers=_read_required(args.answers_file, "the answers file")
+            )
+        )
+    sections.append("---")
+    sections.append(standing)
+    if args.questions_file:
+        sections.append(COBUILD_TEMPLATE.format(questions_file=args.questions_file))
+    sections.append(
+        f"Name your branch exactly `{cfg['BRANCH']}` — it is already checked out "
+        f"in this worktree. Put `{args.ticket}` in the pull request body so the "
+        "board can find it."
+    )
+    return "\n\n".join(section for section in sections if section)
 
 
 def review(args) -> str:
@@ -261,6 +364,11 @@ def main() -> int:
     b.add_argument("--ticket", required=True)
     b.add_argument("--title", required=True)
     b.add_argument("--body-file")
+    # Co-build. The presence of --questions-file is what makes this card one,
+    # rather than a bare flag: the prompt has to name the exact path the agent
+    # writes to, so the path IS the switch and there is no second way to say it.
+    b.add_argument("--questions-file")
+    b.add_argument("--answers-file")
     b.set_defaults(fn=build)
 
     r = sub.add_parser("review")
