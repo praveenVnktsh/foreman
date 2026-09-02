@@ -149,6 +149,28 @@ else
   MODEL="$REVIEW_MODEL"
 fi
 
+# What the agent's OWN subagents default to -- the graphplan nodes a build
+# agent runs through the Workflow tool. `--model` above stays the agent's, so
+# the planner is not downgraded; see SUBAGENT_MODEL in config.sh for why the
+# nodes are the ones that get the fast model, and why this is the plain
+# default and not the FORCE variant.
+#
+# Exported, and it reaches the agent. Read that beside the TMPDIR comment
+# further down, which says the opposite about the environment of a `--bg`
+# spawn -- both are true and the difference is the point. A background agent
+# inherits its general environment from the shared `claude daemon`, so TMPDIR
+# set here would be the FIRST agent's value for every agent after it.
+# CLAUDE_CODE_SUBAGENT_MODEL is on Claude Code's allowlist of variables
+# captured from THIS invocation and persisted into that one job's state, so it
+# is per-agent and cannot leak sideways. Verified 2026-09-01 by spawning a
+# `--bg` agent with it set and reading `providerEnv` back out of the job's
+# state.json.
+#
+# Empty is not the same as unset for SUBAGENT_MODEL, but it is here: Claude
+# Code reads an empty value as "inherit", exactly as it reads an absent one,
+# so an operator's explicit off needs no branch.
+export CLAUDE_CODE_SUBAGENT_MODEL="$SUBAGENT_MODEL"
+
 # Resolve an agent by its deterministic name. This is what makes the sidecar
 # disposable: the name is derivable, so the session id never has to be remembered.
 #
@@ -189,8 +211,9 @@ fi
 set -- ${EXTRA[@]+"${EXTRA[@]}"}
 
 if [[ -n "$BOARD_DRY_RUN" ]]; then
-  printf 'DRY RUN: would %s %s (model=%s worktree=%s ref=%s)\n' \
-    "${RESUME:+resume}${RESUME:-spawn}" "$NAME" "$MODEL" "$WORKTREE" "${REF:-origin/main}"
+  printf 'DRY RUN: would %s %s (model=%s subagents=%s worktree=%s ref=%s)\n' \
+    "${RESUME:+resume}${RESUME:-spawn}" "$NAME" "$MODEL" "${SUBAGENT_MODEL:-inherit}" \
+    "$WORKTREE" "${REF:-origin/main}"
   exit 0
 fi
 
