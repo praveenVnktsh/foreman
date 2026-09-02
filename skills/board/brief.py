@@ -217,6 +217,27 @@ def build(args) -> str:
         )
         raise SystemExit(1)
 
+    if args.questions_file and os.path.exists(args.questions_file):
+        # The questions file is a one-round channel, and it is one only because
+        # step 2 removes it in the same breath as posting it. A dispatch onto a
+        # file that already exists is a board that did not remove it, and the
+        # result is a card that can never leave `Needs Answers`: the agent has
+        # its answers, builds, opens a green pull request -- and the next pass
+        # reads the stale file, posts the same questions again and parks the
+        # card again. The resume path re-dispatches at the SAME attempt number,
+        # so it hands the agent the same path every time and the loop never
+        # ends. Two reviewers found this on 2026-09-01, before the feature had
+        # ever run. Refusing here is what makes SKILL.md's "post it, then
+        # remove it" a rule rather than a hope.
+        print(
+            f"brief: questions file {args.questions_file} already exists; it "
+            "holds an earlier round's questions. Post it as a comment on the "
+            "card and remove it before dispatching again — dispatching over it "
+            "parks the card on the next pass instead of building.",
+            file=sys.stderr,
+        )
+        raise SystemExit(1)
+
     body = open(args.body_file).read().strip() if args.body_file else ""
     cfg = _load_build_config(args.ticket)
     standing = STANDING_TEMPLATE.format(

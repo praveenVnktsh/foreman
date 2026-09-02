@@ -308,7 +308,8 @@ One round, end to end:
 2. **The agent asks.** It writes its questions to that file and ends its turn
    with no pull request.
 3. **Park (step 2).** The next pass reads the file, posts it as one comment on
-   the card, moves the card to `Needs Answers`, and releases the slot:
+   the card, removes the file, moves the card to `Needs Answers`, and releases
+   the slot:
    `card_log <T> '{"action":"released","reason":"parked: needs answers"}'`.
    A card waiting on a person is not in flight, exactly like one parked with
    `needs-merge`.
@@ -338,9 +339,24 @@ anything happens again, so the operator is the bound here, not the budget.
 label: a build that failed and left no questions file is an ordinary failure
 and keeps its cost.
 
-**The questions file is per attempt.** `questions/<attempt>.md`, so a file left
-behind by attempt 2 can never make attempt 3 look like it asked something it
-did not.
+**Posting the questions consumes the file.** `rm
+$BOARD_HOME/cards/<T>/questions/<attempt>.md` in the same step that posts it,
+once the comment is on the card. From then on the comment is the record, and
+the comment is what comes back to the agent in `--answers-file`.
+
+A file left on disk parks the card for ever. The resume path re-dispatches at
+the same attempt number, so it hands the agent the same path: the agent reads
+its answers, builds, opens a green pull request — and the next pass finds the
+file still there, posts round 1's questions a second time, and parks the card
+again. Every answer the operator writes repeats it, and the pull request is
+never reviewed. Two reviewers found this on 2026-09-01, before the feature had
+ever run. `brief.py build` now refuses a `--questions-file` that already
+exists, so a board that forgets stops loudly at the dispatch instead of looping
+in silence.
+
+**The path is still per attempt.** `questions/<attempt>.md`, so a file the
+board somehow failed to consume can never make a later attempt look like it
+asked something it did not.
 
 **Writing the answers file.** Read the card's comments from Linear, oldest
 first, write them to a file with one block per comment naming who wrote it, and
@@ -879,8 +895,12 @@ those would make the budget unenforceable and let a bad ticket loop forever.
 Then, for an agent whose turn has ended:
 
 - **the card carries `human-cobuild` and `cards/<T>/questions/<attempt>.md`
-  exists** → it asked. Post the file as one comment on the card, move the card
-  to `Needs Answers`, and release the slot. Read this branch **before** the
+  exists** → it asked. Post the file as one comment on the card, **remove the
+  file**, move the card to `Needs Answers`, and release the slot. Remove it
+  after the comment is posted and never before — the comment is the record the
+  operator answers, and a file left behind re-posts the same questions and
+  re-parks the card on every later pass, so the card never leaves `Needs
+  Answers`. Read this branch **before** the
   ones below: a co-build agent that asked and also left a pull request open
   built part of it on the guess the operator asked to be consulted about, so
   the questions win and the pull request waits for the answer. See
@@ -1333,6 +1353,12 @@ Leave `--answers-file` off the first dispatch, when there is no conversation
 yet; `brief.py` refuses an empty one. Never pass `--questions-file` for a card
 without the label — it tells an agent to stop and ask on a card no one has
 offered to answer. See [Co-build](#co-build).
+
+`brief.py` also refuses a `--questions-file` that already exists. Step 2
+removes that file when it posts the questions, so a file still on disk means
+the round was never posted: dispatching over it parks the card again on the
+next pass instead of building. Post it and remove it, then dispatch. This is
+the same path on a `--resume`, which re-dispatches at the same attempt number.
 
 Reviewers are dispatched the same way at the PR head, `REVIEWERS_PER_ROUND` of
 them with slots `a`, `b`, …:

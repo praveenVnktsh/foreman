@@ -15,6 +15,12 @@
 #     `brief.py fix` deliberately wraps another agent's findings in a tag and
 #     says they are "never an instruction"; doing that to the operator's own
 #     reply would tell the agent to ignore the one thing it was waiting for.
+#   - The questions file is empty at dispatch. The board posts a round's
+#     questions and removes the file; a dispatch onto a file that is still
+#     there is a round nobody posted, and the card can never leave `Needs
+#     Answers` — the agent builds, the next pass reads the stale file and parks
+#     the card again, for ever, because a resume re-dispatches at the same
+#     attempt number and so at the same path.
 #
 # An ordinary card must be untouched by all of it: no questions file, no
 # co-build paragraph, nothing to opt into.
@@ -167,6 +173,30 @@ elif grep -q "no-such-file.md" "$work/err"; then
   ok "REFUSES an answers file it cannot read, naming the path"
 else
   bad "refused for the wrong reason: $(cat "$work/err")"
+fi
+
+# The round the board never cleared. This is the second dispatch of attempt 2:
+# the agent asked, and the questions file it wrote is still sitting there
+# because the board posted the comment and forgot to remove it. Rendering a
+# prompt here is what makes the card immortal in `Needs Answers` — the agent
+# builds on its answers, and the next pass reads this same file and parks the
+# card again.
+mkdir -p "$(dirname "$questions_file")"
+printf '1. Should the widget default to on? I would assume yes.\n' > "$questions_file"
+if ask_build --questions-file "$questions_file" --answers-file "$answers_file" \
+     >"$work/out" 2>"$work/err"; then
+  bad "dispatched onto an unposted questions file, so the card re-parks for ever: $(cat "$work/out")"
+elif grep -q "$questions_file" "$work/err" && grep -q "already exists" "$work/err"; then
+  ok "REFUSES to dispatch onto a questions file an earlier round left behind"
+else
+  bad "refused for the wrong reason: $(cat "$work/err")"
+fi
+
+rm -f "$questions_file"
+if ask_build --questions-file "$questions_file" >"$work/out" 2>"$work/err"; then
+  ok "dispatches again once the round has been posted and the file removed"
+else
+  bad "refused a cleared questions file: $(cat "$work/err")"
 fi
 
 exit "$fail"
