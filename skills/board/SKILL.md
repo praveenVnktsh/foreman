@@ -544,16 +544,32 @@ card keeps building, for the reason given above: its agent is parented to the
 re-derives every card's position from Linear, `gh` and `claude agents`. The card
 agents are logged before and after, so you can check that rather than trust it.
 
-It first waits for the tick to finish the turn it is in, bounded by
-`TICK_DRAIN_SECONDS`, and stops it anyway once that runs out. That wait is a
-courtesy, not a correctness bound: cutting a stateless tick mid-turn costs only
-a transcript that stops mid-sentence. It then waits up to
-`TICK_START_TIMEOUT_SECONDS` for a replacement tick — one with a *different*
-agent id — to appear in the registry, and fails loudly if none does.
-`claude --bg` returns as soon as an agent is *spawned*, so "started" is not
-evidence that a tick exists. A restart believed on faith leaves the board
-stopped until the next timer fire, and the operator has just been told it
-worked, so nobody looks. Both bounds are in `config.sh`.
+It happens in three bounded steps, and every bound is in `config.sh`.
+
+1. **Drain**, up to `TICK_DRAIN_SECONDS`: wait for the tick to finish the turn
+   it is in, then stop it anyway. A courtesy, not a correctness bound. Cutting a
+   stateless tick mid-turn costs only a transcript that stops mid-sentence.
+2. **Confirm it stopped**, up to `TICK_STOP_TIMEOUT_SECONDS`, *before* starting
+   anything. This one is a correctness bound. `claude stop` is asynchronous and
+   it can fail, and a replacement started beside a tick that never stopped gives
+   the machine two ticks dispatching into one `HOST_MAX_CONCURRENT`. That is
+   also invisible afterwards: `--status` reports only the newest agent of that
+   name, so every later fire sees the healthy replacement and never the
+   survivor. When this bound passes, the restart refuses — which leaves the
+   machine with the one tick it already had, still ticking.
+3. **Confirm it started**, up to `TICK_START_TIMEOUT_SECONDS`: a tick with a
+   *different* agent id must appear, and the old one must still be gone.
+   `claude --bg` returns as soon as an agent is *spawned*, so "started" is not
+   evidence that a tick exists. A restart believed on faith leaves the board
+   stopped until the next timer fire, and the operator has just been told it
+   worked, so nobody looks.
+
+**`--stop` and `--restart` refuse when the agent registry cannot be read**, and
+run mode stands down. The difference is who retries. A timer fire re-reads in
+ten minutes; nothing re-runs a gesture an operator typed, so a `--restart` that
+exited 0 over an unreadable registry left the old tick running the old skill
+forever, having told the operator their newly pulled install code had taken
+effect.
 
 **A running tick keeps reading the skill it started with.** So
 `git -C ~/.foreman/install pull` changes nothing by itself, and `--restart` is

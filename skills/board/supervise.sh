@@ -162,6 +162,43 @@ print(json.dumps({
 ' "$TICK_AGENT_NAME"
 }
 
+# EVERY agent named $TICK_AGENT_NAME, one "<id><TAB><state>" per line.
+#
+# inspect() above reports only the NEWEST, which is the right answer for "is the
+# board healthy" and the wrong one for "did the tick I just stopped go away".
+# A tick that survived a failed `claude stop` sits behind the newer replacement
+# and inspect() never mentions it again -- so the machine runs two ticks against
+# one HOST_MAX_CONCURRENT, and every later fire reports the healthy one.
+# Answering "is the old tick still alive" needs the whole list.
+tick_agents() {
+  claude agents --json --all 2>/dev/null | python3 -c '
+import json,sys
+want=sys.argv[1]
+# Same refusal as inspect(): an unreadable or non-list registry that printed
+# nothing would read as "the tick is gone", which is the one answer that lets a
+# second tick start beside a live one.
+try: agents=json.load(sys.stdin)
+except Exception: sys.exit(3)
+if not isinstance(agents,list): sys.exit(3)
+for a in agents:
+    if isinstance(a,dict) and a.get("name")==want:
+        print("%s\t%s"%(a.get("id") or "?", a.get("state") or "?"))
+' "$TICK_AGENT_NAME"
+}
+
+# The id of a live tick in <listing> that is not <old id>, or nothing.
+replacement_tick_id() { # <tick_agents listing> <id of the tick that was stopped>
+  printf '%s\n' "$1" | awk -F'\t' -v old="$2" \
+    '$1 != "" && $2 != "stopped" && $1 != old { print $1; exit }'
+}
+
+# Whether the tick that was asked to stop is still running.
+old_tick_is_live() { # <tick_agents listing> <id of the tick that was stopped>
+  [[ -n "$2" && "$2" != "None" ]] || return 1
+  printf '%s\n' "$1" | awk -F'\t' -v old="$2" \
+    '$1 == old && $2 != "stopped" { found = 1 } END { exit !found }'
+}
+
 field() { printf '%s' "$1" | python3 -c 'import json,sys; print(json.load(sys.stdin).get(sys.argv[1]) if sys.stdin else "")' "$2" 2>/dev/null || printf 'None'; }
 
 # Read the registry into INFO, STATE, IDLE, AGE and ID. Returns 1 and sets
@@ -178,9 +215,11 @@ field() { printf '%s' "$1" | python3 -c 'import json,sys; print(json.load(sys.st
 # the same slots.
 #
 # "I could not tell" is therefore its own answer, and every caller answers it
-# differently. Run and --stop stand down. A drain stops the tick anyway, because
-# stopping it is safe. A start-confirmation keeps polling until it times out,
-# because a restart may never report success on evidence it does not have.
+# differently. Run mode stands down, because a timer fire that does nothing is
+# safe and the next one re-reads. --stop and --restart refuse, because nothing
+# retries an operator's gesture. A drain stops the tick anyway, because stopping
+# it is safe. The stop- and start-confirmations keep polling until they time
+# out, because neither may report success on evidence it does not have.
 read_registry() {
   local info
   info="$(inspect)" || return 1
@@ -196,8 +235,16 @@ stop_agent() {
   local id="$1"
   [[ -n "$id" && "$id" != "None" ]] || return 0
   if [[ -n "$BOARD_DRY_RUN" ]]; then log "DRY RUN: would stop $TICK_AGENT_NAME ($id)"; return 0; fi
-  claude stop "$id" >/dev/null 2>&1 || true
-  log "stopped $TICK_AGENT_NAME ($id)"
+  # `|| true` because a non-zero exit here is not the answer. `claude stop` is
+  # asynchronous, it exits non-zero on an agent that was already gone, and it
+  # can fail outright against a daemon that is restarting. What the tick
+  # actually did is read back out of the registry by confirm_stopped(), so this
+  # line says what was ASKED and never that it worked -- it used to log
+  # "stopped foreman/tick" over a `claude stop` that exited 1 and changed
+  # nothing, which is how a second tick came to be started beside a live one.
+  claude stop "$id" >/dev/null 2>&1 \
+    || log "claude stop $id exited non-zero; the confirmation below decides whether the tick went away"
+  log "asked $TICK_AGENT_NAME ($id) to stop"
 }
 
 start_agent() {
@@ -317,29 +364,83 @@ drain_tick() {
   log "drain: $TICK_AGENT_NAME is still working after ${TICK_DRAIN_SECONDS}s; stopping it mid-turn, which is safe"
 }
 
+# Poll until the tick that was asked to stop is gone from the registry, or die.
+#
+# NOTHING HAS BEEN STARTED YET when this runs, and that ordering is the whole
+# safety property. `claude stop` is asynchronous and it can fail, so the answer
+# to "did it stop" is only ever in the registry. Starting a replacement before
+# reading that answer is what produced two live ticks: both then run
+# `/loop /board` against one machine-wide HOST_MAX_CONCURRENT, which is the
+# double-dispatch this script exists to prevent, and the survivor is invisible
+# because inspect() reports only the newest agent of that name.
+#
+# Dying here leaves the machine with exactly the one tick it already had. That
+# is the safe failure: the board keeps ticking on the old agent, the operator is
+# told the restart did not happen, and a retry costs nothing.
+confirm_stopped() { # <id of the tick that was asked to stop>
+  local old_id="$1" waited=0 step listing
+  [[ -n "$old_id" && "$old_id" != "None" ]] || return 0
+  while :; do
+    # An unreadable registry is not "it stopped". It keeps polling, and the
+    # timeout below refuses -- the same rule confirm_started() follows.
+    if listing="$(tick_agents)" && ! old_tick_is_live "$listing" "$old_id"; then
+      log "confirmed: $TICK_AGENT_NAME ($old_id) is stopped after ${waited}s"
+      return 0
+    fi
+    [[ "$waited" -lt "$TICK_STOP_TIMEOUT_SECONDS" ]] || break
+    step="$(poll_step "$waited" "$TICK_STOP_TIMEOUT_SECONDS")"
+    sleep "$step"
+    waited=$(( waited + step ))
+  done
+  die "$TICK_AGENT_NAME ($old_id) was still in the registry ${TICK_STOP_TIMEOUT_SECONDS}s after it was asked to stop; refusing to start a second tick beside it. The board is still ticking on that agent. Stop it by id and run this again."
+}
+
 # Poll until a tick whose id DIFFERS from the one just stopped is in the
-# registry, or die naming the failure.
+# registry AND the one just stopped is gone, or die naming the failure.
 #
 # `claude --bg` returns as soon as the agent is spawned, so the "started" line
 # start_agent() prints is not evidence that a tick exists. A restart is the one
 # gesture that must not report success on faith: the operator has just been told
 # the board is back, so nobody looks again until the next timer fire.
+#
+# BOTH halves are required. "A newer id exists" alone confirmed a clean
+# replacement over a machine running two ticks -- confirm_stopped() above now
+# makes that unreachable from a restart, and this check is what keeps it
+# unreachable if a later edit reorders the two.
 confirm_started() { # <id of the tick that was stopped>
-  local old_id="$1" waited=0 step
+  local old_id="$1" waited=0 step listing="" new_id
   while :; do
-    # A DIFFERENT id, not merely a present one. `claude stop` is not
-    # instantaneous, so the agent just stopped can still be in the registry
-    # under the same name, and matching the name alone confirms the corpse.
-    if read_registry && [[ -n "$ID" && "$ID" != "None" && "$ID" != "$old_id" ]]; then
-      log "confirmed: $TICK_AGENT_NAME is up ($ID) after ${waited}s"
-      return 0
+    if listing="$(tick_agents)"; then
+      new_id="$(replacement_tick_id "$listing" "$old_id")"
+      if [[ -n "$new_id" ]] && ! old_tick_is_live "$listing" "$old_id"; then
+        log "confirmed: $TICK_AGENT_NAME is up ($new_id) after ${waited}s"
+        return 0
+      fi
     fi
     [[ "$waited" -lt "$TICK_START_TIMEOUT_SECONDS" ]] || break
     step="$(poll_step "$waited" "$TICK_START_TIMEOUT_SECONDS")"
     sleep "$step"
     waited=$(( waited + step ))
   done
+  if old_tick_is_live "$listing" "$old_id"; then
+    die "$TICK_AGENT_NAME ($old_id) is running again beside the replacement started ${TICK_START_TIMEOUT_SECONDS}s ago; this machine now has two ticks dispatching into one HOST_MAX_CONCURRENT. Stop one of them by id."
+  fi
   die "$TICK_AGENT_NAME did not appear in the agent registry within ${TICK_START_TIMEOUT_SECONDS}s of starting it; the board is stopped until the next timer fire"
+}
+
+# Replace the tick: stop it, prove it went, then start its successor.
+#
+# THE ORDER IS THE POINT and every caller shares it, so there is one copy. Both
+# the run-mode repairs below and --restart used to stop-then-start with nothing
+# in between, so a `claude stop` that failed or lagged left two live ticks.
+stop_then_start() { # <id of the tick to replace>
+  stop_agent "$1"
+  if [[ -n "$BOARD_DRY_RUN" ]]; then
+    log "DRY RUN: would wait up to ${TICK_STOP_TIMEOUT_SECONDS}s for $TICK_AGENT_NAME ($1) to leave the registry"
+  else
+    confirm_stopped "$1"
+  fi
+  start_agent
 }
 
 # --restart: replace the tick and leave every card agent alone.
@@ -369,8 +470,7 @@ restart_tick() {
     drain_tick
   fi
 
-  stop_agent "$old_id"
-  start_agent
+  stop_then_start "$old_id"
 
   if [[ -n "$BOARD_DRY_RUN" ]]; then
     log "DRY RUN: would wait up to ${TICK_START_TIMEOUT_SECONDS}s for the replacement $TICK_AGENT_NAME to appear in the registry"
@@ -452,13 +552,33 @@ elif [[ $LOCK_RC -ne 0 ]]; then
   die "flock failed with exit $LOCK_RC; refusing to run unlocked"
 fi
 
+# An unreadable registry is its own answer, and the modes answer it differently.
+#
+# RUN MODE stands down. It is a timer fire, doing nothing is safe, and the next
+# fire re-reads a registry that is transiently unreadable -- a daemon
+# restarting, a CLI mid-upgrade.
+#
+# --stop AND --restart REFUSE. An operator typed them, both mean "change the
+# tick", and neither has anything to retry them: run mode stands down on this
+# same condition, and once the registry reads again it finds a healthy tick and
+# does nothing. Exiting 0 here told the operator who had just pulled new install
+# code that the restart worked, while the old tick kept running the old skill
+# indefinitely. That is the outcome restart_tick()'s own refusal to restart
+# blind exists to prevent, answered one line earlier with exit 0.
 if ! read_registry; then
-  log "could not read the agent registry; standing down rather than guessing"
-  exit 0
+  if [[ "$MODE" == "run" ]]; then
+    log "could not read the agent registry; standing down rather than guessing"
+    exit 0
+  fi
+  die "cannot read the agent registry, so $MODE cannot say which tick to act on; the old tick is still running and nothing retries this. Run $MODE again once the registry reads."
 fi
 
 if [[ "$MODE" == "--stop" ]]; then
   stop_agent "$ID"
+  # Same proof a restart takes, for the same reason: `claude stop` is
+  # asynchronous and can fail, and "stop ticking" that did not stop ticking,
+  # reported as success, is what the operator acts on next.
+  [[ -n "$BOARD_DRY_RUN" ]] || confirm_stopped "$ID"
   exit 0
 fi
 
@@ -478,13 +598,13 @@ elif [[ "$STATE" == "stopped" ]]; then
 elif [[ "$STATE" == "working" && "$IDLE" != "None" ]] \
      && awk "BEGIN{exit !($IDLE > $TICK_STALL_MINUTES)}"; then
   log "$TICK_AGENT_NAME wedged: mid-turn and silent for ${IDLE}m (> ${TICK_STALL_MINUTES}m)"
-  stop_agent "$ID"; start_agent
+  stop_then_start "$ID"
 elif [[ "$IDLE" != "None" ]] && awk "BEGIN{exit !($IDLE > $TICK_DEAD_MINUTES)}"; then
   log "$TICK_AGENT_NAME loop stopped rescheduling: idle ${IDLE}m (> ${TICK_DEAD_MINUTES}m)"
-  stop_agent "$ID"; start_agent
+  stop_then_start "$ID"
 elif [[ "$AGE" != "None" ]] && awk "BEGIN{exit !($AGE > $TICK_MAX_AGE_HOURS)}"; then
   log "recycling $TICK_AGENT_NAME to bound context: age ${AGE}h (> ${TICK_MAX_AGE_HOURS}h)"
-  stop_agent "$ID"; start_agent
+  stop_then_start "$ID"
 else
   log "$TICK_AGENT_NAME healthy (state=$STATE idle=${IDLE}m age=${AGE}h)"
 fi

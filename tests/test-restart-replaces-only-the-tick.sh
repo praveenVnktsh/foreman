@@ -74,9 +74,19 @@ registry="$registry"
 stopped="$stopped"
 started="$started"
 no_start="$work/no-start"
-if [[ "\$1" == "agents" ]]; then cat "\$registry"; exit 0; fi
+stop_fails="$work/stop-fails"
+bad_registry="$work/bad-registry"
+if [[ "\$1" == "agents" ]]; then
+  # A registry the CLI cannot render: a daemon restarting, a CLI mid-upgrade.
+  if [[ -e "\$bad_registry" ]]; then printf 'not json at all\n'; exit 0; fi
+  cat "\$registry"; exit 0
+fi
 if [[ "\$1" == "stop" ]]; then
   printf '%s\n' "\$2" >>"\$stopped"
+  # A stop that fails and leaves the agent running is the case that used to
+  # produce two live ticks. No backticks in this here-doc: it is unquoted, so
+  # the test's own shell would run whatever they contain.
+  [[ -e "\$stop_fails" ]] && exit 1
   python3 - "\$registry" "\$2" <<'PY'
 import json, sys
 path, victim = sys.argv[1], sys.argv[2]
@@ -114,7 +124,7 @@ chmod +x "$home/.local/bin/claude"
 run() { # <mode...> -- runs supervise.sh with this machine's fixture
   env HOME="$home" FOREMAN_INSTANCE=demo \
       SUPERVISE_LOCK="$work/supervise.lock" \
-      TICK_DRAIN_SECONDS=1 TICK_START_TIMEOUT_SECONDS=5 \
+      TICK_DRAIN_SECONDS=1 TICK_START_TIMEOUT_SECONDS=5 TICK_STOP_TIMEOUT_SECONDS=1 \
       "$supervise" "$@" 2>&1
 }
 
@@ -186,6 +196,68 @@ if [[ $rc -ne 0 ]]; then
   ok "a restart whose replacement never appears fails loudly"
 else
   bad "the restart reported success with no tick running: $out"
+fi
+
+# --- `claude stop` fails and the old tick keeps running
+# The restart must not start a replacement it cannot place beside a stopped
+# tick. Two live `foreman/tick` agents both run `/loop /board` against one
+# machine-wide HOST_MAX_CONCURRENT, which is the double-dispatch supervise.sh
+# exists to prevent -- and the survivor is invisible afterwards, because the
+# registry read reports only the newest agent of that name.
+write_registry idle
+: >"$stopped"
+: >"$started"
+: >"$work/stop-fails"
+out="$(run --restart)"; rc=$?
+rm -f "$work/stop-fails"
+if [[ $rc -ne 0 ]]; then
+  ok "a restart whose stop did not stop the tick fails loudly"
+else
+  bad "the restart reported success over a tick that never stopped: $out"
+fi
+if [[ ! -s "$started" && "$(tick_state tick-1)" == "idle" && "$(tick_state tick-2)" == "absent" ]]; then
+  ok "it starts no second tick beside the one that would not stop"
+else
+  bad "a second tick was started beside a live one (started=$(tr '\n' ' ' <"$started")): $out"
+fi
+
+# --- the registry cannot be read
+# A transient unreadable registry -- a daemon restarting, a CLI mid-upgrade --
+# used to make --restart exit 0 having done nothing. The operator had just
+# pulled new install code and was told nothing failed, while the old tick kept
+# running the old skill; nothing retries a restart, and run mode stands down on
+# this same condition, so it never happened at all.
+write_registry idle
+: >"$stopped"
+: >"$started"
+: >"$work/bad-registry"
+out="$(run --restart)"; rc=$?
+if [[ $rc -ne 0 && ! -s "$started" ]]; then
+  ok "a restart against an unreadable registry refuses instead of exiting 0"
+else
+  bad "--restart exited $rc against an unreadable registry: $out"
+fi
+
+# --stop is the same gesture from the same operator, and "stop ticking" that did
+# not stop ticking, reported as success, is what they act on next.
+: >"$stopped"
+out="$(run --stop)"; rc=$?
+if [[ $rc -ne 0 ]]; then
+  ok "a stop against an unreadable registry refuses instead of exiting 0"
+else
+  bad "--stop exited 0 against an unreadable registry: $out"
+fi
+
+# Run mode is the one that still stands down: it is a timer fire, doing nothing
+# is safe, and the next fire re-reads. Starting a tick on a registry it cannot
+# read is how a second one appears beside a healthy one.
+: >"$started"
+out="$(run)"; rc=$?
+rm -f "$work/bad-registry"
+if [[ $rc -eq 0 && ! -s "$started" ]]; then
+  ok "a timer fire against an unreadable registry stands down and starts nothing"
+else
+  bad "run mode did not stand down (rc=$rc, started=$(tr '\n' ' ' <"$started")): $out"
 fi
 
 # --- another supervisor holds the machine lock

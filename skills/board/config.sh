@@ -307,6 +307,23 @@ TICK_MAX_AGE_HOURS="${TICK_MAX_AGE_HOURS:-12}"
 # turn, which TICK_STALL_MINUTES already covers.
 TICK_DRAIN_SECONDS="${TICK_DRAIN_SECONDS:-120}"
 
+# How long supervise.sh waits for a tick it asked `claude stop` to close to
+# actually leave the registry, before refusing to start a replacement.
+#
+# THIS BOUND IS A CORRECTNESS BOUND, unlike TICK_DRAIN_SECONDS above.
+# `claude stop` is not instantaneous and it can fail, and a replacement started
+# beside a tick that never stopped gives one machine two ticks, both running
+# `/loop /board` against one HOST_MAX_CONCURRENT -- the double-dispatch
+# supervise.sh exists to prevent. Worse, it is invisible: the registry read
+# reports only the NEWEST agent of that name, so every later fire sees the
+# healthy replacement and never the survivor behind it. supervise.sh therefore
+# proves the old tick is gone BEFORE it starts a new one, and refuses when it
+# cannot -- which leaves the machine with the one tick it already had.
+#
+# 30 seconds is far longer than `claude stop` takes on a healthy daemon and
+# short enough that an operator waiting on a restart is not left guessing.
+TICK_STOP_TIMEOUT_SECONDS="${TICK_STOP_TIMEOUT_SECONDS:-30}"
+
 # How long `supervise.sh --restart` waits for the REPLACEMENT tick to appear in
 # the agent registry before reporting failure.
 #

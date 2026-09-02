@@ -23,7 +23,7 @@ flowchart TD
 
   subgraph CODE["THE INSTALL · ~/.foreman/install"]
     direction TB
-    cfg["<b>c1 · skills/board/config.sh</b> · CHANGE<br/>declares the tick's knobs<br/>adds TICK_DRAIN_SECONDS and TICK_START_TIMEOUT_SECONDS<br/>the two bounds a restart waits against<br/><i>opus · high</i>"]
+    cfg["<b>c1 · skills/board/config.sh</b> · CHANGE<br/>declares the tick's knobs<br/>adds TICK_DRAIN_SECONDS, TICK_STOP_TIMEOUT_SECONDS and TICK_START_TIMEOUT_SECONDS<br/>the three bounds a restart waits against<br/><i>opus · high</i>"]
     sup["<b>c2 · skills/board/supervise.sh</b> · CHANGE<br/>owns the tick's whole lifecycle<br/>gains --restart: drain, stop the tick, start one, confirm it<br/>--stop and --restart move under the machine lock<br/><i>opus · xhigh</i>"]
     inst["<b>c3 · bin/install-service.sh</b> · CHANGE<br/>writes foreman.service and foreman.timer<br/>adds KillMode=process so deactivating the unit<br/>never reaps the daemon sharing its cgroup<br/><i>opus · high</i>"]
     skill["<b>c4 · skills/board/SKILL.md</b> · CHANGE<br/>the tick's own instructions<br/>documents the restart gesture and what it does not touch<br/><i>opus · high</i>"]
