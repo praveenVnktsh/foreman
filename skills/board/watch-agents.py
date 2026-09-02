@@ -69,7 +69,11 @@ INSTANCE = reconcile.INSTANCE
 # discovering the work on its next ordinary poll instead of waking
 # immediately. No error, no crash: just a slower board on any instance whose
 # team key happens to have a digit in it.
-DISPATCHED = re.compile(r"^foreman/([^/]+)/([A-Z0-9]+-\d+)/(build|review)-(\w+)$")
+# The roles here are dispatch.sh's roles, and adding one there without adding
+# it here costs no error at all: the agent runs, finishes, and this Monitor
+# stays silent, so the board discovers the work on its next ordinary poll
+# instead of waking immediately.
+DISPATCHED = re.compile(r"^foreman/([^/]+)/([A-Z0-9]+-\d+)/(plan|build|review)-(\w+)$")
 
 # Phases that mean "this agent is no longer working". `done` is a completed turn;
 # `stopped` covers both a deliberate stop and a death.
@@ -77,8 +81,8 @@ FINISHED = {"done", "stopped"}
 
 
 def _dispatched(name: str) -> tuple[str, str, str] | None:
-    """(ticket, role, attempt) if `name` is a build/review agent dispatched by
-    THIS instance, else None.
+    """(ticket, role, attempt) if `name` is a plan/build/review agent dispatched
+    by THIS instance, else None.
 
     A capture group on the instance segment is not enough on its own -- it
     would still let one instance's Monitor wake on another instance's agents.

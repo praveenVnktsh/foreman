@@ -11,6 +11,13 @@ you. This skill owns the plan and the contract it is written in.
 
 ## Plan
 
+**The plan is drawn by a `fable` agent.** That is where the strongest model is
+spent: once, on the design, before any code exists. Everything downstream is
+only as good as this graph — a node whose label is wrong is wrong in every file
+that node owns — and no build agent that runs a node ever gets to revisit it.
+The board launches its planning stage with `--model fable` for this reason
+(`PLAN_MODEL` in `skills/board/config.sh`).
+
 **Read before you plan.** Name what you read: the task, the files it touches,
 `STYLEGUIDE.md`, `AGENTS.md`, and the surrounding code. A plan written before
 reading is a guess with a diagram attached.
@@ -74,14 +81,21 @@ You do not schedule the work. You read the schedule off the diagram.
 
 ### Model tiers
 
-Every node states one. Choose by what the task actually needs, not by
-importance:
+Every node states one. There are three, and `opus` is the ceiling. Choose by
+what the task actually needs, not by importance:
 
-- `opus` with `high` or `xhigh` effort — design decisions, anything ambiguous,
-  anything where being wrong is expensive to discover later.
+- `opus` with `high` or `xhigh` effort — design decisions the plan left open,
+  anything ambiguous, anything where being wrong is expensive to discover
+  later.
 - `sonnet` — mechanical transforms, wiring, tests that follow an existing
   pattern, a change you could describe completely in two sentences.
 - `haiku` — a lookup or a single-file rename. Rarely worth a node at all.
+
+**`fable` is never a node tier.** The strongest model is spent on the plan, not
+on executing it. A node's work is to build the component its label already
+describes, against a graph that has already settled what depends on what — so
+the tier that draws the graph is the wrong tier to run it, and a node label
+naming `fable` is a plan asking to be drawn twice.
 
 A graph where every node is `opus · max` has not been planned; it has been
 priced.
@@ -161,6 +175,7 @@ done.
 | "I will plan as I go" | Then the work is serial. That is what the graph prevents. |
 | "The graph needs a paragraph to explain it" | Then the graph is wrong. Fix the graph. |
 | "Everything is opus · max" | You priced the plan, you did not plan it. |
+| "This node should run on fable" | fable drew this graph. It never executes one; opus is a node's ceiling. |
 | "These two nodes both touch that file" | They are one node, or they are sequential. |
 | "I will add an edge to be safe" | An edge is a claim about the system. A false one is a false claim. |
 | "Only the new parts belong in the graph" | Then it is a task list. Untouched components are how a stranger reads it. |
