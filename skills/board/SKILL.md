@@ -809,7 +809,9 @@ Read every card in `Todo`, `In Progress`, `In Review` and `Needs Answers` **in
 this board's project** from Linear — filter by that board's project ID, not by
 scanning the team. For anything in `Todo` you might dispatch, read it again with
 `includeRelations: true`; step 6 gates on `blockedBy` and `list_issues` cannot
-return it.
+return it. Ask Linear for each card's `priority` as well — step 6 orders `Todo`
+by it, and `queue.py` refuses a card whose priority is missing rather than
+reading it as a value the operator never set.
 
 `Needs Answers` is read and never acted on. Nothing there is dispatchable,
 because every card in it is waiting for a person — but a card nobody names in
@@ -1319,13 +1321,27 @@ merged but failed to deploy is building on something that is not there.
   than reporting a quiet tick — a quiet tick and a deadlocked one look identical
   from the outside, and only one of them needs the operator.
 
-Ordering within what is left is unchanged. `blocks` needs no handling: the
-gating always happens on the dependent's side.
+`blocks` needs no handling: the gating always happens on the dependent's side.
 
-Take **one** card: the highest-priority dispatchable one in `Todo`. That
-dispatch is this board's card moved forward, so the slice ends and the next
-board takes its turn. A board with six free slots fills them over six passes
-rather than six spawns in a row, and every other board is served in between.
+Order what is left with `queue.py`. Write this board's `Todo` cards to a file,
+as the JSON Linear returned, and pipe them in:
+
+```bash
+~/.foreman/install/skills/board/queue.py < /tmp/todo.json
+```
+
+**Never order by Linear's raw `priority` number.** `0` there means "no
+priority", not "most urgent", so an ascending sort queues every untriaged card
+ahead of every `Urgent` one. `queue.py` sorts `0` last, and breaks a tie inside
+one priority on the lower card number, so a card that has waited is not starved
+by newer cards that share its priority.
+
+Take **one** card: the first identifier `queue.py` prints that is dispatchable.
+Walk down the list, because the dependency gate above may have made the first
+one unavailable. That dispatch is this board's card moved forward, so the slice
+ends and the next board takes its turn. A board with six free slots fills them
+over six passes rather than six spawns in a row, and every other board is served
+in between.
 
 **Move the card to `In Progress` first, then spawn.** In that order — the card
 is the lock, and a spawn that precedes the move gets dispatched twice.
