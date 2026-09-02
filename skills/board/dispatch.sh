@@ -149,11 +149,11 @@ else
   MODEL="$REVIEW_MODEL"
 fi
 
-# What the agent's OWN subagents default to -- the graphplan nodes a build
-# agent runs through the Workflow tool. `--model` above stays the agent's, so
-# the planner is not downgraded; see SUBAGENT_MODEL in config.sh for why the
-# nodes are the ones that get the fast model, and why this is the plain
-# default and not the FORCE variant.
+# What the agent's OWN subagents fall back to when they name no model.
+# `--model` above stays the agent's, so the planner is not downgraded. A
+# graphplan node states its own tier and is unaffected; see SUBAGENT_MODEL in
+# config.sh for what this does reach, and why this is the plain default and
+# not the FORCE variant.
 #
 # Exported, and it reaches the agent. Read that beside the TMPDIR comment
 # further down, which says the opposite about the environment of a `--bg`

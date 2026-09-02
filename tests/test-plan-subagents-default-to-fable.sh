@@ -2,17 +2,20 @@
 # Claim: a dispatched agent's SUBAGENTS default to fable, the agent itself does
 # not, and an operator can still turn the default off.
 #
-# A build agent invokes `graphplan`, which runs every node of its graph as a
-# subagent through the Workflow tool. Those nodes are the bulk of the work on a
-# card and they run in parallel, so the model they default to decides how long a
-# stage takes. The default travels as CLAUDE_CODE_SUBAGENT_MODEL in the
-# environment of the `claude --bg` invocation, which is why this test reads the
-# stub's environment and not its argv.
+# This is the FALLBACK half, for a subagent that names no model of its own: an
+# Explore or general-purpose agent the build agent spawns outside the graph.
+# A graphplan node states its own tier and never falls back here -- an explicit
+# per-spawn model outranks CLAUDE_CODE_SUBAGENT_MODEL, which is why the default
+# for those nodes lives in skills/graphplan/SKILL.md and is pinned by
+# tests/test-graphplan-tiers-default-to-fable.sh. The default travels as
+# CLAUDE_CODE_SUBAGENT_MODEL in the environment of the `claude --bg`
+# invocation, which is why this test reads the stub's environment and not its
+# argv.
 #
 # Two failures are being pinned apart, and they look identical from outside:
 #
-#   1. The variable stops being set, and every node silently runs on the
-#      planner's model again. Nothing errors; the board just gets slower.
+#   1. The variable stops being set, and every unstated spawn silently runs on
+#      the parent's model again. Nothing errors; the board just gets slower.
 #   2. The variable starts covering the agent itself -- `--model` losing
 #      BUILD_MODEL -- and the planner that has to read a repository and design
 #      the graph is downgraded. Nothing errors there either; the plans just get

@@ -164,24 +164,22 @@ MAX_BUDGET_USD="${MAX_BUDGET_USD:-}"
 BUILD_MODEL="${BUILD_MODEL:-opus}"
 REVIEW_MODEL="${REVIEW_MODEL:-opus}"
 
-# The model for the SUBAGENTS a dispatched agent spawns -- not for the agent
-# itself, which stays on BUILD_MODEL above.
+# The model for the SUBAGENTS a dispatched agent spawns that name no model of
+# their own -- not for the agent itself, which stays on BUILD_MODEL above.
 #
-# A build agent invokes `graphplan`, which draws the work as a graph and runs
-# each node as its own subagent through the Workflow tool. The nodes are where
-# the volume is: one card can be a dozen of them, and they run in parallel, so
-# a stage finishes only when its slowest node does. The planner reasons once;
-# the nodes execute a label that already says what to do.
-#
-# fable is a DEFAULT, not a cap. Claude Code reads CLAUDE_CODE_SUBAGENT_MODEL
-# as the fallback for a spawn that names no model, and an explicit per-spawn
-# model still wins -- so a plan node whose label says `opus` is still built by
-# opus. graphplan's tiers keep deciding; this only says what an unstated tier
-# means.
+# This does NOT move a graphplan node. `skills/graphplan/SKILL.md` requires
+# every NEW or CHANGE node to state a tier, and passes it to
+# `agent(prompt, {model})`; Claude Code resolves an explicit per-spawn model
+# ahead of CLAUDE_CODE_SUBAGENT_MODEL, so the node runs on the tier its label
+# names. That is why the graphplan default is fable in the skill, not here.
+# This variable covers what the skill does not reach: an Explore or
+# general-purpose subagent the build agent spawns outside the graph, and a node
+# whose label forgot its tier.
 #
 # NOT CLAUDE_CODE_SUBAGENT_MODEL_FORCE. That one overrules the model a spawn
 # asked for ("Workflow agent model X ignored"), which would make every tier a
-# plan states a lie, and silently.
+# plan states a lie, and silently. A node that argued its way to opus has a
+# reason in its label, and that reason must survive dispatch.
 #
 # `-`, not `:-`: `SUBAGENT_MODEL=` must reach the CLI as empty, which it reads
 # as "inherit the parent's model" -- the way back to the previous behaviour.
