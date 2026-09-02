@@ -56,8 +56,14 @@ STUB
 chmod +x "$work/bin/claude"
 printf '#!/usr/bin/env bash\nexit 0\n' > "$work/bin/flock"; chmod +x "$work/bin/flock"
 
+# `-u FOREMAN_INSTANCE`, because supervise.sh reads it: with a board named in
+# the environment it skips the boards.toml lookup entirely and sources that
+# board's config, so every case below asserted against the caller's machine
+# instead of the fixture. It passes in CI, where nothing sets the variable, and
+# fails on any developer machine and inside every agent the board dispatches --
+# which is where this suite actually runs on every build attempt.
 run_supervise() {
-  env HOME="$home" FOREMAN_HOME="$fh" PATH="$work/bin:$PATH" \
+  env -u FOREMAN_INSTANCE HOME="$home" FOREMAN_HOME="$fh" PATH="$work/bin:$PATH" \
     SUPERVISE_LOCK="$work/supervise.lock" \
     "$root/skills/board/supervise.sh" 2>&1
 }
