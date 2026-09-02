@@ -79,6 +79,15 @@ case "$out" in
   *"supervise.sh"*) ok "the unit runs the watchdog" ;;
   *) bad "the unit does not run supervise.sh" ;;
 esac
+# The unit's stop must not reach the agents the watchdog spawned. A oneshot
+# deactivates as soon as ExecStart returns, and under systemd's default
+# KillMode=control-group that kills everything left in the cgroup -- which
+# includes the shared claude daemon, if this unit is what first started it, and
+# so every in-flight card build on the machine.
+case "$out" in
+  *"KillMode=process"*) ok "the unit signals only its own process, never the agents it spawned" ;;
+  *) bad "unit does not set KillMode=process; deactivating it would kill every in-flight build" ;;
+esac
 case "$out" in
   *"Persistent=true"*) ok "a missed fire is caught up after a reboot" ;;
   *) bad "timer is not persistent; a sleeping host silently stops ticking" ;;

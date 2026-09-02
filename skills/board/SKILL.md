@@ -532,9 +532,35 @@ Inspect or control it by hand:
 ```bash
 ~/.foreman/install/skills/board/supervise.sh --status   # what it sees, changes nothing
 ~/.foreman/install/skills/board/supervise.sh --stop     # stop ticking
+~/.foreman/install/skills/board/supervise.sh --restart  # replace the tick, leave builds alone
 ~/.foreman/install/skills/board/supervise.sh            # start or repair now
 claude attach <id>                             # watch a tick live
 ```
+
+**`--restart` is how you pick up newly pulled install code, or replace a tick
+that looks wrong.** It stops the tick agent and nothing else. Every in-flight
+card keeps building, for the reason given above: its agent is parented to the
+`claude daemon`, not to the tick. The tick holds no state, so the replacement
+re-derives every card's position from Linear, `gh` and `claude agents`. The card
+agents are logged before and after, so you can check that rather than trust it.
+
+It first waits for the tick to finish the turn it is in, bounded by
+`TICK_DRAIN_SECONDS`, and stops it anyway once that runs out. That wait is a
+courtesy, not a correctness bound: cutting a stateless tick mid-turn costs only
+a transcript that stops mid-sentence. It then waits up to
+`TICK_START_TIMEOUT_SECONDS` for a replacement tick — one with a *different*
+agent id — to appear in the registry, and fails loudly if none does.
+`claude --bg` returns as soon as an agent is *spawned*, so "started" is not
+evidence that a tick exists. A restart believed on faith leaves the board
+stopped until the next timer fire, and the operator has just been told it
+worked, so nobody looks. Both bounds are in `config.sh`.
+
+**A running tick keeps reading the skill it started with.** So
+`git -C ~/.foreman/install pull` changes nothing by itself, and `--restart` is
+what makes the new install take effect.
+
+`systemctl --user restart foreman.service` is **not** this gesture: it re-runs
+the watchdog, which finds a healthy tick and does nothing.
 
 **Why not `withlock.py` around `claude -p "/board"` any more.** That worked
 because `-p` blocks for the whole run, so the lock genuinely covered it. It does
