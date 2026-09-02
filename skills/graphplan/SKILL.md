@@ -42,7 +42,7 @@ Every node label carries:
 - for `NEW` and `CHANGE` only, the model tier that builds it
 
 ```
-c4["<b>c4 · config.sh</b> · CHANGE<br/>loads one board into the environment<br/>sourced per board in a subshell<br/><i>opus · high</i>"]
+c4["<b>c4 · config.sh</b> · CHANGE<br/>loads one board into the environment<br/>sourced per board in a subshell<br/><i>fable · high</i>"]
 ```
 
 **Untouched components belong in the graph.** They are how a fresh agent
@@ -74,14 +74,22 @@ You do not schedule the work. You read the schedule off the diagram.
 
 ### Model tiers
 
-Every node states one. Choose by what the task actually needs, not by
-importance:
+**Every node is `fable` unless its label says why not.** A graph is drawn to be
+built in parallel, and a stage finishes when its slowest node does. The fast
+model is therefore the default, and reaching past it costs every node that
+waits on the one you promoted.
 
-- `opus` with `high` or `xhigh` effort — design decisions, anything ambiguous,
-  anything where being wrong is expensive to discover later.
-- `sonnet` — mechanical transforms, wiring, tests that follow an existing
-  pattern, a change you could describe completely in two sentences.
-- `haiku` — a lookup or a single-file rename. Rarely worth a node at all.
+There are two tiers, not a ladder:
+
+- `fable` — the default. Mechanical transforms, wiring, tests that follow an
+  existing pattern, a change you could describe completely in two sentences,
+  and everything else the label does not argue out of it.
+- `opus` with `high` or `xhigh` effort — the exception. The label must name the
+  unresolved design decision, or say what being wrong here costs to discover
+  later. "This part is important" is not that reason.
+
+Write the reason in the node label, where the agent that runs the node reads
+it. A tier chosen in your head is a tier the next reader cannot check.
 
 A graph where every node is `opus · max` has not been planned; it has been
 priced.
@@ -123,7 +131,9 @@ This section lives here rather than in `AGENTS.md` because it is a property of
 the artifact: a graph that cannot be mapped to execution is a picture. The
 mapping is mechanical, which is the whole return on writing the plan as a graph.
 
-- a `NEW` or `CHANGE` node → `agent(prompt, {label, model, effort})`
+- a `NEW` or `CHANGE` node → `agent(prompt, {label, model, effort})`, with
+  `model` the node's stated tier — `fable` for every node that did not
+  argue its way to `opus`
 - an untouched node → context in the prompt, never an agent
 - a path between two changed nodes → a `pipeline()` stage boundary
 - changed nodes with no path between them → the same `parallel()` call
@@ -161,6 +171,7 @@ done.
 | "I will plan as I go" | Then the work is serial. That is what the graph prevents. |
 | "The graph needs a paragraph to explain it" | Then the graph is wrong. Fix the graph. |
 | "Everything is opus · max" | You priced the plan, you did not plan it. |
+| "This node feels important, so opus" | Importance is not a tier. Name the design decision, or leave it `fable`. |
 | "These two nodes both touch that file" | They are one node, or they are sequential. |
 | "I will add an edge to be safe" | An edge is a claim about the system. A false one is a false claim. |
 | "Only the new parts belong in the graph" | Then it is a task list. Untouched components are how a stranger reads it. |
