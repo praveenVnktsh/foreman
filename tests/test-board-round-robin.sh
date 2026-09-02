@@ -12,11 +12,16 @@
 # after tick, and a board a tick never reached reports exactly what a board with
 # no work reports. Nothing says so.
 #
-# The order is DERIVED, never stored. Every slice that moves a card forward
-# appends to that card's history.jsonl through config.sh's card_log, so the
-# newest `at` across a board's cards is when that board last did something. A
-# cursor file would be the one thing SKILL.md forbids: a fact that exists only
-# in the sidecar, which is documented as "a cache, never truth".
+# "Served" means the slice REACHED the board, not that the board had work. Two
+# witnesses answer it, and the newer wins: `instances/<board>/last-served`,
+# stamped by `reconcile.py --served` at the top of every slice, and the newest
+# `at` across that board's history.jsonl files, appended by dispatch.sh and
+# sweep.sh through config.sh's card_log. History alone cannot answer it -- a
+# slice that ends at "nothing actionable" writes nothing, which read as never
+# served and pinned every quiet board to the front of every pass forever.
+#
+# Both are a cache and never truth. Delete them and the board sorts first, is
+# stamped again on its next slice, and costs one unrotated pass.
 #
 # It drives the real script against a temporary FOREMAN_HOME. No Linear, no gh,
 # no `claude agents` -- the read is local by construction.
@@ -67,6 +72,11 @@ served() {  # $1 board, $2 ticket, $3.. one `at` stamp per history line
 }
 
 reset_machine() { rm -rf "$fh/instances"; mkdir -p "$fh/instances"; }
+
+serve() {  # $1 board -> stamp it as reached by a slice, the way step 0 does
+  env FOREMAN_HOME="$fh" FOREMAN_INSTANCE="$1" \
+    "$root/skills/board/reconcile.py" --served "$1"
+}
 
 # `--board-order` sources config.sh at startup, which refuses to guess which
 # repository it serves -- so FOREMAN_INSTANCE must be set even for a question
@@ -165,6 +175,113 @@ printf '{not json at all\n' >> "$fh/instances/zulu/cards/PRA-9/history.jsonl"
 is "a corrupt trailing line falls back to the last line that parsed" \
   "$OLD" "$(stamp_of alpha zulu)"
 is "so the board keeps its place in the order" "zulu,alpha" "$(order alpha)"
+
+# --- a line that parses but is not an object does not take the order down ---
+#
+# `_read_jsonl` used to append anything json.loads accepted, so a line reading
+# `[]` reached `.get` and raised AttributeError. board_last_served() walks every
+# entry of every card of every board, so one such line on one card destroyed the
+# order for the whole machine -- and the tick has no documented fallback order.
+reset_machine
+served alpha PRA-1 "$NEW"
+served zulu  PRA-9 "$OLD"
+printf '[]\n' >> "$fh/instances/zulu/cards/PRA-9/history.jsonl"
+is "a history line that is valid JSON but not an object is dropped, not raised" \
+  "$OLD" "$(stamp_of alpha zulu)"
+is "so one such line does not cost every board its order" \
+  "zulu,alpha" "$(order alpha)"
+
+# --- a slice that moved nothing still counts as service ---------------------
+#
+# THE BUG THIS FILE WAS WRITTEN WITHOUT. history.jsonl only grows when a card
+# MOVES. A board whose Todo is empty ends its slice having written nothing, so
+# ordering on history alone left it `never served` after every pass it was
+# reached in -- first in the order forever, with the boards doing real work
+# behind it until the tick budget ran out. That is the starvation this mode
+# exists to remove, made permanent rather than alphabetical.
+reset_machine
+served alpha PRA-1 "$OLD"
+is "before its slice, the board that never moved a card goes first" \
+  "zulu,alpha" "$(order alpha)"
+serve zulu
+is "a slice that moved nothing still sends its board to the back" \
+  "alpha,zulu" "$(order alpha)"
+# Not compared to `date` to the second: this asserts the stamp exists and is a
+# real card_log timestamp, and a second ticking over mid-test is not a defect.
+case "$(stamp_of alpha zulu)" in
+  none) bad "a stamped board still reports no last_served" ;;
+  20[0-9][0-9]-[0-1][0-9]-[0-3][0-9]T[0-2][0-9]:[0-5][0-9]:[0-5][0-9]Z)
+    ok "and the stamp says when that slice reached it, not null" ;;
+  *) bad "the stamp is not a card_log timestamp: $(stamp_of alpha zulu)" ;;
+esac
+
+# --- the newer of the two witnesses is the answer ---------------------------
+#
+# Each covers the other's blind spot: the stamp is written by SKILL.md prose,
+# history by dispatch.sh and sweep.sh. Taking the newer can only move a board
+# later in the order, never ahead of a board that has waited longer.
+reset_machine
+serve alpha                      # stamped now
+served alpha PRA-1 "$OLD"        # but its last card moved in January
+served zulu  PRA-9 "$MID"
+is "a fresh stamp beats an old history line" "zulu,alpha" "$(order alpha)"
+
+reset_machine
+served alpha PRA-1 "$NEW"
+serve zulu
+printf '%s\n' "$OLD" > "$fh/instances/zulu/last-served"
+served zulu PRA-9 "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+is "a fresh history line beats an old stamp" "alpha,zulu" "$(order alpha)"
+
+# --- an unreadable stamp reads as never served, and never raises ------------
+#
+# A half-written or hand-edited stamp must degrade to the history answer, the
+# same way a corrupt history line does. `--served` writes through os.replace so
+# this should not happen; it must not be fatal when it does.
+reset_machine
+served alpha PRA-1 "$NEW"
+mkdir -p "$fh/instances/zulu"
+printf 'not a timestamp\n' > "$fh/instances/zulu/last-served"
+is "an unparseable stamp reads as never served rather than raising" \
+  "none" "$(stamp_of alpha zulu)"
+is "so the board sorts first, which is the safe direction" \
+  "zulu,alpha" "$(order alpha)"
+
+# --- --served refuses a board this machine does not declare -----------------
+#
+# Creating `instances/<typo>/last-served` and exiting 0 would leave the board
+# the operator meant still never served, still starving, with nothing saying so.
+reset_machine
+out="$(env FOREMAN_HOME="$fh" FOREMAN_INSTANCE=alpha \
+  "$root/skills/board/reconcile.py" --served nosuchboard 2>&1)"; status=$?
+case "$status:$out" in
+  0:*) bad "--served accepted an undeclared board" ;;
+  *"no board named nosuchboard"*) ok "--served refuses an undeclared board by name" ;;
+  *) bad "--served refused, but never named the board: $out" ;;
+esac
+[[ -e "$fh/instances/nosuchboard" ]] \
+  && bad "--served created a runtime directory for a board it refused" \
+  || ok "and writes nothing for the board it refused"
+
+# --- a halted board sorts last, not first -----------------------------------
+#
+# A halted board is skipped before anything of its is sourced, so no slice ever
+# stamps it. "Never served sorts first" would then park it at the head of every
+# pass for as long as the operator leaves it halted, ahead of every board that
+# can actually take work.
+reset_machine
+served alpha PRA-1 "$NEW"
+mkdir -p "$fh/instances/zulu"
+: > "$fh/instances/zulu/HALT"
+is "a halted board sorts last, however long it has gone unserved" \
+  "alpha,zulu" "$(order alpha)"
+is "and the report says halted, so the order can be read" \
+  "true" "$(env FOREMAN_HOME="$fh" FOREMAN_INSTANCE=alpha \
+    "$root/skills/board/reconcile.py" --board-order 2>/dev/null \
+    | python3 -c 'import json,sys; print(str({b["board"]: b["halted"] for b in json.load(sys.stdin)["boards"]}["zulu"]).lower())')"
+rm -f "$fh/instances/zulu/HALT"
+is "resuming it puts it back at the front, where a never-served board belongs" \
+  "zulu,alpha" "$(order alpha)"
 
 # --- equal service breaks on the name, so the order is total ----------------
 #

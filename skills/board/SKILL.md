@@ -137,11 +137,12 @@ order `boards.py --list` printed:
 ~/.foreman/install/skills/board/reconcile.py --board-order
 ```
 
-It prints `{"order": [...], "boards": [{"board": …, "last_served": …}]}`. Take
-the slices in `order`: least recently served first, the board name breaking every
-tie. `boards` carries the evidence — `last_served` is the newest `at` across that
-board's `history.jsonl` files, or `null` for a board no slice has ever moved
-anything on. A board never served sorts first.
+It prints
+`{"order": [...], "boards": [{"board": …, "last_served": …, "halted": …}]}`.
+Take the slices in `order`: least recently served first, the board name breaking
+every tie, halted boards last. `boards` carries the evidence — `last_served` is
+when a slice last took that board's turn, or `null` for a board no slice has
+ever reached.
 
 `boards.py --list` prints in name order, and that order is identical on every
 pass of every tick. The budget bounds the whole tick, not each board, so a pass
@@ -150,10 +151,38 @@ unreached, tick after tick — and a board a tick never reached reports exactly
 what a board with no work reports. Ordering by when a board was last served puts
 the starved board at the front.
 
-Two things the mode does not do:
+**Stamp the board at the top of its slice**, first thing, before you know
+whether the board has anything to do:
 
-- **It does not know about `HALT`.** Every declared board appears in `order`,
-  halted or not. The halt check stays where it is, before the config is sourced.
+```bash
+~/.foreman/install/skills/board/reconcile.py --served <board>
+```
+
+It writes `$FOREMAN_HOME/instances/<board>/last-served` and prints nothing.
+**Run it for every board whose turn comes up, including one whose slice ends
+immediately** at "nothing actionable". Served means *reached*, not *productive*.
+A board whose Todo is empty moves no card, so it appends nothing to any
+`history.jsonl` — miss the stamp and that board reads as never served, sorts to
+the front of every pass forever, and the boards that do have work sit behind it
+until the budget runs out. That is the starvation this mode exists to remove.
+
+`last_served` is the newer of that stamp and the newest `at` across the board's
+`history.jsonl` files. Two witnesses, because each covers the other's blind
+spot: the stamp is written by this prose, and `history.jsonl` is written by
+`dispatch.sh` and `sweep.sh` whether anyone remembers to or not.
+
+Both are a cache and never truth. Delete them and the board sorts first, is
+stamped again on its next slice, and costs one unrotated pass — never a wrong
+answer about a card.
+
+Two more things to know about the mode:
+
+- **A halted board sorts last, and you still check `HALT` yourself.** A halted
+  board is skipped before anything of its is sourced, so it is never stamped and
+  would otherwise sit at the head of every pass. `--board-order` reads the file
+  and puts it at the back instead, with `"halted": true` saying why. It reads it
+  once, at the start of the pass; a board halted after that is still yours to
+  catch.
 - **It does not stop wanting `FOREMAN_INSTANCE`.** It sources `config.sh` like
   every other `reconcile.py` call, even though the question is about the whole
   machine. Ask it as any board.
@@ -498,7 +527,8 @@ So the shape of a tick is:
 2. A **pass** is one slice for each board in turn, skipping halted ones, in the
    order `reconcile.py --board-order` prints for that pass. A slice is steps 0–8
    for that board, ending as soon as it has moved one card forward or found
-   nothing immediately actionable.
+   nothing immediately actionable. Stamp the board with `reconcile.py --served
+   <board>` as the slice opens, so the next pass knows it was reached.
 3. If a pass **changed any card's state on any board**, run another pass.
 4. Stop when a whole pass changes nothing anywhere, or the budget is spent.
 
@@ -584,9 +614,17 @@ acted on now, not something to keep waiting on.
 ### 0. Preflight
 
 ```bash
+~/.foreman/install/skills/board/reconcile.py --served <board>   # this slice reached this board
 ~/.foreman/install/skills/board/preflight.py --quick   # heartbeat tick
 ~/.foreman/install/skills/board/preflight.py           # before a dispatch, or when diagnosing
 ```
+
+**The stamp goes first, and it is unconditional.** It records that this board's
+turn came up, not that the turn achieved anything — so it runs before the
+preflight, and it still runs when the preflight then says this machine cannot
+build. See
+[Round-robin: one slice per board per pass](#round-robin-one-slice-per-board-per-pass)
+for what it costs to miss it.
 
 Exit 0 means this machine can build **this board's** work. **Non-zero means it
 cannot, and this board's slice dispatches nothing** — reconcile it, report what

@@ -728,6 +728,14 @@ def _read_jsonl(path: str) -> list[dict]:
     exists inside it) and a corrupt line are both silently absorbed: this is
     a cache derived from `config.sh:card_log`, so a read that finds nothing
     means there is nothing to report, not a system failure to raise on.
+
+    "Well-formed" means a JSON OBJECT, not merely valid JSON. A line reading
+    `[]`, `123` or `"x"` parses and is not a `dict`, and every caller here
+    reaches straight for `.get`, so letting one through raises AttributeError
+    deep inside a walk over every card of every board on the machine — one
+    hand-edited line on one card takes down an answer about all of them. This
+    is the parse boundary, so the type this returns stops being a claim and
+    starts being true.
     """
     out = []
     try:
@@ -737,9 +745,11 @@ def _read_jsonl(path: str) -> list[dict]:
                 if not line:
                     continue
                 try:
-                    out.append(json.loads(line))
+                    entry = json.loads(line)
                 except json.JSONDecodeError:
                     continue
+                if isinstance(entry, dict):
+                    out.append(entry)
     except OSError:
         return []
     return out
@@ -775,8 +785,13 @@ def _entry_stamp(entry: dict) -> datetime | None:
     at = entry.get("at")
     if not isinstance(at, str):
         return None
+    return _parse_stamp(at)
+
+
+def _parse_stamp(text: str) -> datetime | None:
+    """One `%Y-%m-%dT%H:%M:%SZ` timestamp as an aware datetime, or None."""
     try:
-        return datetime.strptime(at, CARD_LOG_STAMP).replace(tzinfo=timezone.utc)
+        return datetime.strptime(text, CARD_LOG_STAMP).replace(tzinfo=timezone.utc)
     except ValueError:
         return None
 
@@ -1009,14 +1024,77 @@ def host_slots(foreman_home: str, stale_minutes: float | None = HOST_SLOT_STALE_
     return result
 
 
-def board_last_served(foreman_home: str, board: str) -> datetime | None:
-    """When a slice last moved something on `board`, or None if it never has.
+SERVED_STAMP = "last-served"
 
-    THE EVIDENCE. `config.sh:card_log` appends a line to
-    `instances/<board>/cards/<T>/history.jsonl` every time a slice does
-    something to a card -- a spawn, a resume, a void, a released. So the
-    NEWEST `at` across every card on the board is when that board was last
-    served, and no new state file has to exist to say so.
+
+def _served_path(foreman_home: str, board: str) -> str:
+    return os.path.join(foreman_home, "instances", board, SERVED_STAMP)
+
+
+def mark_board_served(foreman_home: str, board: str) -> None:
+    """Record that a slice has just taken `board`'s turn. Writes, returns nothing.
+
+    WHY THIS FILE EXISTS. `board_last_served()` used to read history.jsonl
+    alone, and history only grows when a card MOVES. A slice that ends at
+    "nothing immediately actionable" -- the ordinary state of a board whose
+    Todo is empty -- writes nothing at all, so that board stayed `never
+    served` and pinned the front of every pass forever, pushing the boards
+    that do work to the back. That is the starvation `board_order()` exists to
+    remove, made permanent instead of alphabetical. The fix is to record the
+    turn, not the outcome: a board that was reached and had nothing to do was
+    still served.
+
+    The stamp is a cache and never truth, the same standing `cards/` has.
+    Delete it and the board reads as never served, sorts first, and is stamped
+    again on its next slice -- one unrotated pass, never a wrong answer. It
+    holds no card position, so nothing here contradicts SKILL.md's rule that
+    the sidecar can be deleted and the next tick must still reconstruct every
+    card's state.
+
+    Written through a temporary file in the same directory and `os.replace`,
+    so a reader never sees half a timestamp. A torn stamp would read as never
+    served, which is recoverable, but the whole file is 21 bytes and the
+    atomic write costs two lines.
+    """
+    directory = os.path.join(foreman_home, "instances", board)
+    os.makedirs(directory, exist_ok=True)
+    stamp = datetime.now(timezone.utc).strftime(CARD_LOG_STAMP)
+    tmp = os.path.join(directory, f".{SERVED_STAMP}.{os.getpid()}")
+    with open(tmp, "w") as fh:
+        fh.write(stamp + "\n")
+    os.replace(tmp, _served_path(foreman_home, board))
+
+
+def _served_stamp(foreman_home: str, board: str) -> datetime | None:
+    """The `last-served` stamp for `board`, or None if it has none to read."""
+    try:
+        with open(_served_path(foreman_home, board)) as fh:
+            text = fh.readline().strip()
+    except OSError:
+        return None
+    return _parse_stamp(text)
+
+
+def board_last_served(foreman_home: str, board: str) -> datetime | None:
+    """When a slice last took `board`'s turn, or None if none ever has.
+
+    TWO WITNESSES, AND THE NEWER ONE WINS.
+
+    - `instances/<board>/last-served`, written by `mark_board_served()` at the
+      top of every slice. This is the one that answers the question, because
+      it is written whether or not the slice found anything to do.
+    - The newest `at` across `instances/<board>/cards/<T>/history.jsonl`.
+      `config.sh:card_log` appends there on every spawn, resume, void and
+      released, from `dispatch.sh` and `sweep.sh` -- scripts, not prose. So a
+      slice that dispatched leaves this trace even if the stamp above was
+      never written.
+
+    Neither witness alone is enough. The stamp is written by the tick
+    following SKILL.md, and prose is not a gate; history is written
+    mechanically but only when a card actually moves. Each covers the other's
+    blind spot, and taking the newer of the two can only ever move a board
+    later in the order -- towards the back, never towards starving another
+    board at the front.
 
     Read EVERY entry of every card, not each card's last line. A corrupt
     trailing line would otherwise lose the board's real timestamp and report a
@@ -1030,12 +1108,12 @@ def board_last_served(foreman_home: str, board: str) -> datetime | None:
     unparseable lines returns None and sorts first. Failing to read one
     board's history must not take down the tick that asked about all of them.
     """
+    newest = _served_stamp(foreman_home, board)
     cards_dir = os.path.join(foreman_home, "instances", board, "cards")
     try:
         tickets = os.listdir(cards_dir)
     except OSError:
-        return None
-    newest = None
+        return newest
     for ticket in tickets:
         for entry in _read_jsonl(os.path.join(cards_dir, ticket, "history.jsonl")):
             stamp = _entry_stamp(entry)
@@ -1044,11 +1122,37 @@ def board_last_served(foreman_home: str, board: str) -> datetime | None:
     return newest
 
 
+def board_is_halted(foreman_home: str, board: str) -> bool:
+    """Whether `bin/boardctl halt` has parked `board`.
+
+    A file check on `instances/<board>/HALT`, in this process. It never sources
+    that board's config, which SKILL.md forbids for a halted board -- the same
+    access `host_slots()` already makes to every board's `cards/`.
+    """
+    return os.path.exists(os.path.join(foreman_home, "instances", board, "HALT"))
+
+
+_BEFORE_ANY_STAMP = datetime.min.replace(tzinfo=timezone.utc)
+
+
+def _pass_position(entry: tuple[str, datetime | None, bool]) -> tuple:
+    """Where one `(board, last_served, halted)` goes in the pass.
+
+    A datetime and None do not compare, so "never served" is its own key rather
+    than a sentinel date. A sentinel would be a second place the never-served
+    fact lived, and the wrong sentinel sorts a never-served board LAST, which
+    is the starvation being fixed.
+    """
+    name, stamp, halted = entry
+    return (halted, stamp is not None, stamp or _BEFORE_ANY_STAMP, name)
+
+
 def board_order(foreman_home: str) -> dict:
     """The board order for one pass, least recently served first.
 
-    `{"order": [name, ...], "boards": [{"board": name, "last_served": stamp}]}`,
-    both in the same order, `last_served` null for a board never served.
+    `{"order": [name, ...], "boards": [{"board": name, "last_served": stamp,
+    "halted": bool}]}`, both in the same order, `last_served` null for a board
+    never served.
 
     THE PROBLEM. One tick agent works every board on this machine, a slice
     each. It used to take that list from `bin/boards.py --list`, which prints
@@ -1060,17 +1164,27 @@ def board_order(foreman_home: str) -> dict:
     reports, so nothing says so. SKILL.md already called the loop round-robin,
     but the rotation only held INSIDE a pass, and prose is not a gate.
 
-    THE RULE. Never served sorts FIRST, then oldest served first, then by
-    board name. The name breaks every tie, so the order is total and the same
-    machine prints the same lines for the same history.
+    THE RULE. A halted board sorts LAST. Among the rest, never served sorts
+    FIRST, then oldest served first, then by board name. The name breaks every
+    tie, so the order is total and the same machine prints the same lines for
+    the same evidence.
 
-    WHY HISTORY AND NOT A CURSOR FILE. SKILL.md documents the sidecar as "a
-    cache, never truth -- delete it and the next tick must still reconstruct
-    every card's position." A stored "last board served" cursor would be
-    exactly the fact that exists only in the sidecar, and it would go stale the
-    moment anything wrote a card without updating it. Deleting the history here
-    costs one unrotated pass and never a wrong answer, which is what today
-    already does.
+    WHY HALTED LAST. `mark_board_served()` is never run for a halted board:
+    SKILL.md says a halted board is skipped before anything of its is sourced,
+    and `reconcile.py` sources `config.sh`. So a halted board is never served
+    by construction, and "never served sorts first" would park it at the head
+    of every pass for as long as the operator leaves it halted -- ahead of
+    every board that can actually take work. Sorting it last says the same
+    thing the tick already does with it, and `halted` in the report is why.
+    This does not move the halt check: the tick still tests the file itself,
+    because a board can be halted after this ran.
+
+    WHAT "SERVED" MEANS. When a slice took the board's turn -- NOT when it last
+    moved a card. Those came apart in the first version of this, which read
+    `history.jsonl` alone: a board whose Todo is empty ends its slice having
+    written nothing, so it stayed `never served`, sorted first on every pass
+    forever, and pushed the boards doing real work to the back. The tick budget then spent itself on the idle boards and never
+    reached the busy one. See `board_last_served()` for the two witnesses that now answer it.
 
     WHY NOT SLOTS HELD. A board holding three cards is the board with the most
     work needing a merge, so sorting it last would starve the boards that most
@@ -1081,19 +1195,17 @@ def board_order(foreman_home: str) -> dict:
     exists because `boards.toml` declares it, so a leftover runtime directory
     for an undeclared board must not appear in a pass.
     """
-    served = [(name, board_last_served(foreman_home, name))
+    served = [(name,
+               board_last_served(foreman_home, name),
+               board_is_halted(foreman_home, name))
               for name in declared_boards(foreman_home)]
-    # A datetime and None do not compare, so the never-served case is its own
-    # leading key rather than a sentinel date -- a sentinel would be a second
-    # place the "never served" fact lived, and the wrong sentinel sorts a
-    # never-served board last, which is the starvation being fixed.
-    epoch = datetime.min.replace(tzinfo=timezone.utc)
-    served.sort(key=lambda item: (item[1] is not None, item[1] or epoch, item[0]))
+    served.sort(key=_pass_position)
     return {
-        "order": [name for name, _ in served],
+        "order": [name for name, _, _ in served],
         "boards": [{"board": name,
-                    "last_served": stamp.strftime(CARD_LOG_STAMP) if stamp else None}
-                   for name, stamp in served],
+                    "last_served": stamp.strftime(CARD_LOG_STAMP) if stamp else None,
+                    "halted": halted}
+                   for name, stamp, halted in served],
     }
 
 
@@ -1218,6 +1330,7 @@ def main(argv: list[str]) -> int:
               "       reconcile.py --main-ci [BRANCH]\n"
               "       reconcile.py --host-slots\n"
               "       reconcile.py --board-order\n"
+              "       reconcile.py --served <board>\n"
               "       reconcile.py --may-dispatch <board>", file=sys.stderr)
         return 2
     if argv[0] == "--main-ci":
@@ -1244,6 +1357,30 @@ def main(argv: list[str]) -> int:
         verdict = dispatch_verdict(FOREMAN_HOME, argv[1], host_max)
         if verdict:
             print(verdict)
+        return 0
+    if argv[0] == "--served":
+        # Written at the TOP of a slice, before the slice knows whether it will
+        # find anything to do. That is the whole point: a board reached and
+        # found idle was still served, and recording only the boards that moved
+        # a card is what pinned every quiet board to the front of every pass.
+        #
+        # Names its board rather than reading INSTANCE from the environment. A
+        # stale FOREMAN_INSTANCE from the previous board is this skill's oldest
+        # bug shape, and stamping the wrong board sends the right one to the
+        # back of the queue with nothing saying so. The name is in the command.
+        if len(argv) < 2:
+            print("usage: reconcile.py --served <board>", file=sys.stderr)
+            return 2
+        board = argv[1]
+        if board not in declared_boards(FOREMAN_HOME):
+            # Refuse rather than create `instances/<typo>/last-served` and
+            # report success. A stamp nothing ever reads means the board the
+            # operator meant is still never served, and the order still starves
+            # it -- silently, which is the failure this whole mode removes.
+            print(f"reconcile: no board named {board} in "
+                  f"{os.path.join(FOREMAN_HOME, 'boards.toml')}", file=sys.stderr)
+            return 2
+        mark_board_served(FOREMAN_HOME, board)
         return 0
     if argv[0] == "--board-order":
         # The pass order, not the roster: `boards.py --list` prints boards in
