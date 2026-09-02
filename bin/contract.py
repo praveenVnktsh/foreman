@@ -123,6 +123,19 @@ LIMITS = {
     # disk is caught even when nothing gets as far as a probe.
     "MIN_FREE_TMP_MB": 128,
     "MIN_FREE_REPO_MB": 128,
+    # Free MEMORY, which is the resource that actually took a machine down.
+    #
+    # On 2026-08-31 a self-hosted CI runner was OOM-killed at a 5.2GB peak, and
+    # on 2026-09-01 four build agents plus that runner drove the same 14GB box to
+    # a load average of 14 with ssh timing out. preflight probed disk in two
+    # places and never once looked at memory, so it called that machine fit
+    # throughout.
+    #
+    # The agents are not the cost: a claude process measures about 0.3GB. What
+    # peaks is the WORK -- the target's own test suite, run concurrently by every
+    # build agent. So this floor is sized for one more of those, not for one more
+    # agent, and a target whose suite is heavier should raise it in board.toml.
+    "MIN_FREE_MEMORY_MB": 1024,
     # Written for real and then released. Large enough to actually exercise a
     # quota (a 1-byte write can succeed where a real build's writes cannot),
     # small enough that a cheap suite never waits on disk I/O to dispatch.

@@ -85,7 +85,8 @@ def _load_config() -> dict[str, str]:
     threshold that silently stops matching the one the operator edits.
     """
     keys = ("REPO", "FOREMAN_HOME", "MIN_FREE_TMP_MB", "MIN_FREE_REPO_MB",
-            "PROBE_TMP_MB", "PROBE_REPO_MB", "QUICK_PROBE_MB")
+            "PROBE_TMP_MB", "PROBE_REPO_MB", "QUICK_PROBE_MB",
+            "MIN_FREE_MEMORY_MB")
     script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.sh")
     printf = 'printf "%s\\0" ' + " ".join(f'"${k}"' for k in keys)
     out = subprocess.run(
@@ -215,6 +216,50 @@ def locked_write_probe(lockfile: str, directory: str, megabytes: int) -> dict:
         }
 
 
+def memory_check(min_mb: int) -> dict:
+    """Free memory, which is the resource that actually took a machine down.
+
+    On 2026-08-31 a self-hosted CI runner was OOM-killed at a 5.2GB peak. On
+    2026-09-01 four build agents plus that runner drove the same 14GB box to a
+    load average of 14 with ssh timing out. This file probed disk in two places
+    and never once looked at memory, so it reported that machine fit throughout.
+
+    AVAILABLE, not free. `MemFree` counts only untouched pages and reads as
+    almost nothing on any machine that has been up a while -- this host had 99
+    days of uptime and a page cache to match. `MemAvailable` is the kernel's own
+    estimate of what a new process could actually get, which is the question
+    being asked.
+
+    The agents are not the cost: a claude process measures about 0.3GB. What
+    peaks is the WORK -- the target's own test suite, run concurrently by every
+    build agent -- so this floor is sized for one more suite, not one more agent.
+
+    Linux only, by design. /proc/meminfo is absent on macOS, where this returns
+    ok with a detail saying so: a developer machine running one agent by hand is
+    not the machine this guards, and refusing to dispatch there would make the
+    gate useless where it is needed by making it wrong where it is not.
+    """
+    check = {"name": f"{min_mb}MB memory available", "ok": True, "detail": "not measurable here"}
+    try:
+        with open("/proc/meminfo") as fh:
+            for line in fh:
+                if line.startswith("MemAvailable:"):
+                    available_mb = int(line.split()[1]) // 1024
+                    break
+            else:
+                return check
+    except OSError:
+        return check
+    check["ok"] = available_mb >= min_mb
+    check["detail"] = f"{available_mb}MB available, floor is {min_mb}MB"
+    if not check["ok"]:
+        check["detail"] += (
+            "; dispatching another build would run its test suite on a machine "
+            "already at the edge, which is how the OOM killer picks a victim"
+        )
+    return check
+
+
 def runner_check(repo: str) -> dict:
     """Every self-hosted runner this repository has is offline.
 
@@ -318,6 +363,7 @@ def main() -> int:
             locked_write_probe(lockfile, tmpdir, int(cfg["QUICK_PROBE_MB"])),
             free_check(tmpdir, int(cfg["MIN_FREE_TMP_MB"])),
             free_check(repo, int(cfg["MIN_FREE_REPO_MB"])),
+            memory_check(int(cfg["MIN_FREE_MEMORY_MB"])),
         ]
     else:
         checks = [
