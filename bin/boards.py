@@ -40,7 +40,18 @@ BOARDS_TABLE = "boards"
 # every board in the usual single-workspace installation shares
 # $FOREMAN_HOME/linear.key, which is why the per-instance copy of that same
 # secret is gone.
-BOARD_KEYS = {"repo", "key"}
+BOARD_KEYS = {"repo", "key", "priority"}
+
+# How this MACHINE divides its own capacity between repositories when they
+# compete for HOST_MAX_CONCURRENT.
+#
+# It lives here and NOT in a target's board.toml, for the reason bin/contract.py
+# gives about ids: a repository is not trusted to declare how much of somebody
+# else's machine it deserves. Every target would declare itself important.
+#
+# Default 1, so a boards.toml written before this existed divides evenly and
+# nothing changes underneath an operator who never asked for priorities.
+DEFAULT_PRIORITY = 1
 
 DEFAULT_KEY_FILE = "linear.key"
 
@@ -111,9 +122,18 @@ def board_record(path: str, home: str, name: str, table: object) -> tuple[str, s
     if not os.path.isdir(repo):
         die(f"{path}: board {name}: repo is not a directory: {repo}")
 
+    priority = table.get("priority", DEFAULT_PRIORITY)
+    # `True` is an int in Python, and `priority = true` in TOML would otherwise
+    # load as 1 and read as deliberate. It is a typo, and this loader refuses
+    # what it cannot make sense of rather than guessing.
+    if isinstance(priority, bool) or not isinstance(priority, int):
+        die(f"{path}: board {name}: priority must be a non-negative integer")
+    if priority < 0:
+        die(f"{path}: board {name}: priority may not be negative")
+
     key = table.get("key")
     if key is None:
-        return repo, os.path.join(home, DEFAULT_KEY_FILE)
+        return repo, os.path.join(home, DEFAULT_KEY_FILE), priority
     if not isinstance(key, str):
         die(f"{path}: board {name}: key must be a string")
     # `key = ""` reads as "this board declares its own credential" and would
@@ -123,11 +143,11 @@ def board_record(path: str, home: str, name: str, table: object) -> tuple[str, s
         die(f"{path}: board {name}: key may not be empty; omit it to use the default")
     if "\0" in key:
         die(f"{path}: board {name}: key may not contain a NUL byte")
-    return repo, absolute(key, "key", name)
+    return repo, absolute(key, "key", name), priority
 
 
-def load(path: str, home: str) -> list[tuple[str, str, str]]:
-    """(name, REPO, KEY_FILE) for every declared board, sorted by name."""
+def load(path: str, home: str) -> list[tuple[str, str, str, int]]:
+    """(name, REPO, KEY_FILE, PRIORITY) for every declared board, sorted by name."""
     try:
         with open(path, "rb") as fh:
             doc = tomllib.load(fh)
@@ -151,8 +171,8 @@ def load(path: str, home: str) -> list[tuple[str, str, str]]:
 
     out = []
     for name in sorted(boards):
-        repo, key_file = board_record(path, home, name, boards[name])
-        out.append((name, repo, key_file))
+        repo, key_file, priority = board_record(path, home, name, boards[name])
+        out.append((name, repo, key_file, priority))
     return out
 
 
@@ -180,12 +200,12 @@ def main(argv: list[str]) -> int:
 
     boards = load(path, home)
     if args[0] == "--list":
-        emit([name for name, _, _ in boards])
+        emit([name for name, _, _, _ in boards])
         return 0
 
-    for name, repo, key_file in boards:
+    for name, repo, key_file, priority in boards:
         if name == args[0]:
-            emit(["REPO", repo, "KEY_FILE", key_file])
+            emit(["REPO", repo, "KEY_FILE", key_file, "PRIORITY", str(priority)])
             return 0
     die(f"{path}: no board named {args[0]}")
     return 1

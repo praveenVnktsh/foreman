@@ -79,8 +79,12 @@ check "a board in another workspace uses the key it declares" \
 
 # Consumers count fields to detect a failed load, so both keys are emitted for
 # every board -- never omitted, whatever the board did or did not declare.
-check "every key is emitted for a board that declares only a repo" "4" "$(field_count alpha)"
-check "every key is emitted for a board that declares both" "4" "$(field_count beta)"
+# Six fields: REPO, KEY_FILE and PRIORITY, each as a key and a value. A short
+# read is how a shell consumer detects a failed load, so an optional entry that
+# is absent must still be emitted rather than omitted -- see bin/contract.py's
+# docstring, which this file follows.
+check "every key is emitted for a board that declares only a repo" "6" "$(field_count alpha)"
+check "every key is emitted for a board that declares both" "6" "$(field_count beta)"
 
 # ~ belongs to the operator writing the file by hand. Expanding it here is
 # what lets one boards.toml stay portable between machines with different

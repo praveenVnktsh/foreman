@@ -860,6 +860,87 @@ def declared_boards(foreman_home: str) -> list[str]:
     return [name for name in out.split("\0") if name]
 
 
+def board_priorities(foreman_home: str) -> dict:
+    """Each declared board's priority, from `boards.py`. Absent reads as 1.
+
+    Tolerant for the same reason `declared_boards()` is: this feeds a ceiling,
+    and a machine whose `boards.toml` will not load must not take the tick down
+    over it. A board whose priority cannot be read is treated as ordinary.
+    """
+    out = {}
+    for name in declared_boards(foreman_home):
+        code, blob = run([BOARDS_PY, "--file",
+                          os.path.join(foreman_home, "boards.toml"), name])
+        priority = 1
+        if code == 0:
+            fields = [f for f in blob.split("\0")]
+            for key, value in zip(fields[0::2], fields[1::2]):
+                if key == "PRIORITY":
+                    try:
+                        priority = int(value)
+                    except ValueError:
+                        priority = 1
+        out[name] = priority
+    return out
+
+
+def dispatch_verdict(foreman_home: str, board: str, host_max: int,
+                     stale_minutes: float | None = HOST_SLOT_STALE_MINUTES) -> str:
+    """"" if `board` may take a slot, else one line saying why not.
+
+    THE PROBLEM. `HOST_MAX_CONCURRENT` bounds cards in flight across every board
+    sharing a machine, because RAM and disk are shared. First-come-first-served
+    is how one busy board holds every slot and a second board never dispatches
+    at all -- and a board that never dispatches looks exactly like a board with
+    no work.
+
+    THE RULE. Each board earns a FLOOR: its share of the ceiling, never below 1
+    for any declared board, so nothing with a priority is ever starved.
+
+        floor(b)     = max(1, host_max * priority(b) / sum of priorities)
+        available(b) = host_max - total_held
+                       - sum over other boards j of max(0, floor(j) - held(j))
+
+    A board may dispatch when `available >= 1`. That lets it use capacity
+    nobody is using, while reserving what other boards are still owed.
+
+    Worked example, which the test pins: host_max 4, two boards at priorities 3
+    and 1, so floors 3 and 1. With nothing held the first may take three and not
+    the fourth, because the second's floor is unmet. With the first holding
+    three, the second may still take its one.
+
+    Priority 0 means no floor: such a board takes only surplus. That is a way to
+    say "run this when nothing else needs the machine", and it is deliberately
+    expressible.
+    """
+    slots = host_slots(foreman_home, stale_minutes)
+    held = slots.get("instances") or {}
+    total = slots.get("total", 0)
+    priorities = board_priorities(foreman_home)
+    if board not in priorities:
+        # Not declared: `boards.py` refuses it elsewhere, and inventing a floor
+        # for a board this machine does not run would reserve capacity forever.
+        return ""
+    weight = sum(priorities.values())
+    floors = {}
+    for name, priority in priorities.items():
+        if priority <= 0 or weight <= 0:
+            floors[name] = 0
+        else:
+            floors[name] = max(1, (host_max * priority) // weight)
+    owed = sum(max(0, floors[j] - held.get(j, 0)) for j in priorities if j != board)
+    available = host_max - total - owed
+    if available >= 1:
+        return ""
+    if total >= host_max:
+        return f"this machine holds {total} of {host_max} slots across every board"
+    reserved = sorted(j for j in priorities
+                      if j != board and floors[j] > held.get(j, 0))
+    return (f"{board} is at its share: {total} of {host_max} slots are held and "
+            f"{owed} more {'is' if owed == 1 else 'are'} reserved for "
+            f"{', '.join(reserved)}")
+
+
 def host_slots(foreman_home: str, stale_minutes: float | None = HOST_SLOT_STALE_MINUTES) -> dict:
     """Cards holding a slot, counted across every DECLARED board on this machine.
 
@@ -1030,7 +1111,8 @@ def main(argv: list[str]) -> int:
     if not argv:
         print("usage: reconcile.py <TICKET> [TICKET...]\n"
               "       reconcile.py --main-ci [BRANCH]\n"
-              "       reconcile.py --host-slots", file=sys.stderr)
+              "       reconcile.py --host-slots\n"
+              "       reconcile.py --may-dispatch <board>", file=sys.stderr)
         return 2
     if argv[0] == "--main-ci":
         # No agent registry, no Linear, no cards: this answers one question about
@@ -1038,6 +1120,24 @@ def main(argv: list[str]) -> int:
         json.dump(main_ci_state(argv[1] if len(argv) > 1 else "main"),
                   sys.stdout, indent=2)
         print()
+        return 0
+    if argv[0] == "--may-dispatch":
+        # Prints nothing and exits 0 when the board may take a slot; prints one
+        # human line when it may not. The arithmetic lives here rather than in
+        # dispatch.sh because logic deciding whether work may start belongs
+        # somewhere a test can reach it -- an apostrophe inside that script's
+        # inline python once closed the surrounding shell string and disabled
+        # the whole gate silently.
+        if len(argv) < 2:
+            print("usage: reconcile.py --may-dispatch <board>", file=sys.stderr)
+            return 2
+        try:
+            host_max = int(os.environ.get("HOST_MAX_CONCURRENT", "4"))
+        except ValueError:
+            host_max = 4
+        verdict = dispatch_verdict(FOREMAN_HOME, argv[1], host_max)
+        if verdict:
+            print(verdict)
         return 0
     if argv[0] == "--host-slots":
         # Same reasoning as --main-ci: this answers one question about the
