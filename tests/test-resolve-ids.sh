@@ -138,7 +138,11 @@ cat >"$work_dir/happy.json" <<JSON
   "log": "$happy_log"
 }
 JSON
-# board-failed is deliberately absent above -- ensure_labels() must create it.
+# board-failed and needs-plan are deliberately absent above -- ensure_labels()
+# must create both. needs-plan is the operator's label to apply, so a board that
+# created only the labels it writes itself would leave them typing the name by
+# hand, and the typo shows up as a card that silently never parks. Adding it to
+# the fixture to hold the create count at one would delete the only coverage.
 
 start_stub "$work_dir/happy.json"
 if run_resolve "$STUB_URL"; then
@@ -164,19 +168,21 @@ if run_resolve "$STUB_URL"; then
   fi
 
   created_id="$(read_id "$ids_env" LABEL_BOARD_FAILED)"
+  needs_plan_id="$(read_id "$ids_env" LABEL_NEEDS_PLAN)"
   create_calls="$(grep -c '^mutation CreateLabel ' "$happy_log" || true)"
-  if [[ "$created_id" == created-* ]] \
+  if [[ "$created_id" == created-* && "$needs_plan_id" == created-* ]] \
        && grep -q "^mutation CreateLabel .*\"board-failed\"" "$happy_log" \
-       && [[ "$create_calls" -eq 1 ]]; then
-    ok "creates a label that does not exist and records its id"
+       && grep -q "^mutation CreateLabel .*\"needs-plan\"" "$happy_log" \
+       && [[ "$create_calls" -eq 2 ]]; then
+    ok "creates both absent labels, the board's and the operator's, and records their ids"
   else
-    not_ok "creates a label that does not exist: id=[$created_id] creates=[$create_calls] log=$(cat "$happy_log")"
+    not_ok "creates absent labels: board-failed=[$created_id] needs-plan=[$needs_plan_id] creates=[$create_calls] log=$(cat "$happy_log")"
   fi
 
   if [[ "$(read_id "$ids_env" LABEL_FOLLOW_UP)" == "label-followup" && \
         "$(read_id "$ids_env" LABEL_FOLLOW_UPS_WRITTEN)" == "label-followupswritten" && \
         "$(read_id "$ids_env" LABEL_NEEDS_MERGE)" == "label-needsmerge" && \
-        "$create_calls" -eq 1 ]]; then
+        "$create_calls" -eq 2 ]]; then
     ok "reuses a label that does exist rather than creating a second"
   else
     not_ok "reuses a label that does exist: $(cat "$ids_env")"
