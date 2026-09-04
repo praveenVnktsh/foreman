@@ -14,6 +14,14 @@
 # which is the same defect test-render-diagram-extracts-one-block.sh's header
 # describes for its own extraction logic.
 #
+# The second failure, found in review on 2026-09-03: a checker that only reads
+# the label forms it expects. The first version recognised `c1["..."]` and
+# nothing else, so `c1[seventeen words with no quotes]` -- valid mermaid, and
+# exactly the prose the budget exists to refuse -- exited 0 with no output at
+# all. Every label form below is therefore either measured or refused, and the
+# cases assert the refusal, because a checker that stays quiet about what it
+# cannot read is worse than no checker: it reports coverage it does not have.
+#
 # What is deliberately NOT covered: rendering (another test owns it) and the
 # wording of SKILL.md's prose, only the two lines it must reproduce verbatim.
 set -uo pipefail
@@ -134,13 +142,67 @@ else
   esac
 fi
 
-# A terse graph: accepted.
+# An unquoted node label: refused, not skipped. This is the line that exited 0
+# silently before review; it is 17 words against a budget of six.
+cat >"$work_dir/unquoted-node.md" <<'MD'
+```mermaid
+flowchart TD
+  c8[loads one board into the environment, sourced per board in a subshell, so the key never enters]
+```
+MD
+if out="$(python3 "$checker" "$work_dir/unquoted-node.md" 2>&1)"; then
+  bad "an unquoted node label was accepted, and it is 17 words long"
+else
+  case "$out" in
+    *"node c8"*"not quoted"*) ok "an unquoted node label is refused, naming the node id" ;;
+    *) bad "refused, but not for the missing quotes: $out" ;;
+  esac
+fi
+
+# An edge label written inline rather than in pipes: refused, not skipped.
+cat >"$work_dir/inline-edge.md" <<'MD'
+```mermaid
+flowchart TD
+  c9 -- this edge label has far too many words to be allowed --> c10
+```
+MD
+if out="$(python3 "$checker" "$work_dir/inline-edge.md" 2>&1)"; then
+  bad "an inline edge label was accepted, and it is 11 words long"
+else
+  case "$out" in
+    *"belongs in pipes"*) ok "an edge label written inline is refused" ;;
+    *) bad "refused, but not for the inline label: $out" ;;
+  esac
+fi
+
+# A line in a shape the checker cannot read: refused, never passed over.
+cat >"$work_dir/unreadable.md" <<'MD'
+```mermaid
+flowchart TD
+  c11@{ shape: rect, label: "a label with a great many words in it" }
+```
+MD
+if out="$(python3 "$checker" "$work_dir/unreadable.md" 2>&1)"; then
+  bad "a line the checker cannot read was passed over in silence"
+else
+  case "$out" in
+    *"expected a link or a label"*) ok "a line the checker cannot read is refused" ;;
+    *) bad "refused, but not for being unreadable: $out" ;;
+  esac
+fi
+
+# A terse graph: accepted. Shapes other than the plain box are labels too, and
+# a fix for the silent skip that refused them would be its own defect.
 cat >"$work_dir/terse.md" <<'MD'
 ```mermaid
 flowchart TD
   c6["<b>c6 · brief.py</b> · CHANGE<br/>writes the dispatch prompt"]
   c7["<b>c7 · queue.py</b> · CHANGE<br/>orders todo cards"]
+  store[("the card history")]
+  gate{"a free slot?"}
   c6 -->|feeds| c7
+  c7 -.->|"reads at runtime"| store
+  store --- gate
 ```
 MD
 if out="$(python3 "$checker" "$work_dir/terse.md" 2>&1)"; then

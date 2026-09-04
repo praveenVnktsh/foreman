@@ -36,21 +36,31 @@ FENCE_OPEN = "```mermaid"
 
 BREAK = re.compile(r"<br\s*/?>", re.IGNORECASE)
 TAG = re.compile(r"<[^>]*>")
-TRAILING_ID = re.compile(r"[A-Za-z0-9_.-]+$")
+
+# A node id: a word, with a dot or a dash only between two of them, so `a-->b`
+# reads as one id, a link and one id rather than as the id `a--`.
+IDENT = re.compile(r"[A-Za-z0-9_]+(?:[.-][A-Za-z0-9_]+)*")
+# A link: the run of arrow characters between two nodes. `-->`, `---`, `-.->`,
+# `==>`, `~~~`, `<-->`, and the `--o`/`--x` heads when a space follows.
+LINK = re.compile(r"[-=.<>~]{2,}(?:[ox](?=\s))?")
+# The brackets around a node label. Any mermaid shape: [], (), ([]), [()],
+# {{}}, [//], [\\], and the asymmetric >].
+OPEN_RUN = re.compile(r"(?:[(\[{]+|>)[/\\]?")
+CLOSE_RUN = re.compile(r"[/\\]?[)\]}]+")
+# A link written to carry its label inline: `a -- text --> b`. Mermaid opens
+# that form with exactly two characters and closes it with the arrow.
+INLINE_TEXT_LINKS = frozenset(["--", "==", "-."])
 
 # Lines that carry no label of their own: graph syntax, styling, cluster ends.
 KEYWORDS = frozenset(
     ["flowchart", "graph", "direction", "classDef", "class", "linkStyle", "style", "end"]
 )
 
-# Bracket pairs that hold a quoted node label, in mermaid's node shapes.
-OPENERS = (('[("', ')]'), ('["', "]"), ('("', ")"), ('{"', "}"))
-
 USAGE = "usage: check-plan-graph.py <plan.md>... | --limits"
 
 
 class LabelSyntax(Exception):
-    """A label opens on a line and does not close on it."""
+    """A line the checker cannot read as nodes and links."""
 
 
 def words(text: str) -> list[str]:
@@ -58,47 +68,75 @@ def words(text: str) -> list[str]:
     return [word for word in TAG.sub(" ", text).split() if word != "·"]
 
 
-def node_id(line: str, bracket: int) -> str:
-    """The identifier immediately before the bracket at `bracket`.
+def skip_space(line: str, at: int) -> int:
+    while at < len(line) and line[at].isspace():
+        at += 1
+    return at
 
-    Shapes nest their brackets -- `u1(["stadium"])` opens two before its label
-    -- so the outer ones are stepped over to reach the id.
+
+def read_node_label(line: str, at: int, ident: str) -> tuple[int, str]:
+    """The quoted label inside a node's brackets, and where it ends.
+
+    A node label must be quoted. Brackets nest and mermaid has a dozen shapes,
+    so without the quotes the checker has to guess where the label ends -- and
+    on 2026-09-03 a guess is what let `c1[seventeen words like this]` through a
+    six-word budget with no output at all. The quote is the one delimiter that
+    needs no guess, so a label without one is refused rather than measured.
     """
-    found = TRAILING_ID.search(line[:bracket].rstrip("([{"))
-    return found.group(0) if found else ""
+    at = skip_space(line, at)
+    if at >= len(line) or line[at] != '"':
+        raise LabelSyntax(f'node {ident}: label is not quoted; write {ident}["..."]')
+    close = line.find('"', at + 1)
+    if close < 0:
+        raise LabelSyntax(f"node {ident}: label opens with a quote that never closes")
+    closing = CLOSE_RUN.match(line, skip_space(line, close + 1))
+    if not closing:
+        raise LabelSyntax(f"node {ident}: label is never closed by its bracket")
+    return closing.end(), line[at + 1 : close]
 
 
 def scan(line: str) -> list[tuple[str, str, str]]:
     """Every label on one line, as (kind, node id, label text).
 
-    Raises LabelSyntax rather than skipping a line it cannot parse: a label the
-    checker cannot read is a label nothing has checked.
+    The line is read as mermaid writes it: a node, then a link, then a node,
+    for as long as it runs. Anything that does not fit raises LabelSyntax and
+    is reported. Nothing is skipped -- a label the checker cannot read is a
+    label nothing has checked, and it reaches the diagram unmeasured.
     """
     found: list[tuple[str, str, str]] = []
-    at = 0
-    while at < len(line):
-        opener = next((pair for pair in OPENERS if line.startswith(pair[0], at)), None)
-        if opener:
-            marks, closer = opener
-            start = at + len(marks)
-            quote = line.find('"', start)
-            if quote < 0:
-                raise LabelSyntax(f"node label opened by {marks} never closes on this line")
-            if not line[quote + 1 :].lstrip().startswith(closer):
+    at = skip_space(line, 0)
+    expect_node = True
+    while at < len(line) and line[at] != ";":
+        if expect_node:
+            ident = IDENT.match(line, at)
+            if not ident:
+                raise LabelSyntax(f'expected a node id at "{line[at:]}"')
+            at = ident.end()
+            brackets = OPEN_RUN.match(line, at)
+            if brackets:
+                at, label = read_node_label(line, brackets.end(), ident.group(0))
+                found.append(("node", ident.group(0), label))
+            expect_node = False
+        elif line[at] == "&":
+            at += 1
+            expect_node = True
+        else:
+            link = LINK.match(line, at)
+            if not link:
+                raise LabelSyntax(f'expected a link or a label at "{line[at:]}"')
+            at = link.end()
+            if at < len(line) and line[at] == "|":
+                close = line.find("|", at + 1)
+                if close < 0:
+                    raise LabelSyntax("edge label opened by | never closes on this line")
+                found.append(("edge", "", line[at + 1 : close].strip().strip('"')))
+                at = close + 1
+            elif link.group(0) in INLINE_TEXT_LINKS:
                 raise LabelSyntax(
-                    f'node label "{line[start:quote]}" is never closed by {closer}'
+                    f'edge label after "{link.group(0)}" belongs in pipes: -->|"..."|'
                 )
-            found.append(("node", node_id(line, at), line[start:quote]))
-            at = line.index(closer, quote) + len(closer)
-            continue
-        if line[at] == "|":
-            end = line.find("|", at + 1)
-            if end < 0:
-                raise LabelSyntax("edge label opened by | never closes on this line")
-            found.append(("edge", "", line[at + 1 : end].strip().strip('"')))
-            at = end + 1
-            continue
-        at += 1
+            expect_node = True
+        at = skip_space(line, at)
     return found
 
 
@@ -138,9 +176,6 @@ def check_line(path: str, number: int, line: str) -> list[str]:
                     f'{where}: edge label "{label}" has {count} words, '
                     f"at most {MAX_LABEL_WORDS} allowed"
                 )
-            continue
-        if not ident:
-            problems.append(f'{where}: node label "{label}" has no id before its bracket')
             continue
         parts = BREAK.split(label)
         if len(parts) > MAX_NODE_LINES:
