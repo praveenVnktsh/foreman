@@ -80,15 +80,25 @@ STATE_ROLES = [
 TO_PICK_UP_ROLE = "STATE_TO_PICK_UP"
 TO_PICK_UP_TYPE = "unstarted"
 
-# Labels the board owns and only ever writes onto cards itself (skills/board/
-# SKILL.md). Unlike states, these are created if missing -- a fork's team has
-# never had a reason to create them by hand, and the board cannot function
-# without somewhere to put a follow-up or a needs-merge flag.
+# The labels the board resolves ids for (skills/board/SKILL.md). Unlike
+# states, these are created if missing -- a fork's team has never had a reason
+# to create them by hand, and the board cannot function without somewhere to
+# put a follow-up or a needs-merge flag.
+#
+# `needs-plan` is the one that runs the other way. The first four are written
+# by the board and read by a human; `needs-plan` is written by the OPERATOR --
+# it is how they say "park this card in Plan and let me answer the plan before
+# you build it" -- and only ever read by the board. That direction is an
+# argument for creating it here, not against: a label the operator is expected
+# to apply has to exist before they can apply it, and a board that created only
+# the labels it writes would leave them typing the name by hand into a fresh
+# team, where the typo shows up as a card that silently never parked.
 LABEL_ROLES = [
     ("LABEL_FOLLOW_UP", "follow-up"),
     ("LABEL_FOLLOW_UPS_WRITTEN", "follow-ups-written"),
     ("LABEL_NEEDS_MERGE", "needs-merge"),
     ("LABEL_BOARD_FAILED", "board-failed"),
+    ("LABEL_NEEDS_PLAN", "needs-plan"),
 ]
 
 IDS_ENV_ORDER = (
@@ -287,7 +297,7 @@ def resolve_states(api_url: str, key: str, team_id: str) -> dict:
 
 
 def ensure_labels(api_url: str, key: str, team_id: str) -> dict:
-    """Resolve the four board-owned labels, creating any that are missing.
+    """Resolve every label in LABEL_ROLES, creating any that are missing.
 
     Returns {role: id} for every role in LABEL_ROLES. Whether a label was
     found or just created, its id is independently verified by querying it

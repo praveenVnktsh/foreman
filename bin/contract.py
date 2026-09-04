@@ -113,6 +113,11 @@ LIMIT_MINIMUMS = {
 LIMITS = {
     "MAX_CONCURRENT": 1,
     "MAX_BUILD_ATTEMPTS": 2,
+    # Deliberately absent from LIMIT_MINIMUMS above: MAX_PLAN_ROUNDS=0 means the
+    # plan is posted once and never revised -- the card idles in Plan until the
+    # operator removes needs-plan, but nothing merges unreviewed, so zero is a
+    # legitimate (if unusual) operator choice, not a disarmed gate.
+    "MAX_PLAN_ROUNDS": 2,
     "MAX_REVIEW_ROUNDS": 2,
     "REVIEWERS_PER_ROUND": 2,
     "STALL_MINUTES": 30,

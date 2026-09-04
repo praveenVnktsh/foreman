@@ -1329,6 +1329,45 @@ def build_attempts(entries: list[dict]) -> int:
     return len(seen - voided)
 
 
+def plan_rounds(entries: list[dict]) -> int:
+    """How many times a parked card's agent has been resumed to revise its plan.
+
+    Counted from `history.jsonl`, never from agent names -- the same reason
+    `build_attempts` gives: `agents_for()` can only ever report the CURRENT
+    agent under its deterministic name (`build-<attempt>`), and that name is
+    identical whether the agent was resumed for a failing check, a blocking
+    review finding, or a plan revision. The name carries a role and an attempt
+    number, not a reason a resume happened. History is the only place the
+    reason is recorded at all.
+
+    `dispatch.sh --resume` already logs one unconditional line for every
+    resume of every kind: `{"action":"resume","name":...,"session":...}`. That
+    cannot be what this counts -- it would count a build resumed to fix a
+    failing check the same as a build resumed to revise a plan, the same
+    conflation `build_attempts` exists to avoid on the build side. A plan
+    round therefore needs its own entry, the same way an environmental
+    write-off is a second, explicit `card_log` call layered on top of that
+    generic line (see `build_attempts`'s `void`):
+
+        card_log <T> '{"action":"resume","role":"plan","round":"<n>"}'
+
+    This is the contract the board's tick (SKILL.md) must follow when it parks
+    a `needs-plan` card and resumes it with unconsumed operator comments --
+    written here because `reconcile.py` is what has to read it back. One row
+    is one round, by construction: the board increments `round` itself before
+    logging, so there is nothing here to dedupe the way `build_attempts`
+    dedupes a spawn against a later resume of the same attempt number -- a
+    round that needs revisiting again waits for the next operator comment
+    first, which is a NEW row, not the same one replayed.
+    """
+    return sum(
+        1
+        for e in entries
+        if (e.get("event") or {}).get("action") == "resume"
+        and (e.get("event") or {}).get("role") == "plan"
+    )
+
+
 def death_report(path: str | None) -> dict | None:
     """Why did this agent's transcript stop? Read the tail and say.
 
@@ -1405,6 +1444,7 @@ def reconcile(ticket: str, agents: list[dict]) -> dict:
         "ticket": ticket,
         "history": entries,
         "build_attempts": build_attempts(entries),
+        "plan_rounds": plan_rounds(entries),
         "agents": mine,
         "worktree": worktree if os.path.isdir(worktree) else None,
         "pr": pr,
