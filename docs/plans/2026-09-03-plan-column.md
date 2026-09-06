@@ -17,12 +17,12 @@ flowchart TD
 
   ct["<b>ct · bin/contract.py</b> · CHANGE<br/>loads and validates board.toml limits<br/>MAX_PLAN_ROUNDS in LIMITS<br/><i>sonnet</i>"]
   r1["<b>r1 · bin/resolve-ids.py</b> · CHANGE<br/>names to ids, creates missing labels<br/>LABEL_NEEDS_PLAN<br/><i>opus · high</i>"]
-  p1["<b>p1 · skills/board/plancomments.py</b> · NEW<br/>pure filter, no network<br/>comments in, unconsumed ids and footer out<br/><i>opus · high</i>"]
+  p1["<b>p1 · skills/board/plancomments.py</b> · NEW<br/>pure filter, no network<br/>comments in, unconsumed ids out<br/><i>opus · high</i>"]
   b1["<b>b1 · skills/board/brief.py</b> · CHANGE<br/>renders prompts, fences foreign text<br/>replan subcommand, modelled on fix<br/><i>sonnet</i>"]
-  rc1["<b>rc1 · skills/board/reconcile.py</b> · CHANGE<br/>joins agents, git, PR, checks per card<br/>plan rounds from history<br/><i>sonnet</i>"]
-  s1["<b>s1 · skills/board/SKILL.md</b> · CHANGE<br/>the tick · re-derives every card<br/>needs-plan guards the Plan exit,<br/>parks, replans, releases the slot<br/><i>opus · xhigh</i>"]
+  rc1["<b>rc1 · skills/board/reconcile.py</b> · CHANGE<br/>joins agents, git, PR, checks<br/>plan rounds from history<br/><i>sonnet</i>"]
+  s1["<b>s1 · skills/board/SKILL.md</b> · CHANGE<br/>the tick · re-derives every card<br/>needs-plan guards Plan; parks, replans, releases<br/><i>opus · xhigh</i>"]
 
-  op -->|"labels, answers, removes the label"| lin
+  op -->|"labels, answers, unlabels"| lin
   s1 -->|"reads states, labels, comments"| lin
   s1 -->|"posts the plan comment"| lin
   bt -->|"limits"| ct

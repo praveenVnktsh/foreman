@@ -5,20 +5,73 @@
 # waiting looks identical to running. See board.toml's [checks] table.
 name: CI
 
+# Runs on mango's self-hosted runner rather than `ubuntu-latest`.
+#
+# A GitHub billing lapse stops hosted jobs dead: they conclude `failure` in
+# three seconds with no steps and no log, which reads like an ordinary red
+# build. The two runs on `main` of 2026-09-04 and 2026-09-05 did exactly that,
+# each annotated "The job was not started because recent account payments have
+# failed or your spending limit needs to be increased". Self-hosted minutes are
+# not billed, and murmr's CI already runs on mango for the same reason.
+#
+# A runner registration is per repository on a personal account, so foreman
+# has its own instance of the runner on the same box, under the same name and
+# labels: ~/actions-runner-foreman, kept alive by the user unit
+# actions-runner-foreman.service (linger is on, so it survives logout). The
+# murmr runner is a system unit; this one is not, because installing one needs
+# sudo. preflight.py's "a runner is online" check reads this repository's
+# runner list, so the board notices if it dies.
+#
+# The cost is that CI now runs as the user that owns this machine's gh token,
+# Claude sessions, and every board instance under ~/.foreman. What keeps that
+# tolerable, and what a change here has to preserve:
+#
+#   - tests/ builds a throwaway HOME per test through
+#     tests/lib/instance-fixture.sh and stubs `gh`, `claude` and `systemctl` on
+#     PATH. The Tests step below ALSO pins HOME to the job's scratch directory,
+#     so a test that forgets the fixture writes there and not into the live
+#     ~/.foreman or ~/.claude. The suite passes under that HOME; keep it so.
+#   - Every action is pinned to a commit rather than a moving major tag, since
+#     "whatever @v4 means today" now runs with this user's credentials on disk.
+#     Checkout leaves no token in the long-lived workspace.
+#   - One runner serves the repository, so runs queue rather than parallelise,
+#     and a hung job blocks every later check. Hence the timeout.
+#
+# Moving back to hosted runners when billing is restored is a one-line change
+# to `runs-on`. Do it immediately if this repository is ever made public: the
+# trust boundary here is review, and CI runs before review.
+
 on:
   push:
     branches: [main]
   pull_request:
 
+permissions:
+  contents: read
+
 jobs:
   tests:
     name: Tests
-    runs-on: ubuntu-latest
+    runs-on:
+      - self-hosted
+      - linux
+      - mango
+    timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          # The workspace is long-lived and shared on this host, which is
+          # exactly why a credential must not be left sitting in it.
+          persist-credentials: false
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
         with:
           python-version: "3.12"
 
-      - run: tests/run-all.sh
+      - name: Run every test under a scratch HOME
+        env:
+          HOME: ${{ runner.temp }}/home
+        run: |
+          set -euo pipefail
+          mkdir -p "$HOME"
+          tests/run-all.sh
