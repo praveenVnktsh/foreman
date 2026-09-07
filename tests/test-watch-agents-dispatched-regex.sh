@@ -71,6 +71,14 @@ check(watch_agents._dispatched(tick_agent) is None,
 check(watch_agents._dispatched(other_instance) is None,
       "a digit-team ticket from a DIFFERENT instance is still ignored")
 
+# Every role dispatch.sh will spawn. A role this regex does not know finishes
+# without waking the board at all.
+for role in ("plan", "build", "review"):
+    name = f"foreman/demo/PRA-7/{role}-1"
+    check(watch_agents._dispatched(name) == ("PRA-7", role, "1"),
+          f"a {role} agent matches DISPATCHED",
+          repr(watch_agents._dispatched(name)))
+
 if failures:
     sys.exit(1)
 PY

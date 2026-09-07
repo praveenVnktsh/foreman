@@ -6,6 +6,7 @@
 # a dispatched card starts. A spawn that precedes the move gets dispatched twice
 # by the next tick.
 #
+#   dispatch.sh --ticket MUR-42 --role plan   --attempt 1 --prompt-file plan.md
 #   dispatch.sh --ticket MUR-42 --role build  --attempt 1 --prompt-file brief.md
 #   dispatch.sh --ticket MUR-42 --role review --attempt 1 --slot a \
 #               --ref <pr-head-sha> --prompt-file review.md
@@ -34,7 +35,8 @@ while [[ $# -gt 0 ]]; do
 done
 
 [[ -n "$TICKET" ]] || die "--ticket is required"
-[[ "$ROLE" == "build" || "$ROLE" == "review" ]] || die "--role must be build or review"
+[[ "$ROLE" == "plan" || "$ROLE" == "build" || "$ROLE" == "review" ]] \
+  || die "--role must be plan, build or review"
 [[ -n "$ATTEMPT" ]] || die "--attempt is required"
 [[ -n "$PROMPT_FILE" && -r "$PROMPT_FILE" ]] || die "--prompt-file must be readable"
 
@@ -142,13 +144,30 @@ target's board.toml (MAX_CONCURRENT) or this machine's boards.toml (priority)."
   fi
 fi
 
-if [[ "$ROLE" == "build" ]]; then
-  WORKTREE="$(worktree_path "$TICKET")"
-  MODEL="$BUILD_MODEL"
-else
-  WORKTREE="$(worktree_path "${TICKET}-${ROLE}-${ATTEMPT}${SLOT}")"
-  MODEL="$REVIEW_MODEL"
-fi
+# The model follows the STAGE, not the machine and not a global default. See
+# PLAN_MODEL in config.sh for why the plan gets the strongest model and the
+# build agents that execute it do not.
+#
+# A table rather than a chain: there are three roles now, each naming one model
+# and one worktree shape, and a fourth would be one more row. `plan` and
+# `build` both work on the card's own branch, cut from origin/main, because the
+# plan is committed and pushed on that branch and `reconcile.py plan_pushed`
+# asks origin for exactly it. A reviewer never writes to the branch, so it gets
+# a throwaway worktree detached at the head it is reading.
+case "$ROLE" in
+  plan)
+    WORKTREE="$(worktree_path "$TICKET")"
+    MODEL="$PLAN_MODEL"
+    ;;
+  build)
+    WORKTREE="$(worktree_path "$TICKET")"
+    MODEL="$BUILD_MODEL"
+    ;;
+  review)
+    WORKTREE="$(worktree_path "${TICKET}-${ROLE}-${ATTEMPT}${SLOT}")"
+    MODEL="$REVIEW_MODEL"
+    ;;
+esac
 
 # Resolve an agent by its deterministic name. This is what makes the sidecar
 # disposable: the name is derivable, so the session id never has to be remembered.
@@ -214,7 +233,7 @@ fi
 # Creating a worktree touches shared git metadata, so serialize it the way
 # builds.locks does. `claude -w` would create the worktree LOCKED, which
 # `git worktree prune` can never reap — so add it explicitly instead.
-[[ "$ROLE" == "build" || -n "$REF" ]] || die "--ref is required for a review agent"
+[[ "$ROLE" != "review" || -n "$REF" ]] || die "--ref is required for a review agent"
 mkdir -p "$(dirname "$WORKTREE")"
 export REPO TICKET WORKTREE ROLE REF
 # `branch_name` has to be exported as a FUNCTION, not just called before this
@@ -229,10 +248,10 @@ export -f branch_name
     git -C "$REPO" worktree remove -f -f "$WORKTREE" 2>/dev/null || true
   fi
   git -C "$REPO" worktree prune
-  if [[ "$ROLE" == "build" ]]; then
-    git -C "$REPO" worktree add --quiet -B "$(branch_name "$TICKET")" "$WORKTREE" origin/main
-  else
+  if [[ "$ROLE" == "review" ]]; then
     git -C "$REPO" worktree add --quiet --detach "$WORKTREE" "$REF"
+  else
+    git -C "$REPO" worktree add --quiet -B "$(branch_name "$TICKET")" "$WORKTREE" origin/main
   fi
 ' || die "could not create worktree $WORKTREE (exit $?)"
 
@@ -240,7 +259,8 @@ export -f branch_name
 # needs before its test command can run at all -- against the worktree just cut
 # from origin/main, before any agent sees it. Build only: a review worktree
 # never builds anything, it reads a diff with `gh pr diff`, so paying a second
-# `bootstrap.command` per reviewer would buy nothing.
+# `bootstrap.command` per reviewer would buy nothing. A plan agent reads the
+# code and draws a graph, and runs no tests, so it pays nothing either.
 #
 # This gates instead of warning, same as the preflight check above and for the
 # same reason. An agent dropped into a worktree whose dependencies never

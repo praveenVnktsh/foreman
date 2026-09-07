@@ -230,6 +230,7 @@ table says what each knob *means* and `config.sh` says what it *is*:
     REVIEWERS_PER_ROUND "$REVIEWERS_PER_ROUND" STALL_MINUTES "$STALL_MINUTES" \
     MAX_FOLLOWUPS "$MAX_FOLLOWUPS" HOST_MAX_CONCURRENT "$HOST_MAX_CONCURRENT" \
     HOST_SLOT_STALE_MINUTES "$HOST_SLOT_STALE_MINUTES" \
+    PLAN_MODEL "$PLAN_MODEL" BUILD_MODEL "$BUILD_MODEL" REVIEW_MODEL "$REVIEW_MODEL" \
     BOARD_DRY_RUN "${BOARD_DRY_RUN:-unset}" )
 ```
 
@@ -249,6 +250,7 @@ A number carried from one slice into the next is the previous board's answer.
 | `MIN_FREE_*`, `PROBE_*`, `QUICK_PROBE_MB` | environment thresholds enforced by `preflight.py` — declared per-target in `board.toml`'s `[limits]`, not here. **foreman's own defaults are sized for foreman's own cheap suite**; a target with a heavy build (a real test suite, a large `node_modules`, …) that declares no `[limits]` silently inherits them and can pass this preflight while still dying mid-build the way two consecutive attempts on one card did on 2026-08-02 — see `bin/contract.py`. |
 | `HOST_MAX_CONCURRENT` | cards holding a slot, summed across **every** board on this machine |
 | `HOST_SLOT_STALE_MINUTES` | how long a card may go without a fresh `history.jsonl` entry before `--host-slots` stops counting it even with no `released` marker — a backstop, not the primary release mechanism |
+| `PLAN_MODEL`, `BUILD_MODEL`, `REVIEW_MODEL` | the model each dispatched role runs on — see *One model per stage* below |
 | `BOARD_DRY_RUN` | print every mutation instead of performing it |
 
 `MAX_CONCURRENT` counts **cards, not processes** — a card in review adds up to
@@ -267,6 +269,37 @@ at `Done` and at both `board-failed` exits, see steps 2, 3 and 5 — or, failing
 that, once `HOST_SLOT_STALE_MINUTES` has passed with no new entry at all. The
 marker is what should release a slot; the timer is what keeps a missed marker
 from wedging every board on the machine forever.
+
+### One model per stage
+
+**The model follows the stage, not the board and not one global default.**
+`dispatch.sh` reads it from `--role`, so nothing at a call site chooses a model
+and no dispatch can be given the wrong one by omission:
+
+| `--role` | Knob | What that agent does |
+|---|---|---|
+| `plan` | `PLAN_MODEL` | draws the change as one graph with the `graphplan` skill |
+| `build` | `BUILD_MODEL` | executes the plan, runs the tests, opens the pull request |
+| `review` | `REVIEW_MODEL` | reads a pushed diff adversarially |
+
+Read the values from `config.sh`, the way you read every other knob above. What
+this section fixes is the *shape*: the plan gets the strongest model, and the
+build is capped below it.
+
+**The plan is where the strongest model earns its cost.** It is drawn once,
+before any code exists, and every build agent afterwards is only as good as the
+graph it was handed — a node whose label is wrong is wrong in every file that
+node owns. `skills/graphplan/SKILL.md` therefore caps a node's own tier at
+`opus` and forbids `fable` as a node tier: the strongest model is spent on the
+design, not on typing it out.
+
+**`--role plan` is wiring, and step 6 does not dispatch it yet.** The build
+agent still plans inside its own session (step 2), so a card planned that way is
+planned at `BUILD_MODEL`. A plan agent works on the card's own branch, cut from
+`origin/main`, so the plan it pushes is exactly the evidence step 2 reads — but
+a `--role build` dispatched after it resets that branch to `origin/main` and
+discards the pushed plan. Splitting the stage into two dispatches needs the
+build to cut from the pushed branch instead, and that is a card of its own.
 
 ## Scope
 

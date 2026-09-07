@@ -177,6 +177,27 @@ PLAN_DIR="${PLAN_DIR-docs/plans}"
 
 MAX_BUDGET_USD="${MAX_BUDGET_USD:-}"
 
+# One model per STAGE, because the three stages need different things.
+#
+# The PLAN is where the strongest model is spent. It is drawn once, before any
+# code exists, and every build agent afterwards is only as good as the graph it
+# was handed: a node whose label is wrong is wrong in every file that node
+# owns. `skills/graphplan/SKILL.md` is the contract that plan is drawn under.
+#
+# The BUILD executes a plan whose design decisions are already made, so `opus`
+# is its ceiling and a graphplan node names `opus`, `sonnet` or `haiku` --
+# never `fable`. The inverse arrangement was proposed once and closed
+# unmerged: fable for every build node, opus for the planner. It spends the
+# strongest model on typing out a plan the weakest one drew.
+#
+# The REVIEW reads a diff nobody else will read again before it merges, and a
+# missed blocking finding is discovered in production. It stays at `opus`.
+#
+# `-`, not `:-`: `PLAN_MODEL=` must reach the CLI as an empty `--model`, which
+# Claude Code reads as "inherit this session's model" -- the way back to the
+# previous behaviour, and the same distinction every other override in this
+# file makes.
+PLAN_MODEL="${PLAN_MODEL-fable}"
 BUILD_MODEL="${BUILD_MODEL:-opus}"
 REVIEW_MODEL="${REVIEW_MODEL:-opus}"
 
