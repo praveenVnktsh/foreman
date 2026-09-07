@@ -25,26 +25,9 @@ fail=0
 ok()  { printf 'ok   %s\n' "$1"; }
 bad() { printf 'FAIL %s\n' "$1" >&2; fail=1; }
 
-# A stub standing where mermaid-cli stands. It records the mermaid it was given
-# and writes the minimum the script checks for.
-mkdir -p "$WORK/bin"
-cat >"$WORK/bin/mmdc" <<'STUB'
-#!/usr/bin/env bash
-set -euo pipefail
-in="" out=""
-while [[ $# -gt 0 ]]; do
-  case "$1" in
-    --input) in="$2"; shift 2 ;;
-    --output) out="$2"; shift 2 ;;
-    *) shift ;;
-  esac
-done
-cp "$in" "$MMDC_CAPTURE"
-printf '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 10 10"></svg>\n' >"$out"
-STUB
-chmod +x "$WORK/bin/mmdc"
-export PATH="$WORK/bin:$PATH"
-export MMDC_CAPTURE="$WORK/captured.mmd"
+# shellcheck source=lib/mmdc-stub.sh
+. "$ROOT/tests/lib/mmdc-stub.sh"
+install_mmdc_stub "$WORK/bin" "$WORK/captured.mmd"
 
 cat >"$WORK/two.md" <<'MD'
 # Title

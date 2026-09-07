@@ -225,7 +225,8 @@ table says what each knob *means* and `config.sh` says what it *is*:
 ( export FOREMAN_INSTANCE=<board>
   . ~/.foreman/install/skills/board/config.sh
   printf '%-22s %s\n' MAX_CONCURRENT "$MAX_CONCURRENT" \
-    MAX_BUILD_ATTEMPTS "$MAX_BUILD_ATTEMPTS" MAX_REVIEW_ROUNDS "$MAX_REVIEW_ROUNDS" \
+    MAX_BUILD_ATTEMPTS "$MAX_BUILD_ATTEMPTS" MAX_PLAN_ROUNDS "$MAX_PLAN_ROUNDS" \
+    MAX_REVIEW_ROUNDS "$MAX_REVIEW_ROUNDS" \
     REVIEWERS_PER_ROUND "$REVIEWERS_PER_ROUND" STALL_MINUTES "$STALL_MINUTES" \
     MAX_FOLLOWUPS "$MAX_FOLLOWUPS" HOST_MAX_CONCURRENT "$HOST_MAX_CONCURRENT" \
     HOST_SLOT_STALE_MINUTES "$HOST_SLOT_STALE_MINUTES" \
@@ -241,6 +242,7 @@ A number carried from one slice into the next is the previous board's answer.
 |---|---|
 | `MAX_CONCURRENT` | cards holding a slot, on THIS board |
 | `MAX_BUILD_ATTEMPTS` | build attempts before the card returns to `Backlog` |
+| `MAX_PLAN_ROUNDS` | plan revisions a `needs-plan` card gets before the card returns to `Backlog` |
 | `MAX_REVIEW_ROUNDS` | blocking rounds before the card returns to `Backlog` |
 | `REVIEWERS_PER_ROUND` | adversarial reviewers per round |
 | `STALL_MINUTES` | transcript silence before an agent is judged stalled |
@@ -334,12 +336,30 @@ filter is also what keeps one board's slice out of another board's cards.
 | `follow-ups-written` | `LABEL_FOLLOW_UPS_WRITTEN` | you | already emitted follow-ups; never again |
 | `needs-merge` | `LABEL_NEEDS_MERGE` | you | green and reviewed, high-risk — **the operator's** merge |
 | `board-failed` | `LABEL_BOARD_FAILED` | you | out of attempts, back in `Backlog`, needs re-triage |
+| `needs-plan` | `LABEL_NEEDS_PLAN` | **the operator** | park in `Plan` when the plan lands; **their** sign-off releases it — step 2 |
 
-These four are the ones the board owns and writes itself; `resolve-ids.py`
-creates any that do not already exist on that board's team, and writes their ids
-into that board's `ids.env` alongside the state ids below. Whatever other labels the target's own
-team uses for its own taxonomy belong to the operator — copy the parent card's
-one onto a follow-up when it still applies, never invent one.
+The first four are the board's own: you write them and a human reads them.
+**`needs-plan` runs the other way** — the operator writes it, only the board
+reads it, and it is the one label in this table you may never add or remove.
+Removing it is how the operator signs a plan off, so a board that could remove
+it would be approving its own plans.
+
+`resolve-ids.py` creates any of the five that do not already exist on that
+board's team, and writes their ids into that board's `ids.env` alongside the
+state ids below. It creates `needs-plan` too, despite the board never writing
+it: a label the operator is expected to apply has to exist before they can apply
+it, and a name typed by hand into a fresh team shows up as a card that silently
+never parks.
+
+**An empty `LABEL_NEEDS_PLAN` is a stale `ids.env`, not a board where nothing
+parks.** Every board resolved before this row existed has an `ids.env` without
+it. Re-resolve, exactly as [Scope](#scope) says for any id a slice needs and
+does not have — reading the empty value as "no card carries the label" builds
+straight through every card the operator asked to hold.
+
+Whatever other labels the target's own team uses for its own taxonomy belong to
+the operator — copy the parent card's one onto a follow-up when it still
+applies, never invent one.
 
 ## States
 
@@ -873,10 +893,74 @@ a single session, so everything below — phase classification, stalls,
 environmental write-offs, attempts, resume — reads identically in both columns.
 Only the column moves are new:
 
-- **card in `Plan`, `plan.state: present`, no pull request** → move it to
-  `In Progress` and leave the agent running. Its plan is pushed and it is now
-  writing code, so the move is bookkeeping and never a resume: the card keeps
-  its session and its attempt.
+- **card in `Plan`, `plan.state: present`, no pull request** → the plan has
+  landed, and one label decides what happens next. Read the card's labels from
+  Linear and match `LABEL_NEEDS_PLAN` from `ids.env` by **id**, never by name,
+  for the same reason the states are matched by id.
+
+  - **no `needs-plan`** → move it to `In Progress` and leave the agent running.
+    Its plan is pushed and it is now writing code, so the move is bookkeeping
+    and never a resume: the card keeps its session and its attempt. This is
+    what every unlabelled card does and it is unchanged.
+  - **`needs-plan`, nothing unconsumed** → **park it.** Post the plan to the
+    card as a comment ending in the footer `plancomments.py` printed, leave the
+    card in `Plan`, and say the slot is free:
+    `card_log <T> '{"action":"released","reason":"parked: awaiting plan sign-off"}'`.
+    Do this **once**, on the tick it parks — a card already parked with its plan
+    posted needs nothing further here. There is no timeout and no next step to
+    take: the card waits for the operator as long as it takes, exactly as a
+    `needs-merge` card does.
+  - **`needs-plan`, unconsumed comments, `plan_rounds` under
+    `MAX_PLAN_ROUNDS`** → the operator answered. Resume the same agent with
+    what they said, `round += 1`, and **the card does not move** — it is still
+    the plan being written, and nothing has been built to review.
+
+    ```bash
+    B=~/.foreman/install/skills/board
+    $B/brief.py replan --ticket <T> --comments-file /tmp/plan.json > /tmp/rp.md
+    $B/dispatch.sh --ticket <T> --role build --attempt <n> --resume --prompt-file /tmp/rp.md
+    card_log <T> '{"action":"resume","role":"plan","round":"<n>"}'
+    ```
+
+    Three things about those four lines. `/tmp/plan.json` is `plancomments.py`'s
+    own output, unedited — see
+    [The plan comment protocol](#the-plan-comment-protocol). **The `card_log`
+    line is not optional:** `dispatch.sh` logs one generic `resume` entry for
+    every resume of every kind, which cannot tell a plan round from a build
+    resumed to fix a failing check, so `reconcile.py` counts `plan_rounds` from
+    this explicit entry and nothing else — a round you do not log is a round
+    `MAX_PLAN_ROUNDS` never sees. And the card **released** its slot when it
+    parked, so this resume takes one again: check the ceilings first, as step 6
+    does before a fresh dispatch. `dispatch.sh` refuses at the ceiling however
+    it is called. If the worktree is gone, `--resume` refuses and the fallback
+    is a fresh dispatch **at the same attempt number** — nothing failed here, so
+    answering the operator must not cost the ticket a build attempt.
+  - **`plan_rounds` has reached `MAX_PLAN_ROUNDS`** → the conversation is not
+    converging. Back to `Backlog` with `board-failed`, the comments quoted, and
+    `card_log <T> '{"action":"released","reason":"board-failed: plan rounds exhausted"}'`
+    — exactly what `MAX_REVIEW_ROUNDS` does in step 3, for the same reason:
+    `board-failed` releases a slot as much as `Done` does, and the operator
+    re-triages. Count from `reconcile.py`'s `plan_rounds`, never from the
+    `round` a footer claims.
+
+  **Every other bullet in step 2 reads identically for a parked card** — phase
+  classification, stalls, environmental write-offs, attempts, deaths. A parked
+  card's agent is idle and alive, and telling those two apart is exactly what
+  `phase` is for. The one thing not to misread is the ended-turn verdict below:
+  a parked card has no pull request because nobody has asked it for one yet, so
+  "no PR → the attempt failed" is not the answer here. Charging an attempt for
+  waiting on a human is how a card reaches `board-failed` for the operator being
+  asleep.
+
+  **The gate is on this transition, not on the column.** All of the above is the
+  `no pull request` case. Nothing in this change tells a `needs-plan` card's
+  build agent to stop once its plan is pushed — `brief.py build` renders one
+  standing template for every card, and it says to implement — so an agent that
+  carries straight on opens a pull request, and the bullet two below moves the
+  card out of `Plan` on it, sign-off or no sign-off. Until the build brief itself
+  parks, `needs-plan` reliably holds only a card whose agent stopped at its plan.
+  Say so on the card if you see it happen; it is a hole in the gate, not a
+  decision the board made.
 - **`plan.state: unknown`** → change nothing, and say so in the report. The
   lookup failed, so this pass learned nothing about the plan.
 - **card in `Plan` that already has a pull request** → judge it on the pull
@@ -975,6 +1059,71 @@ is a **fresh dispatch**: drop `--resume`, and use the next attempt number if the
 failure was the ticket's or the same one if it was environmental. The agent loses
 its context and redoes the work, but the card keeps moving. Do not try to
 recreate the worktree by hand to save a resume.
+
+#### The plan comment protocol
+
+A parked card is a conversation, and the board has to know which half of it it
+has already answered. **It cannot tell by author.** Linear MCP writes as the
+operator's own user, so a comment the board posted and a comment the operator
+typed share an author, a workspace and a shape. There is no field on either one
+to discriminate on.
+
+A timestamp watermark is the obvious substitute, and it loses one specific race
+silently. The operator comments at 14:00 while the agent is still revising; the
+agent finishes and the board posts the new plan at 14:05; the 14:00 comment is
+now older than the newest board comment and is never read by anyone. For a
+column whose whole purpose is that the operator can talk to it, a dropped
+question is the worst failure available — and nobody is told.
+
+So **every plan comment the board posts declares what it consumed**, in a
+footer, and unconsumed input is any comment whose id appears in no footer on
+that card. That is derivable from the comment thread by itself: no sidecar, no
+clock, and no assumption about the order Linear returns rows in.
+
+`plancomments.py` computes it. It holds no Linear key and opens no socket — read
+the card's comments with Linear MCP, write them to a file as the JSON Linear
+returned, and pipe them in, the same way `queue.py` is fed:
+
+```bash
+B=~/.foreman/install/skills/board
+$B/plancomments.py < /tmp/comments.json > /tmp/plan.json
+```
+
+```json
+{"round": 2, "next_round": 3,
+ "unconsumed": [{"id": "d4e5f6", "body": "and the rollback?"}],
+ "footer": "<!-- foreman:plan round=3 consumed=d4e5f6 -->",
+ "plan_comments": ["a1b2c3"], "malformed_footers": []}
+```
+
+`/tmp/plan.json` is what `brief.py replan --comments-file` reads, verbatim — it
+takes `unconsumed` straight out of it, so nothing reshapes the file in between.
+
+**Append `footer` to the plan comment. Every time, including round 1, whose
+`consumed=` is empty.** A plan comment posted without its footer is not
+recognisable as the board's own, so the next tick returns it as unconsumed
+operator input — and the board hands the agent its own plan as though the
+operator had written it, on that tick and every tick after. The format is exact
+(`round=` then `consumed=`, in that order, no spaces in the id list) precisely
+because the board writes the string itself: paste what `plancomments.py`
+printed, never retype it.
+
+**`malformed_footers` is a report, not an error.** A `foreman:plan` marker the
+filter cannot parse consumes nothing, and the comment carrying it is still
+offered as operator input — an operator quoting a footer while answering it must
+not have their own words swallowed by the string they quoted. The cost of that
+choice is one comment repeated in one prompt; the cost of refusing instead is a
+card that can never be planned again because somebody pasted a marker into a
+reply. Those are not comparable. Name the ids in the report — it is the only
+place the problem is visible at all.
+
+**Two numbers say "round", and only one of them bounds the loop.** The `round`
+here is a label on a comment, counted from the footers Linear actually holds.
+`MAX_PLAN_ROUNDS` gates on `reconcile.py`'s `plan_rounds`, counted from the
+card's `history.jsonl` — the board's own record of the resumes it made. They
+diverge whenever a post fails after a resume or the operator deletes a plan
+comment, and the one that must bound the work is the board's, because it counts
+work done and a deleted comment cannot reset it.
 
 ### 3. Reconcile `In Review`
 
@@ -1306,6 +1455,26 @@ running; the only difference from `In Progress` is which stage that one agent is
 in. Counting only `In Progress` would let a board dispatch a second card into a
 machine that is already full of planners.
 
+**Except a card parked for plan sign-off**, which holds no agent — its plan is
+posted and only a human's decision is outstanding, exactly as a `needs-merge`
+card in `In Review`. Step 2 says so with
+`card_log <T> '{"action":"released","reason":"parked: awaiting plan sign-off"}'`,
+and `--host-slots` reads a card's **last** history entry, so that entry is what
+stops it counting. Two things follow from that:
+
+- **Once per park, not once per card.** A `needs-merge` park is terminal, so its
+  marker is written once and stands. A plan park is not: the operator comments,
+  step 2 resumes the agent, `dispatch.sh` appends a `resume` entry, and the card
+  holds a slot again — so when its revised plan lands it parks again, and the
+  next park needs its own `released` entry. Miss one and the card holds a slot
+  through every round after it.
+- **`HOST_SLOT_STALE_MINUTES` is the backstop for a marker some exit forgets,
+  not a licence to skip writing one** — and it matters more here than anywhere
+  else. Every other holder of a slot is an agent that will finish within the
+  hour; a card waiting on a plan sign-off can legitimately sit for days, so an
+  unwritten marker costs the whole machine that slot for the backstop's full
+  window, on a card nobody is building.
+
 **Recount here, after steps 2–5 have run.** A card that reached `Done` earlier in
 this same slice has already released its slot, and the whole point of running the
 phases in this order is that the next card starts now rather than a pass from
@@ -1490,7 +1659,11 @@ A tick where no board changed anything says so in one line and stops.
   `Plan`, then spawn — in that order, because a spawn that precedes the move
   gets dispatched twice. A resume takes no lock, because the card already holds
   one: it stays where steps 2 and 3 put it, `In Progress`, and never goes back
-  to `Plan`. Sending a reviewed card back to `Plan` hands it to step 2's "card
+  to `Plan`. The exception is a card parked for plan sign-off, which gave its
+  slot up when it parked — a `replan` resume takes one back and must pass the
+  ceilings like a fresh dispatch. It still moves no card: it answers the
+  operator in `Plan`, where the card already is. Sending a *reviewed* card back
+  to `Plan` is the thing that must never happen — it hands it to step 2's "card
   in `Plan` that already has a pull request" bullet, which starts review again
   at round 1. `MAX_REVIEW_ROUNDS` is then never reached, and a card with an open
   blocking finding cycles `In Review` → `Plan` → `In Review` instead of going

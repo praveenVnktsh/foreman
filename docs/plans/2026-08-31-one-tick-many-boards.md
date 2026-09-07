@@ -20,18 +20,18 @@ flowchart TD
     repos["target repositories<br/>each holds its own board.toml"]
   end
 
-  subgraph CFG["SYSTEM CONFIG · one machine, hand-edited"]
+  subgraph CFG["SYSTEM CONFIG · hand-edited"]
     direction LR
     boards["<b>c1 · ~/.foreman/boards.toml</b> · NEW<br/>every board, two facts each<br/>project id and local repo path<br/><i>opus · high</i>"]
     key["<b>c2 · ~/.foreman/linear.key</b> · CHANGE<br/>one credential per workspace<br/>was copied per board<br/><i>opus · high</i>"]
   end
 
-  subgraph CODE["THE INSTALL · ~/.foreman/install, one clone"]
+  subgraph CODE["THE INSTALL · ~/.foreman/install"]
     direction TB
     parse["<b>c3 · bin/boards.py</b> · NEW<br/>parses boards.toml, never sources it<br/>refuses unknown keys and duplicate names<br/><i>opus · high</i>"]
-    ctl["<b>c4 · bin/boardctl</b> · CHANGE<br/>adds, removes, halts and resumes a board<br/>edits one file instead of building a directory<br/><i>sonnet · high</i>"]
-    cfg["<b>c5 · config.sh</b> · CHANGE<br/>loads ONE board into the environment<br/>sourced per board in a subshell<br/>so the key never enters the caller<br/><i>opus · high</i>"]
-    ids["<b>c6 · bin/resolve-ids.py</b> · CHANGE<br/>resolves states and labels from the project<br/>writes a cache that may be absent<br/><i>opus · high</i>"]
+    ctl["<b>c4 · bin/boardctl</b> · CHANGE<br/>adds, removes, halts, resumes a board<br/>edits one file, not a directory<br/><i>sonnet · high</i>"]
+    cfg["<b>c5 · config.sh</b> · CHANGE<br/>loads one board per subshell<br/>key never reaches the caller<br/><i>opus · high</i>"]
+    ids["<b>c6 · bin/resolve-ids.py</b> · CHANGE<br/>resolves states, labels from the project<br/>writes a cache, maybe absent<br/><i>opus · high</i>"]
     sup["<b>c7 · supervise.sh</b> · CHANGE<br/>keeps exactly ONE tick alive<br/>was one per board<br/><i>sonnet · medium</i>"]
     skill["<b>c8 · SKILL.md</b> · CHANGE<br/>the tick walks every board, round-robin<br/>one slice each, per-board HALT<br/><i>opus · xhigh</i>"]
     rec["<b>c9 · reconcile.py</b> · CHANGE<br/>counts slots across all boards<br/>the machine ceiling<br/><i>sonnet · medium</i>"]

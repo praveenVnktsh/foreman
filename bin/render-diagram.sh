@@ -70,12 +70,19 @@ fi
 # drawing would refuse to grow past its natural size. The page overrides it in
 # CSS below rather than editing the SVG, so there is one place that decides how
 # the drawing is sized.
+#
+# Nothing on the page is selectable. A drag on the stage means pan, and the
+# browser answers that same drag by selecting the labels under the pointer: the
+# drawing ends up striped with highlight and every later drag starts from the
+# selection instead of the diagram. The copyable form of the drawing is the
+# mermaid block this page was rendered from.
 {
   printf '<!doctype html><meta charset="utf-8"><title>%s</title>\n' \
     "$(basename "${SRC%.*}")"
   cat <<'PAGE'
 <style>
-  html,body{margin:0;height:100%;background:#f8fafc;font:13px ui-sans-serif,-apple-system,Segoe UI,Helvetica,Arial,sans-serif;color:#334155}
+  html,body{margin:0;height:100%;background:#f8fafc;font:13px ui-sans-serif,-apple-system,Segoe UI,Helvetica,Arial,sans-serif;color:#334155;
+            -webkit-user-select:none;user-select:none}
   #stage{position:fixed;inset:0;overflow:hidden;cursor:grab}
   #stage.drag{cursor:grabbing}
   #art{transform-origin:0 0;will-change:transform}

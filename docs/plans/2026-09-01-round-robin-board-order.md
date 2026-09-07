@@ -23,16 +23,16 @@ flowchart TD
   subgraph MACHINE["THIS MACHINE · ~/.foreman"]
     direction TB
     decl["<b>m1 · boards.toml</b><br/>every board this machine runs<br/>read only by bin/boards.py<br/>name order, which is alphabetical"]
-    hist["<b>m2 · instances/&lt;board&gt;/cards/&lt;T&gt;/history.jsonl</b><br/>append-only, written by config.sh card_log<br/>every spawn, resume, void and released<br/>its newest 'at' is when a slice last<br/>moved something on that board"]
-    stamp["<b>m3 · instances/&lt;board&gt;/last-served</b> · NEW<br/>one UTC stamp, rewritten each slice<br/>written when the slice OPENS, before it<br/>knows whether the board has work<br/>a slice that moves nothing writes no<br/>history, so history alone cannot say<br/>a quiet board was ever reached"]
-    halt["<b>m4 · instances/&lt;board&gt;/HALT</b><br/>written by bin/boardctl halt<br/>a halted board is never served,<br/>so it sorts last rather than first"]
+    hist["<b>m2 · instances/&lt;board&gt;/cards/&lt;T&gt;/history.jsonl</b><br/>append-only, written by config.sh card_log<br/>every spawn, resume, void, released<br/>newest 'at' = board's last move"]
+    stamp["<b>m3 · instances/&lt;board&gt;/last-served</b> · NEW<br/>one UTC stamp, rewritten each slice<br/>written when the slice opens<br/>a quiet board still gets stamped"]
+    halt["<b>m4 · instances/&lt;board&gt;/HALT</b><br/>written by bin/boardctl halt<br/>a halted board is never served<br/>sorts last, not first"]
   end
 
   subgraph CODE["THE INSTALL · ~/.foreman/install"]
     direction TB
-    rec["<b>c1 · skills/board/reconcile.py</b> · CHANGE<br/>new modes --board-order and --served<br/>--served stamps one board as reached<br/>--board-order prints the order for one pass<br/>least recently served first, name breaks the tie<br/>halted last; served = the newer of the stamp<br/>and the newest 'at' across that board's cards<br/>a board with neither has never been reached<br/>and goes first; tolerant like --host-slots:<br/>a non-object history line never raises<br/><i>opus · high</i>"]
-    skill["<b>c2 · skills/board/SKILL.md</b> · CHANGE<br/>the pass order comes from --board-order<br/>never from the order boards.py --list printed<br/>step 0 opens every slice with --served<br/>the round-robin section says what starves<br/>without it: a budget spent mid-pass leaves<br/>the same tail unreached, tick after tick<br/><i>opus · high</i>"]
-    agents["<b>c3 · AGENTS.md</b> · CHANGE<br/>tool table gains two rows<br/>order the boards for a pass, and<br/>stamp the board a slice reached<br/>beside the row for queue.py<br/><i>sonnet · medium</i>"]
+    rec["<b>c1 · skills/board/reconcile.py</b> · CHANGE<br/>new modes: --board-order, --served<br/>least recently served first, halted last<br/><i>opus · high</i>"]
+    skill["<b>c2 · skills/board/SKILL.md</b> · CHANGE<br/>pass order comes from --board-order<br/>step 0 stamps slice with --served<br/><i>opus · high</i>"]
+    agents["<b>c3 · AGENTS.md</b> · CHANGE<br/>tool table gains two rows<br/>order a pass, stamp a board<br/><i>sonnet · medium</i>"]
     boards["<b>c4 · bin/boards.py</b><br/>the only reader of boards.toml<br/>--list prints every declared board"]
     queue["<b>c5 · skills/board/queue.py</b><br/>orders one board's Todo cards<br/>by the priority Linear carries"]
     cfg["<b>c6 · skills/board/config.sh</b><br/>card_log appends every history line<br/>stamps 'at' as UTC, one format"]
@@ -40,27 +40,27 @@ flowchart TD
     swp["<b>c8 · skills/board/sweep.sh</b><br/>reaps worktrees, releases the slot"]
   end
 
-  tick["<b>c9 · foreman/tick</b><br/>one agent, every board, a slice each<br/>holds no state, re-derives every fact"]
+  tick["<b>c9 · foreman/tick</b><br/>one agent, every board, one slice<br/>holds no state, re-derives every fact"]
 
   decl -->|declares every board to| boards
   boards -->|names the boards to| rec
-  hist -->|when a card last moved on each board| rec
-  stamp -->|when a slice last reached each board| rec
-  halt -->|which boards take no turn| rec
-  rec -->|stamps at the top of each slice| stamp
+  hist -->|last move, per board| rec
+  stamp -->|last reached, per board| rec
+  halt -->|which boards sit out| rec
+  rec -->|stamps each slice's start| stamp
   cfg -->|writes| hist
   disp -->|logs a spawn to| hist
   swp -->|logs a released to| hist
   skill -->|instructs| tick
   agents -->|points every agent at| rec
-  rec -->|names the pass order to| tick
-  tick -->|takes a slice per board, in that order| queue
-  queue -->|names the card to dispatch to| tick
+  rec -->|names the pass order| tick
+  tick -->|takes each board's slice| queue
+  queue -->|names the dispatch card| tick
   tick -->|dispatches through| disp
   tick -->|reaps through| swp
-  lin -->|the cards in each slice| tick
+  lin -->|the cards each slice| tick
   disp -->|worktree in| repos
-  disp -->|opens a pull request on| gh
+  disp -->|opens a pull request| gh
 
   classDef new  fill:#fff7ed,stroke:#ea580c,stroke-width:2.5px,color:#7c2d12
   classDef chg  fill:#fef9c3,stroke:#ca8a04,stroke-width:2px,color:#713f12
