@@ -31,15 +31,6 @@ import subprocess
 import sys
 from typing import NoReturn
 
-# The footer's shape is validated by the module that DEFINES it, never by a
-# second copy of the regex here. plancomments.py decides which comments on a
-# card are the board's own plan comments, so a footer it cannot parse means the
-# comment the plan agent posts is not a plan comment: the card sits in the plan
-# column with its plan already posted, and the board reads that plan back as
-# operator input on every tick after. Both files live in this directory, so
-# this import points one way and adds no dependency.
-import plancomments
-
 MAX_FINDING_CHARS = 2000
 
 # The cap on a multi-line block — a ticket body, a plan graph. It is ten times
@@ -218,6 +209,20 @@ def _ticket_body(body_file: str | None) -> str:
 
 
 def plan(args) -> str:
+    # Imported HERE, not at module scope, so this one mode's dependency is not
+    # every mode's. The footer's shape is validated by the module that DEFINES
+    # it, never by a second copy of the regex: plancomments.py decides which
+    # comments on a card are the board's own plan comments, so a footer it
+    # cannot parse means the comment the plan agent posts is not a plan
+    # comment -- the card sits in the plan column with its plan already posted,
+    # and the board reads that plan back as operator input on every tick after.
+    #
+    # At module scope this import made a partial installation fail every brief
+    # rather than this one. A board skill directory missing plancomments.py is
+    # not hypothetical -- one was found on 2026-09-08 -- and under it a review
+    # or ci-fix dispatch would die at import for a file it never needed.
+    import plancomments
+
     title = " ".join(args.title.split())
     body = _ticket_body(args.body_file)
     if not title and not body:
