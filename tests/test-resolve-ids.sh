@@ -128,7 +128,8 @@ cat >"$work_dir/happy.json" <<JSON
     {"id": "state-plan",       "name": "Plan",        "type": "started"},
     {"id": "state-inprogress", "name": "In Progress", "type": "started"},
     {"id": "state-inreview",   "name": "In Review",   "type": "started"},
-    {"id": "state-done",       "name": "Done",        "type": "completed"}
+    {"id": "state-done",       "name": "Done",        "type": "completed"},
+    {"id": "state-needshuman", "name": "Needs Human", "type": "started"}
   ],
   "labels": [
     {"id": "label-followup",         "name": "follow-up"},
@@ -161,10 +162,11 @@ if run_resolve "$STUB_URL"; then
         "$(read_id "$ids_env" STATE_IN_PLAN)" == "state-plan" && \
         "$(read_id "$ids_env" STATE_IN_PROGRESS)" == "state-inprogress" && \
         "$(read_id "$ids_env" STATE_IN_REVIEW)" == "state-inreview" && \
-        "$(read_id "$ids_env" STATE_MERGED)" == "state-done" ]]; then
-    ok "resolves the six states by name"
+        "$(read_id "$ids_env" STATE_MERGED)" == "state-done" && \
+        "$(read_id "$ids_env" STATE_NEEDS_HUMAN)" == "state-needshuman" ]]; then
+    ok "resolves the seven states by name"
   else
-    not_ok "resolves the six states by name: $(cat "$ids_env")"
+    not_ok "resolves the seven states by name: $(cat "$ids_env")"
   fi
 
   created_id="$(read_id "$ids_env" LABEL_BOARD_FAILED)"
@@ -294,7 +296,8 @@ cat >"$work_dir/bad_state_type.json" <<JSON
     {"id": "state-plan",       "name": "Plan",        "type": "started"},
     {"id": "state-inprogress", "name": "In Progress", "type": "started"},
     {"id": "state-inreview",   "name": "In Review",   "type": "started"},
-    {"id": "state-done",       "name": "Done",        "type": "completed"}
+    {"id": "state-done",       "name": "Done",        "type": "completed"},
+    {"id": "state-needshuman", "name": "Needs Human", "type": "started"}
   ],
   "labels": []
 }
@@ -331,7 +334,8 @@ cat >"$work_dir/no_plan_state.json" <<'JSON'
     {"id": "state-todo",       "name": "Todo",        "type": "unstarted"},
     {"id": "state-inprogress", "name": "In Progress", "type": "started"},
     {"id": "state-inreview",   "name": "In Review",   "type": "started"},
-    {"id": "state-done",       "name": "Done",        "type": "completed"}
+    {"id": "state-done",       "name": "Done",        "type": "completed"},
+    {"id": "state-needshuman", "name": "Needs Human", "type": "started"}
   ],
   "labels": []
 }
@@ -362,7 +366,8 @@ cat >"$work_dir/label_mismatch.json" <<JSON
     {"id": "state-plan",       "name": "Plan",        "type": "started"},
     {"id": "state-inprogress", "name": "In Progress", "type": "started"},
     {"id": "state-inreview",   "name": "In Review",   "type": "started"},
-    {"id": "state-done",       "name": "Done",        "type": "completed"}
+    {"id": "state-done",       "name": "Done",        "type": "completed"},
+    {"id": "state-needshuman", "name": "Needs Human", "type": "started"}
   ],
   "labels": [
     {"id": "label-followup", "name": "follow-up"}
@@ -423,7 +428,8 @@ cat >"$work_dir/fails_third_query.json" <<JSON
     {"id": "state-plan",       "name": "Plan",        "type": "started"},
     {"id": "state-inprogress", "name": "In Progress", "type": "started"},
     {"id": "state-inreview",   "name": "In Review",   "type": "started"},
-    {"id": "state-done",       "name": "Done",        "type": "completed"}
+    {"id": "state-done",       "name": "Done",        "type": "completed"},
+    {"id": "state-needshuman", "name": "Needs Human", "type": "started"}
   ],
   "labels": [
     {"id": "label-followup",         "name": "follow-up"},
@@ -496,7 +502,8 @@ cat >"$work_dir/leak_check.json" <<'JSON'
     {"id": "state-plan",       "name": "Plan",        "type": "started"},
     {"id": "state-inprogress", "name": "In Progress", "type": "started"},
     {"id": "state-inreview",   "name": "In Review",   "type": "started"},
-    {"id": "state-done",       "name": "Done",        "type": "completed"}
+    {"id": "state-done",       "name": "Done",        "type": "completed"},
+    {"id": "state-needshuman", "name": "Needs Human", "type": "started"}
   ],
   "labels": []
 }

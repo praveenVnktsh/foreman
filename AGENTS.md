@@ -20,13 +20,14 @@
 
 | Stage | Do | Done when |
 |---|---|---|
-| Plan | invoke `graphplan` | the graph is committed and pushed on your branch |
+| Plan | invoke `graphplan` | the graph is posted to the Linear card as a comment |
 | Implement | execute the graph | every node is done |
 | Test | run the target's own test command | it ran, and it passed |
 
-- The board watches your branch, not your worktree. Your card sits in `Plan`
-  until the pushed commit adds a file under `docs/plans/`, so a plan you never
-  push is a card that never moves.
+- The board reads your card's comments, not your branch. Your card sits in
+  `Plan` until your graph lands as a comment on it, so a plan you never post is
+  a card that never moves. Post it and stop: the plan stage pushes no commit and
+  opens no pull request.
 - **Invoke `graphplan` as a skill, not from memory.** Its instructions authorise
   the Workflow tool, so invoking it is what makes stage 2 run in parallel. Reading
   the file without invoking it leaves the work serial.

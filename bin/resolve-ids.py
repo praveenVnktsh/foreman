@@ -62,7 +62,12 @@ DEFAULT_API_URL = "https://api.linear.app/graphql"
 # name again.
 #
 # The rows are in board order, so the list reads as the walk a card takes. A
-# new state belongs at its place in that walk, not appended at the end.
+# new state belongs at its place in that walk, not appended at the end --
+# except STATE_NEEDS_HUMAN, which is not a stop ON the walk at all. A card
+# can land there from a build, a review or a plan that ran out of attempts,
+# from any point in the walk, and the board never reads a card out of it or
+# moves one back in -- an operator does that by hand. It is placed last
+# because it is where the walk stops, not a step in it.
 STATE_ROLES = [
     ("STATE_PLANNED", "Backlog"),
     ("STATE_TO_PICK_UP", "Todo"),
@@ -70,6 +75,7 @@ STATE_ROLES = [
     ("STATE_IN_PROGRESS", "In Progress"),
     ("STATE_IN_REVIEW", "In Review"),
     ("STATE_MERGED", "Done"),
+    ("STATE_NEEDS_HUMAN", "Needs Human"),
 ]
 
 # The to-pick-up state is the one the board is never allowed to move a card
@@ -256,7 +262,7 @@ def resolve_project(api_url: str, key: str, team_id: str, name: str) -> str:
 
 
 def resolve_states(api_url: str, key: str, team_id: str) -> dict:
-    """Resolve the six workflow states, and verify the to-pick-up one.
+    """Resolve the seven workflow states, and verify the to-pick-up one.
 
     Returns {role: id} for every role in STATE_ROLES.
     """
@@ -268,7 +274,9 @@ def resolve_states(api_url: str, key: str, team_id: str) -> dict:
     # leaves the operator to work out that the fix is a column in Linear, and
     # it stops at the first absence, so a team missing two columns costs two
     # runs to learn both. Adding the Plan column made that concrete -- every
-    # board that existed before it hit this path.
+    # board that existed before it hit this path -- and adding Needs Human
+    # repeats it exactly: every board that existed before THIS change hits
+    # this path too, once, until its operator creates the column by hand.
     present = {node.get("name") for node in nodes}
     missing = [name for _, name in STATE_ROLES if name not in present]
     if missing:

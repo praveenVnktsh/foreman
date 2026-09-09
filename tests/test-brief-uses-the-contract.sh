@@ -92,8 +92,15 @@ TICKET="ACME-7"
 body_file="$work/ticket-body.md"
 printf 'Do the thing.\n' > "$body_file"
 
+# The plan now reaches the build agent through its prompt rather than through a
+# file on the card's branch, so a build brief without one is a build with
+# nothing to execute. `--plan-file` is required for exactly that reason, and
+# this fixture is what a plan agent posted to the card.
+plan_file="$work/plan.md"
+printf 'PLANGRAPHSENTINEL\n' > "$plan_file"
+
 prompt="$(ask_brief build --ticket "$TICKET" --title "Widgetize the frobnicator" \
-  --body-file "$body_file")"
+  --body-file "$body_file" --plan-file "$plan_file")"
 
 case "$prompt" in
   *'make check'*) ok "the build prompt names the contract's test command" ;;
@@ -167,26 +174,23 @@ case "$prompt" in
 $prompt" ;;
 esac
 
-# The plan directory is asked of config.sh, which owns that one path -- not
-# re-typed here. A prompt naming one directory and a board check reading
-# another is the drift that leaves a card stuck in the Plan column forever.
-# The fixture's board.toml declares no plan directory, so what arrives here is
-# config.sh's own default travelling the whole way to the prompt.
-expected_plan_dir="$(env HOME="$home" FOREMAN_INSTANCE=demo \
-  bash -c ". '$board_dir/config.sh' >/dev/null; printf '%s' \"\$PLAN_DIR\"" _)"
-[[ -n "$expected_plan_dir" ]] || bad "could not read PLAN_DIR from config.sh itself"
-if [[ "$prompt" == *"$expected_plan_dir"* ]]; then
-  ok "the build prompt names config.sh's plan directory ($expected_plan_dir)"
+# The plan itself travels into the prompt. It was drawn by a separate plan
+# agent and posted to the Linear card; the build agent never sees the card, so
+# a plan that does not reach the prompt is a plan nobody executes.
+if [[ "$prompt" == *"PLANGRAPHSENTINEL"* ]]; then
+  ok "the build prompt carries the plan it was handed"
 else
-  bad "the build prompt does not name the plan directory config.sh declares (expected $expected_plan_dir):
+  bad "the build prompt does not carry the plan passed with --plan-file:
 $prompt"
 fi
 
-if [[ "$prompt" == *"before you write any implementation code"* \
-      && "$prompt" == *"out of the plan column"* ]]; then
-  ok "the build prompt requires the plan to be pushed before any implementation code, and says why"
+# The build agent must not re-plan. The graph is already drawn and already
+# signed off where the operator asked for a sign-off, so a build that plans
+# again is a build that quietly replaces the plan a human approved.
+if [[ "$prompt" == *"execute"* ]]; then
+  ok "the build prompt tells the agent to execute the plan it was given"
 else
-  bad "the build prompt does not require the plan pushed before implementation, or does not say what the push buys:
+  bad "the build prompt does not tell the agent to execute the given plan:
 $prompt"
 fi
 
