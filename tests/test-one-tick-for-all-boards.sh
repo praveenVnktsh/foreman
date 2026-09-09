@@ -65,7 +65,7 @@ printf '#!/usr/bin/env bash\nexit 0\n' > "$work/bin/flock"; chmod +x "$work/bin/
 run_supervise() {
   env -u FOREMAN_INSTANCE HOME="$home" FOREMAN_HOME="$fh" PATH="$work/bin:$PATH" \
     SUPERVISE_LOCK="$work/supervise.lock" \
-    "$root/skills/board/supervise.sh" 2>&1
+    "$root/skills/board/supervise.sh" "$@" 2>&1
 }
 
 # --- no boards: nothing to supervise, and nothing started
@@ -80,6 +80,19 @@ case "$out" in
   *"no boards declared"*) ok "says why it stood down" ;;
   *) bad "stood down without saying why: $out" ;;
 esac
+
+# A typo is refused on a machine with no boards, exactly as on one with boards.
+# Argument validation used to sit BELOW the board lookup, so `--restrat` on a
+# fresh install reached the stand-down first and answered a misspelled flag with
+# the same reassuring exit 0 a correct invocation gets. How many boards exist
+# has nothing to do with whether the flag was spelled correctly.
+: >"$spawn_log"
+out="$(run_supervise --restrat)"; rc=$?
+if [[ $rc -eq 2 && ! -s "$spawn_log" ]]; then
+  ok "an unrecognised argument is refused even with no boards declared"
+else
+  bad "--restrat exited $rc on a machine with no boards: $out"
+fi
 
 # --- two boards: exactly one tick, and it carries no board in its name
 printf '[boards.alpha]\nrepo = "%s"\n[boards.beta]\nrepo = "%s"\n' \

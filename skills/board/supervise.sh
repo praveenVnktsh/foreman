@@ -22,6 +22,34 @@ set -euo pipefail
 SKILL_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 INSTALL_ROOT="$(dirname -- "$(dirname -- "$SKILL_DIR")")"
 
+# WHAT THIS SCRIPT WAS ASKED TO DO, decided before anything else is resolved.
+#
+# This block sits above the board lookup on purpose. It used to sit below, so on
+# a machine with no boards declared -- a fresh install, or one whose boards.toml
+# has gone missing -- `supervise.sh --restrat` reached the "no boards declared"
+# early exit first and answered a typo with the same reassuring exit 0 a correct
+# invocation gets. Whether an argument is spelled correctly has nothing to do
+# with how many boards exist, so it is no longer answered by them.
+MODE="${1:-run}"
+
+# The usage block in this file's own header is the only copy. A second one in a
+# here-doc drifts the day a mode is added, and the operator who just mistyped a
+# flag is then shown the older of the two.
+usage() { sed -n 's/^#   \(supervise\.sh.*\)/  \1/p' "${BASH_SOURCE[0]}"; }
+
+# Refuse an argument this script does not know, rather than running it.
+# `MODE="${1:-run}"` on its own sent every typo -- `--restrat` -- into run mode,
+# which starts or restarts a tick the operator was not asking about. The flags
+# most likely to be mistyped are the two that change the most.
+case "$MODE" in
+  run|--status|--stop|--restart) ;;
+  *)
+    printf 'foreman: supervise.sh: unrecognised argument %s\n' "$MODE" >&2
+    usage >&2
+    exit 2
+    ;;
+esac
+
 # There is ONE tick for this machine, walking every board a slice at a time, so
 # this watchdog is no longer run once per board and needs no board of its own.
 #
@@ -52,6 +80,8 @@ fi
 
 # shellcheck source=config.sh
 source "$SKILL_DIR/config.sh"
+
+log() { printf '%s supervise: %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$*"; }
 
 # The lock is MACHINE-level, not board-level, and that is load-bearing now.
 # It used to be $BOARD_HOME/supervise.lock, which was right when each board had
@@ -88,27 +118,6 @@ export PATH="$HOME/.local/bin:/usr/local/bin:/usr/bin:/bin:/snap/bin:$PATH"
 [[ "$TICK_DEAD_MINUTES" -gt "$TICK_INTERVAL_MINUTES" ]] \
   || die "TICK_DEAD_MINUTES ($TICK_DEAD_MINUTES) must exceed TICK_INTERVAL_MINUTES ($TICK_INTERVAL_MINUTES)"
 
-MODE="${1:-run}"
-
-log() { printf '%s supervise: %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$*"; }
-
-# The usage block in this file's own header is the only copy. A second one in a
-# here-doc drifts the day a mode is added, and the operator who just mistyped a
-# flag is then shown the older of the two.
-usage() { sed -n 's/^#   \(supervise\.sh.*\)/  \1/p' "${BASH_SOURCE[0]}"; }
-
-# Refuse an argument this script does not know, rather than running it.
-# `MODE="${1:-run}"` on its own sent every typo -- `--restrat` -- into run mode,
-# which starts or restarts a tick the operator was not asking about. The flags
-# most likely to be mistyped are the two that change the most.
-case "$MODE" in
-  run|--status|--stop|--restart) ;;
-  *)
-    printf 'foreman: supervise.sh: unrecognised argument %s\n' "$MODE" >&2
-    usage >&2
-    exit 2
-    ;;
-esac
 
 # How often a drain or a start-confirmation re-reads the registry. A grain, not
 # a policy: the bounds it is counted against are TICK_DRAIN_SECONDS and
@@ -124,7 +133,18 @@ poll_step() { # <seconds already waited> <bound>
   if [[ "$left" -lt "$POLL_SECONDS" ]]; then printf '%s' "$left"; else printf '%s' "$POLL_SECONDS"; fi
 }
 
-# One JSON object describing the newest agent by our name, or an empty object.
+# One JSON object describing THE tick, or an empty object.
+#
+# "The tick" is the newest agent of our name that is NOT stopped, and only when
+# there is none, the newest overall -- so an operator reading --status sees the
+# agent that is actually running the board, and a stopped corpse with a later
+# startedAt cannot masquerade as it. Picking the newest regardless of state was
+# a real fault, not a cosmetic one: a live tick-0 behind a stopped tick-1 made
+# run mode take its "the tick is stopped" branch and start a SECOND live tick.
+#
+# `live_ticks` counts them, because one is the only correct number and every
+# caller has to be able to see that it is wrong.
+#
 # Health is judged on the transcript's mtime, the same evidence reconcile.py
 # uses, because `state` alone cannot tell "waiting for the next tick" from
 # "wedged mid-turn".
@@ -146,8 +166,9 @@ if not isinstance(agents,list): sys.exit(3)
 mine=[a for a in agents if isinstance(a,dict) and a.get("name")==want]
 if not mine:
     print("{}"); raise SystemExit
-# --bg --resume forks and inherits the name, so several may share it. Newest wins.
-a=max(mine, key=lambda x: x.get("startedAt") or 0)
+# --bg --resume forks and inherits the name, so several may share it.
+live=[a for a in mine if a.get("state")!="stopped"]
+a=max(live or mine, key=lambda x: x.get("startedAt") or 0)
 cwd=a.get("cwd") or ""; sid=a.get("sessionId") or ""
 idle=None
 if cwd and sid:
@@ -158,18 +179,20 @@ print(json.dumps({
   "id":a.get("id"), "sessionId":sid, "state":a.get("state"),
   "idle_minutes":idle,
   "age_hours": round((time.time()-started/1000)/3600,2) if started else None,
+  "live_ticks": len(live),
 }))
 ' "$TICK_AGENT_NAME"
 }
 
 # EVERY agent named $TICK_AGENT_NAME, one "<id><TAB><state>" per line.
 #
-# inspect() above reports only the NEWEST, which is the right answer for "is the
-# board healthy" and the wrong one for "did the tick I just stopped go away".
-# A tick that survived a failed `claude stop` sits behind the newer replacement
-# and inspect() never mentions it again -- so the machine runs two ticks against
-# one HOST_MAX_CONCURRENT, and every later fire reports the healthy one.
-# Answering "is the old tick still alive" needs the whole list.
+# THE TICK IS A SET, and every gesture that changes it acts on the whole set.
+# inspect() above collapses that set to one agent, which is what an operator
+# wants to read and the wrong thing to stop: a restart that stopped only the
+# agent inspect() named left every other live one running and reported success.
+# Several agents can genuinely share the name -- inspect() records that
+# `--bg --resume` forks inherit it, and run mode used to manufacture the state
+# itself -- so this is the list every mutating path works from.
 tick_agents() {
   claude agents --json --all 2>/dev/null | python3 -c '
 import json,sys
@@ -186,17 +209,9 @@ for a in agents:
 ' "$TICK_AGENT_NAME"
 }
 
-# The id of a live tick in <listing> that is not <old id>, or nothing.
-replacement_tick_id() { # <tick_agents listing> <id of the tick that was stopped>
-  printf '%s\n' "$1" | awk -F'\t' -v old="$2" \
-    '$1 != "" && $2 != "stopped" && $1 != old { print $1; exit }'
-}
-
-# Whether the tick that was asked to stop is still running.
-old_tick_is_live() { # <tick_agents listing> <id of the tick that was stopped>
-  [[ -n "$2" && "$2" != "None" ]] || return 1
-  printf '%s\n' "$1" | awk -F'\t' -v old="$2" \
-    '$1 == old && $2 != "stopped" { found = 1 } END { exit !found }'
+# The ids in a listing that are not stopped, one per line.
+live_tick_ids() { # <tick_agents listing>
+  printf '%s\n' "$1" | awk -F'\t' '$1 != "" && $2 != "stopped" { print $1 }'
 }
 
 field() { printf '%s' "$1" | python3 -c 'import json,sys; print(json.load(sys.stdin).get(sys.argv[1]) if sys.stdin else "")' "$2" 2>/dev/null || printf 'None'; }
@@ -229,19 +244,23 @@ read_registry() {
   IDLE="$(field "$INFO" idle_minutes)"
   AGE="$(field "$INFO" age_hours)"
   ID="$(field "$INFO" id)"
+  LIVE_TICKS="$(field "$INFO" live_ticks)"
+  [[ "$LIVE_TICKS" != "None" ]] || LIVE_TICKS=0
 }
 
+# Ask ONE tick to stop. stop_ticks() is the only caller and owns both the dry
+# run and the proof that it worked.
 stop_agent() {
   local id="$1"
   [[ -n "$id" && "$id" != "None" ]] || return 0
-  if [[ -n "$BOARD_DRY_RUN" ]]; then log "DRY RUN: would stop $TICK_AGENT_NAME ($id)"; return 0; fi
   # `|| true` because a non-zero exit here is not the answer. `claude stop` is
   # asynchronous, it exits non-zero on an agent that was already gone, and it
   # can fail outright against a daemon that is restarting. What the tick
-  # actually did is read back out of the registry by confirm_stopped(), so this
-  # line says what was ASKED and never that it worked -- it used to log
-  # "stopped foreman/tick" over a `claude stop` that exited 1 and changed
-  # nothing, which is how a second tick came to be started beside a live one.
+  # actually did is read back out of the registry by stop_ticks(), which is also
+  # what re-issues this, so the line says what was ASKED and never that it
+  # worked -- it used to log "stopped foreman/tick" over a `claude stop` that
+  # exited 1 and changed nothing, which is how a second tick came to be started
+  # beside a live one.
   claude stop "$id" >/dev/null 2>&1 \
     || log "claude stop $id exited non-zero; the confirmation below decides whether the tick went away"
   log "asked $TICK_AGENT_NAME ($id) to stop"
@@ -293,13 +312,21 @@ start_agent() {
   log "started $TICK_AGENT_NAME: $prompt"
 }
 
-# Every live per-card agent on this machine, one "<name><TAB><state>" per line.
-# A card agent is any `foreman/` name in the registry that is not the tick.
+# EVERY per-card agent on this machine, stopped ones included, one
+# "<name><TAB><state>" per line. A card agent is any `foreman/` name in the
+# registry that is not the tick.
 #
 # A restart must leave all of them running, which is only true because
 # dispatch.sh parents each one to the shared `claude daemon` rather than to the
 # tick. They are listed before and after so an operator can read the log and see
 # for themselves that the restart touched nothing it should not have.
+#
+# STOPPED ROWS ARE KEPT even though log_cards() does not print them. They used
+# to be filtered out here, which erased the difference between an agent that
+# left the registry and one that is sitting in it stopped -- so the after-restart
+# report could only ever say "gone", and said it about an agent the restart had
+# stopped as readily as about one that finished. Filtering is a display concern
+# and belongs where the display is.
 card_agents() {
   claude agents --json --all 2>/dev/null | python3 -c '
 import json,sys
@@ -315,24 +342,23 @@ for a in agents:
     if not isinstance(a,dict): continue
     name=a.get("name") or ""
     state=a.get("state") or "?"
-    # A stopped agent is not in flight. It is a finished build the sweep has not
-    # reaped yet, and listing it would make the second list look identical
-    # forever -- exactly the evidence this listing exists to provide.
-    if state=="stopped": continue
     if name.startswith("foreman/") and name!=tick: print("%s\t%s"%(name,state))
 ' "$TICK_AGENT_NAME"
 }
 
+# Print the card agents that are IN FLIGHT. A stopped one is a finished build
+# the sweep has not reaped yet; printing it would make the second listing look
+# identical to the first forever, which is exactly the evidence this listing
+# exists to provide.
 log_cards() { # <when> <card_agents listing>
-  local when="$1" listing="$2" line
-  if [[ -z "${listing//[[:space:]]/}" ]]; then
-    log "$when: no card agents are running"
-    return 0
-  fi
+  local when="$1" listing="$2" line printed=""
   while IFS= read -r line; do
     [[ -n "$line" ]] || continue
+    [[ "${line#*$'\t'}" != "stopped" ]] || continue
     log "$when: card agent ${line%%$'\t'*} (${line#*$'\t'})"
+    printed="yes"
   done <<<"$listing"
+  [[ -n "$printed" ]] || log "$when: no card agents are running"
 }
 
 # Wait for the tick to finish the turn it is in, up to TICK_DRAIN_SECONDS.
@@ -364,56 +390,82 @@ drain_tick() {
   log "drain: $TICK_AGENT_NAME is still working after ${TICK_DRAIN_SECONDS}s; stopping it mid-turn, which is safe"
 }
 
-# Poll until the tick that was asked to stop is gone from the registry, or die.
+# Ask EVERY live tick to stop, and keep asking until the registry says none is
+# left. Returns 0 when they are all gone and 1 when any survives the bound.
 #
-# NOTHING HAS BEEN STARTED YET when this runs, and that ordering is the whole
-# safety property. `claude stop` is asynchronous and it can fail, so the answer
-# to "did it stop" is only ever in the registry. Starting a replacement before
-# reading that answer is what produced two live ticks: both then run
-# `/loop /board` against one machine-wide HOST_MAX_CONCURRENT, which is the
-# double-dispatch this script exists to prevent, and the survivor is invisible
-# because inspect() reports only the newest agent of that name.
+# It never dies. What to do about a tick that will not stop differs between an
+# operator's gesture, which nothing retries, and a timer fire, which retries in
+# TICK_INTERVAL_MINUTES -- so the decision belongs to the caller.
 #
-# Dying here leaves the machine with exactly the one tick it already had. That
-# is the safe failure: the board keeps ticking on the old agent, the operator is
-# told the restart did not happen, and a retry costs nothing.
-confirm_stopped() { # <id of the tick that was asked to stop>
-  local old_id="$1" waited=0 step listing
-  [[ -n "$old_id" && "$old_id" != "None" ]] || return 0
+# THE STOP IS RE-ISSUED ON EVERY POLL, not once at the top. `claude stop` is
+# asynchronous and it can fail outright, and the agent whose stop is slowest to
+# land is exactly the wedged one run mode exists to replace, so a single attempt
+# followed by a wait gave up on the one case that matters most.
+#
+# EVERY live tick, not the one inspect() named. Stopping only that one left any
+# other live agent of the same name running, and the caller then started a
+# replacement beside it -- two ticks running `/loop /board` against one
+# machine-wide HOST_MAX_CONCURRENT, which is the double-dispatch this script
+# exists to prevent.
+stop_ticks() {
+  local waited=0 step listing ids id attempted=""
+  if [[ -n "$BOARD_DRY_RUN" ]]; then
+    log "DRY RUN: would stop every live $TICK_AGENT_NAME ($(surviving_tick_ids)) and wait up to ${TICK_STOP_TIMEOUT_SECONDS}s for the registry to agree"
+    return 0
+  fi
   while :; do
-    # An unreadable registry is not "it stopped". It keeps polling, and the
-    # timeout below refuses -- the same rule confirm_started() follows.
-    if listing="$(tick_agents)" && ! old_tick_is_live "$listing" "$old_id"; then
-      log "confirmed: $TICK_AGENT_NAME ($old_id) is stopped after ${waited}s"
-      return 0
+    if listing="$(tick_agents)"; then
+      ids="$(live_tick_ids "$listing")"
+      if [[ -z "${ids//[[:space:]]/}" ]]; then
+        [[ -z "$attempted" ]] || log "confirmed: no $TICK_AGENT_NAME agent is running after ${waited}s"
+        return 0
+      fi
+      while IFS= read -r id; do
+        [[ -n "$id" ]] || continue
+        stop_agent "$id"
+        attempted="yes"
+      done <<<"$ids"
     fi
+    # An unreadable registry is not "they are all gone". It keeps polling, and
+    # the caller decides what the timeout means.
     [[ "$waited" -lt "$TICK_STOP_TIMEOUT_SECONDS" ]] || break
     step="$(poll_step "$waited" "$TICK_STOP_TIMEOUT_SECONDS")"
     sleep "$step"
     waited=$(( waited + step ))
   done
-  die "$TICK_AGENT_NAME ($old_id) was still in the registry ${TICK_STOP_TIMEOUT_SECONDS}s after it was asked to stop; refusing to start a second tick beside it. The board is still ticking on that agent. Stop it by id and run this again."
+  return 1
 }
 
-# Poll until a tick whose id DIFFERS from the one just stopped is in the
-# registry AND the one just stopped is gone, or die naming the failure.
+# The live tick ids still in the registry, space-separated, for an error message.
+surviving_tick_ids() {
+  local listing
+  listing="$(tick_agents)" || { printf 'unknown (the registry is unreadable)'; return 0; }
+  live_tick_ids "$listing" | tr '\n' ' ' | sed 's/ *$//'
+}
+
+# Poll until the registry holds EXACTLY ONE live tick and it is not one of the
+# ids just stopped, or die naming the failure.
 #
 # `claude --bg` returns as soon as the agent is spawned, so the "started" line
 # start_agent() prints is not evidence that a tick exists. A restart is the one
 # gesture that must not report success on faith: the operator has just been told
 # the board is back, so nobody looks again until the next timer fire.
 #
-# BOTH halves are required. "A newer id exists" alone confirmed a clean
-# replacement over a machine running two ticks -- confirm_stopped() above now
-# makes that unreachable from a restart, and this check is what keeps it
-# unreachable if a later edit reorders the two.
-confirm_started() { # <id of the tick that was stopped>
-  local old_id="$1" waited=0 step listing="" new_id
+# EXACTLY ONE, not "one that is not the id we stopped". A registry holding two
+# live ticks satisfied that weaker test with a SURVIVOR: it reported
+# `confirmed: foreman/tick is up (tick-0)` while the replacement had never
+# spawned at all, and the operator who had just pulled new install code was told
+# the restart worked. One is the only correct number of ticks on a machine, so
+# it is the number this checks.
+confirm_started() { # <space-separated ids that were stopped>
+  local stopped_ids="$1" waited=0 step listing live live_count survivors
   while :; do
     if listing="$(tick_agents)"; then
-      new_id="$(replacement_tick_id "$listing" "$old_id")"
-      if [[ -n "$new_id" ]] && ! old_tick_is_live "$listing" "$old_id"; then
-        log "confirmed: $TICK_AGENT_NAME is up ($new_id) after ${waited}s"
+      live="$(live_tick_ids "$listing")"
+      live_count="$(printf '%s' "$live" | grep -c . || true)"
+      if [[ "$live_count" -eq 1 ]] \
+         && ! printf '%s\n' "$stopped_ids" | tr ' ' '\n' | grep -qxF -- "$live"; then
+        log "confirmed: $TICK_AGENT_NAME is up ($live) after ${waited}s"
         return 0
       fi
     fi
@@ -422,35 +474,21 @@ confirm_started() { # <id of the tick that was stopped>
     sleep "$step"
     waited=$(( waited + step ))
   done
-  if old_tick_is_live "$listing" "$old_id"; then
-    die "$TICK_AGENT_NAME ($old_id) is running again beside the replacement started ${TICK_START_TIMEOUT_SECONDS}s ago; this machine now has two ticks dispatching into one HOST_MAX_CONCURRENT. Stop one of them by id."
+  survivors="$(surviving_tick_ids)"
+  if [[ -n "${survivors//[[:space:]]/}" ]]; then
+    die "after starting a replacement, $TICK_AGENT_NAME is live as: $survivors. One is the only correct number, and this is not one. Stop the extras by id before the machine dispatches twice into one HOST_MAX_CONCURRENT."
   fi
   die "$TICK_AGENT_NAME did not appear in the agent registry within ${TICK_START_TIMEOUT_SECONDS}s of starting it; the board is stopped until the next timer fire"
 }
 
-# Replace the tick: stop it, prove it went, then start its successor.
-#
-# THE ORDER IS THE POINT and every caller shares it, so there is one copy. Both
-# the run-mode repairs below and --restart used to stop-then-start with nothing
-# in between, so a `claude stop` that failed or lagged left two live ticks.
-stop_then_start() { # <id of the tick to replace>
-  stop_agent "$1"
-  if [[ -n "$BOARD_DRY_RUN" ]]; then
-    log "DRY RUN: would wait up to ${TICK_STOP_TIMEOUT_SECONDS}s for $TICK_AGENT_NAME ($1) to leave the registry"
-  else
-    confirm_stopped "$1"
-  fi
-  start_agent
-}
-
 # --restart: replace the tick and leave every card agent alone.
 #
-# The tick is the only thing stopped, by id and by exact name, never by prefix.
-# `foreman/tick` is a prefix of nothing, but every per-card name begins
+# Only agents named exactly $TICK_AGENT_NAME are stopped, by id, never by
+# prefix. `foreman/tick` is a prefix of nothing, but every per-card name begins
 # `foreman/<board>/`, so a prefix stop here would kill every build on the
 # machine -- the one failure this whole mode exists to avoid.
 restart_tick() {
-  local old_id="$ID" before_cards after_cards after_names line name
+  local before_cards after_cards stopped_ids
 
   if ! before_cards="$(card_agents)"; then
     # Nothing has been stopped yet, so refusing costs the operator only a retry.
@@ -459,39 +497,74 @@ restart_tick() {
   fi
   log_cards "before restart" "$before_cards"
 
-  if [[ -z "$old_id" || "$old_id" == "None" ]]; then
+  # Every live tick, not the one inspect() named, because every live tick has to
+  # be gone before a replacement may start.
+  stopped_ids="$(surviving_tick_ids)"
+
+  if [[ -z "${stopped_ids//[[:space:]]/}" ]]; then
     # A restart with no tick running is still a restart. Skip the drain and the
     # stop, and say so: an operator who typed --restart because the board looked
     # dead has just learnt why it looked dead.
     log "no $TICK_AGENT_NAME agent was running; starting one"
   elif [[ -n "$BOARD_DRY_RUN" ]]; then
-    log "DRY RUN: would wait up to ${TICK_DRAIN_SECONDS}s for $TICK_AGENT_NAME ($old_id) to finish its turn"
+    log "DRY RUN: would wait up to ${TICK_DRAIN_SECONDS}s for $TICK_AGENT_NAME ($stopped_ids) to finish its turn"
   else
     drain_tick
   fi
 
-  stop_then_start "$old_id"
+  # Nothing is started until the registry says every tick is gone. Refusing here
+  # leaves the machine with exactly the ticks it already had, which is the safe
+  # failure: the board keeps ticking, the operator is told the restart did not
+  # happen, and a retry costs nothing.
+  stop_ticks \
+    || die "$TICK_AGENT_NAME is still live as: $(surviving_tick_ids), ${TICK_STOP_TIMEOUT_SECONDS}s after being asked to stop. Refusing to start a second tick beside it. Stop it by id and run this again."
+
+  start_agent
 
   if [[ -n "$BOARD_DRY_RUN" ]]; then
     log "DRY RUN: would wait up to ${TICK_START_TIMEOUT_SECONDS}s for the replacement $TICK_AGENT_NAME to appear in the registry"
-  else
-    confirm_started "$old_id"
+    return 0
   fi
+  confirm_started "$stopped_ids"
 
   if ! after_cards="$(card_agents)"; then
     log "after restart: could not read the card agents; the replacement tick is up regardless"
     return 0
   fi
   log_cards "after restart" "$after_cards"
-  after_names="$(printf '%s\n' "$after_cards" | cut -f1)"
+  report_card_changes "$before_cards" "$after_cards" "$stopped_ids"
+}
+
+# Say what happened to each card agent that was in flight before the restart.
+#
+# IT REPORTS WHAT IT SAW AND NEVER WHY. This used to conclude "it finished
+# during the restart, and a build completing is not a disturbance" about any
+# agent missing from the second listing. Nothing in the registry can tell a
+# build that completed from one something stopped -- both end up stopped and
+# then reaped -- so the one piece of evidence the operator was told to read
+# rather than trust was printing reassurance over exactly the collateral damage
+# it exists to catch.
+#
+# What this script can state as fact is which ids it issued `claude stop` for,
+# because it issued them. That is the line an operator can act on.
+report_card_changes() { # <before listing> <after listing> <tick ids stopped>
+  local before="$1" after="$2" stopped_ids="$3" line name was now
   while IFS= read -r line; do
     [[ -n "$line" ]] || continue
     name="${line%%$'\t'*}"
-    if ! printf '%s\n' "$after_names" | grep -qxF -- "$name"; then
-      # Benign, and said out loud so nobody reads it as collateral damage.
-      log "after restart: $name is gone; it finished during the restart, and a build completing is not a disturbance"
-    fi
-  done <<<"$before_cards"
+    was="${line#*$'\t'}"
+    [[ "$was" != "stopped" ]] || continue
+    now="$(card_state "$after" "$name")"
+    [[ "$now" != "$was" ]] || continue
+    log "after restart: card agent $name went from $was to $now. This restart issued claude stop only for $TICK_AGENT_NAME (${stopped_ids:-none}), so it did not stop this agent; check the card if you did not expect that."
+  done <<<"$before"
+}
+
+# The state of one card agent in a listing, or "gone" when it is not there.
+card_state() { # <card_agents listing> <agent name>
+  local found
+  found="$(printf '%s\n' "$1" | awk -F'\t' -v n="$2" '$1 == n { print $2; exit }')"
+  printf '%s' "${found:-gone}"
 }
 
 # --status is the ONE mode that reads the registry without the lock, because it
@@ -543,11 +616,31 @@ command -v flock >/dev/null 2>&1 \
 # `flock -n 9; LOCK_RC=$?` does not work here: under `set -e` the failing flock
 # aborts the script before the assignment runs, so neither branch below is ever
 # reached. The `||` puts it in a condition context, which is what exempts it.
+#
+# RUN MODE TAKES IT OR STANDS DOWN; AN OPERATOR'S GESTURE WAITS FOR IT. A timer
+# fire that skips one turn loses nothing, because the next fire is
+# TICK_INTERVAL_MINUTES away and re-reads everything. Nothing re-runs a
+# `--stop` or a `--restart`, so standing down on those exited 0 without doing
+# the thing that was asked: an operator running
+# `git -C ~/.foreman/install pull && supervise.sh --restart` five seconds after
+# a timer fire took the lock saw the whole chain report success while the tick
+# kept running the pre-pull skill. The window is not narrow -- a repair fire
+# holds the lock through its own stop, and another operator's restart holds it
+# for the drain, stop and start bounds together -- so these wait rather than
+# fail on contact, and refuse only once TICK_LOCK_WAIT_SECONDS is gone.
 LOCK_RC=0
-flock -n 9 || LOCK_RC=$?
+if [[ "$MODE" == "run" ]]; then
+  flock -n 9 || LOCK_RC=$?
+else
+  log "waiting up to ${TICK_LOCK_WAIT_SECONDS}s for the supervise lock"
+  flock -w "$TICK_LOCK_WAIT_SECONDS" 9 || LOCK_RC=$?
+fi
 if [[ $LOCK_RC -eq 1 ]]; then
-  log "another supervisor holds the lock; standing down"
-  exit 0
+  if [[ "$MODE" == "run" ]]; then
+    log "another supervisor holds the lock; standing down"
+    exit 0
+  fi
+  die "another supervisor still holds $SUPERVISE_LOCK after ${TICK_LOCK_WAIT_SECONDS}s, so $MODE did not run. The tick is unchanged. Run $MODE again once that supervisor finishes."
 elif [[ $LOCK_RC -ne 0 ]]; then
   die "flock failed with exit $LOCK_RC; refusing to run unlocked"
 fi
@@ -574,11 +667,12 @@ if ! read_registry; then
 fi
 
 if [[ "$MODE" == "--stop" ]]; then
-  stop_agent "$ID"
-  # Same proof a restart takes, for the same reason: `claude stop` is
-  # asynchronous and can fail, and "stop ticking" that did not stop ticking,
-  # reported as success, is what the operator acts on next.
-  [[ -n "$BOARD_DRY_RUN" ]] || confirm_stopped "$ID"
+  # EVERY live tick, and proof that each one went. Stopping the single agent
+  # inspect() named left any other live agent of the same name ticking, and
+  # said `confirmed ... is stopped` about the one it did stop -- "stop ticking"
+  # that does not stop ticking, reported as success.
+  stop_ticks \
+    || die "$TICK_AGENT_NAME is still live as: $(surviving_tick_ids), ${TICK_STOP_TIMEOUT_SECONDS}s after being asked to stop. The board is still ticking."
   exit 0
 fi
 
@@ -587,24 +681,51 @@ if [[ "$MODE" == "--restart" ]]; then
   exit 0
 fi
 
+# Replace the tick: stop every live one, prove they are gone, then start one.
+#
+# A timer fire NEVER DIES HERE. The next fire is TICK_INTERVAL_MINUTES away and
+# re-enters whichever branch sent it here, re-issuing the stop, so this is a
+# retry and not a give-up. Dying instead marked foreman.service failed every ten
+# minutes and fixed nothing -- and the tick whose stop is slowest to land is the
+# wedged one this branch exists for. What it must never do is start a
+# replacement beside a tick that is still running.
+repair_tick() {
+  if stop_ticks; then
+    start_agent
+    return 0
+  fi
+  log "ERROR: $TICK_AGENT_NAME is still live as: $(surviving_tick_ids), ${TICK_STOP_TIMEOUT_SECONDS}s after being asked to stop. Starting no replacement beside it; the next fire asks again. Stop it by id if this repeats."
+}
+
 # Reasons to (re)start, most specific first. Each prints why, because a watchdog
 # that restarts silently is indistinguishable from one that does nothing.
-if [[ -z "$ID" || "$ID" == "None" ]]; then
+#
+# THE FIRST QUESTION IS HOW MANY TICKS ARE LIVE, not what the newest one is
+# doing. Two live ticks dispatch twice into one machine-wide
+# HOST_MAX_CONCURRENT, so that is a fault to repair and not a state to judge the
+# health of -- and this branch is what makes the count self-heal instead of
+# needing an operator to notice.
+if [[ "$LIVE_TICKS" -gt 1 ]]; then
+  log "$LIVE_TICKS $TICK_AGENT_NAME agents are live ($(surviving_tick_ids)); one is the only correct number"
+  repair_tick
+elif [[ -z "$ID" || "$ID" == "None" ]]; then
   log "no $TICK_AGENT_NAME agent exists"
   start_agent
-elif [[ "$STATE" == "stopped" ]]; then
-  log "$TICK_AGENT_NAME is stopped"
+elif [[ "$LIVE_TICKS" -eq 0 ]]; then
+  # inspect() falls back to the newest agent when none is live, so this is the
+  # corpse of the last tick and its state is the reason the board stopped.
+  log "$TICK_AGENT_NAME is not running (newest is $ID, state=$STATE)"
   start_agent
 elif [[ "$STATE" == "working" && "$IDLE" != "None" ]] \
      && awk "BEGIN{exit !($IDLE > $TICK_STALL_MINUTES)}"; then
   log "$TICK_AGENT_NAME wedged: mid-turn and silent for ${IDLE}m (> ${TICK_STALL_MINUTES}m)"
-  stop_then_start "$ID"
+  repair_tick
 elif [[ "$IDLE" != "None" ]] && awk "BEGIN{exit !($IDLE > $TICK_DEAD_MINUTES)}"; then
   log "$TICK_AGENT_NAME loop stopped rescheduling: idle ${IDLE}m (> ${TICK_DEAD_MINUTES}m)"
-  stop_then_start "$ID"
+  repair_tick
 elif [[ "$AGE" != "None" ]] && awk "BEGIN{exit !($AGE > $TICK_MAX_AGE_HOURS)}"; then
   log "recycling $TICK_AGENT_NAME to bound context: age ${AGE}h (> ${TICK_MAX_AGE_HOURS}h)"
-  stop_then_start "$ID"
+  repair_tick
 else
   log "$TICK_AGENT_NAME healthy (state=$STATE idle=${IDLE}m age=${AGE}h)"
 fi

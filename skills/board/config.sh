@@ -307,6 +307,20 @@ TICK_MAX_AGE_HOURS="${TICK_MAX_AGE_HOURS:-12}"
 # turn, which TICK_STALL_MINUTES already covers.
 TICK_DRAIN_SECONDS="${TICK_DRAIN_SECONDS:-120}"
 
+# How long `supervise.sh --stop` and `--restart` wait for another supervisor to
+# release the machine lock before refusing.
+#
+# Only an operator's gesture waits. A timer fire that finds the lock held stands
+# down, because the next fire is TICK_INTERVAL_MINUTES away and loses nothing;
+# nothing re-runs a gesture an operator typed, so standing down there reported
+# success without restarting anything.
+#
+# 240 seconds because that exceeds the longest a supervisor can legitimately
+# hold the lock: another operator's restart, which is TICK_DRAIN_SECONDS plus
+# TICK_STOP_TIMEOUT_SECONDS plus TICK_START_TIMEOUT_SECONDS, 210 with the
+# defaults. Waiting less would refuse a gesture that was only ever queued.
+TICK_LOCK_WAIT_SECONDS="${TICK_LOCK_WAIT_SECONDS:-240}"
+
 # How long supervise.sh waits for a tick it asked `claude stop` to close to
 # actually leave the registry, before refusing to start a replacement.
 #
@@ -317,8 +331,12 @@ TICK_DRAIN_SECONDS="${TICK_DRAIN_SECONDS:-120}"
 # supervise.sh exists to prevent. Worse, it is invisible: the registry read
 # reports only the NEWEST agent of that name, so every later fire sees the
 # healthy replacement and never the survivor behind it. supervise.sh therefore
-# proves the old tick is gone BEFORE it starts a new one, and refuses when it
-# cannot -- which leaves the machine with the one tick it already had.
+# proves EVERY live tick is gone BEFORE it starts a new one, and refuses when it
+# cannot -- which leaves the machine with the ticks it already had.
+#
+# The stop is re-issued on every poll inside this bound, not once at the top:
+# the tick whose stop is slowest to land is the wedged one the watchdog exists
+# to replace, so one attempt followed by a wait gave up on the case that matters.
 #
 # 30 seconds is far longer than `claude stop` takes on a healthy daemon and
 # short enough that an operator waiting on a restart is not left guessing.

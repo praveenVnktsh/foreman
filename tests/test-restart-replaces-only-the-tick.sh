@@ -49,18 +49,40 @@ started="$work/started.log"
 # segment, exactly as config.sh's agent_name() builds them, so a matcher that
 # reaches for the `foreman/` prefix instead of the tick's exact name catches
 # them.
-write_registry() { # <tick-state>
-  python3 - "$registry" "$1" <<'PY'
-import json, sys
-path, tick_state = sys.argv[1], sys.argv[2]
-json.dump([
+write_registry() { # <tick-state> [extra tick rows, each "<id>:<state>:<age seconds>"]
+  python3 - "$registry" "$@" <<'PY'
+import json, sys, time
+path, tick_state, extra = sys.argv[1], sys.argv[2], sys.argv[3:]
+# Recent timestamps, so no run-mode staleness threshold fires and each case
+# below tests the thing it names. An epoch-millisecond 1000 makes every agent
+# read as 56 years old, which sends every timer fire down the recycle branch.
+now = int(time.time() * 1000)
+agents = [
     {"id": "tick-1", "name": "foreman/tick", "state": tick_state,
-     "startedAt": 1000, "cwd": "", "sessionId": ""},
+     "startedAt": now - 60_000, "cwd": "", "sessionId": ""},
     {"id": "card-a", "name": "foreman/demo/build/ABC-1-1", "state": "working",
-     "startedAt": 1100, "cwd": "", "sessionId": ""},
+     "startedAt": now - 50_000, "cwd": "", "sessionId": ""},
     {"id": "card-b", "name": "foreman/demo/review/ABC-2-1", "state": "working",
-     "startedAt": 1200, "cwd": "", "sessionId": ""},
-], open(path, "w"))
+     "startedAt": now - 40_000, "cwd": "", "sessionId": ""},
+]
+# An extra tick row is written OLDER than tick-1, so it is the one the registry
+# read hides behind the newest.
+for n, spec in enumerate(extra, start=1):
+    tid, state, age_seconds = spec.split(":")
+    agents.append({"id": tid, "name": "foreman/tick", "state": state,
+                   "startedAt": now - int(age_seconds) * 1000,
+                   "cwd": "", "sessionId": ""})
+json.dump(agents, open(path, "w"))
+PY
+}
+
+# Every foreman/tick in the registry that is not stopped, space-separated. One
+# is the only correct number, so most assertions below are about this string.
+live_ticks() {
+  python3 - "$registry" <<'PY'
+import json, sys
+print(" ".join(sorted(a["id"] for a in json.load(open(sys.argv[1]))
+                      if a["name"] == "foreman/tick" and a["state"] != "stopped")))
 PY
 }
 
@@ -76,6 +98,7 @@ started="$started"
 no_start="$work/no-start"
 stop_fails="$work/stop-fails"
 bad_registry="$work/bad-registry"
+stop_card_a="$work/stop-card-a"
 if [[ "\$1" == "agents" ]]; then
   # A registry the CLI cannot render: a daemon restarting, a CLI mid-upgrade.
   if [[ -e "\$bad_registry" ]]; then printf 'not json at all\n'; exit 0; fi
@@ -105,6 +128,19 @@ if [[ "\$1" == "--bg" ]]; then
     shift
   done
   printf '%s\n' "\$name" >>"\$started"
+  # Something else stops a card agent while the restart is in flight. The
+  # restart never does this; the point is what it REPORTS when it happens.
+  if [[ -e "\$stop_card_a" ]]; then
+    python3 - "\$registry" card-a <<'PY'
+import json, sys
+path, victim = sys.argv[1], sys.argv[2]
+agents = json.load(open(path))
+for a in agents:
+    if a["id"] == victim:
+        a["state"] = "stopped"
+json.dump(agents, open(path, "w"))
+PY
+  fi
   [[ -e "\$no_start" ]] && exit 0
   python3 - "\$registry" "\$name" <<'PY'
 import json, sys
@@ -121,10 +157,18 @@ exit 0
 STUB
 chmod +x "$home/.local/bin/claude"
 
+# FOREMAN_HOME is pinned to the fixture's, not merely left alone. config.sh
+# exports it and bin/install-service.sh writes it into the unit, so it reaches
+# the tick and every agent the board dispatches -- which is where this suite
+# actually runs, because foreman builds itself. Inherited, config.sh reads the
+# real machine's boards.toml, supervise.sh dies with "no board named demo", and
+# the assertions that only check a non-zero exit go on printing `ok` over code
+# that never ran. tests/test-one-tick-for-all-boards.sh pins it for this reason.
 run() { # <mode...> -- runs supervise.sh with this machine's fixture
-  env HOME="$home" FOREMAN_INSTANCE=demo \
+  env HOME="$home" FOREMAN_HOME="$home/.foreman" FOREMAN_INSTANCE=demo \
       SUPERVISE_LOCK="$work/supervise.lock" \
       TICK_DRAIN_SECONDS=1 TICK_START_TIMEOUT_SECONDS=5 TICK_STOP_TIMEOUT_SECONDS=1 \
+      TICK_LOCK_WAIT_SECONDS=2 \
       "$supervise" "$@" 2>&1
 }
 
@@ -188,8 +232,9 @@ fi
 write_registry idle
 : >"$stopped"
 : >"$work/no-start"
-out="$(env HOME="$home" FOREMAN_INSTANCE=demo SUPERVISE_LOCK="$work/supervise.lock" \
-        TICK_DRAIN_SECONDS=1 TICK_START_TIMEOUT_SECONDS=1 \
+out="$(env HOME="$home" FOREMAN_HOME="$home/.foreman" FOREMAN_INSTANCE=demo \
+        SUPERVISE_LOCK="$work/supervise.lock" \
+        TICK_DRAIN_SECONDS=1 TICK_START_TIMEOUT_SECONDS=1 TICK_STOP_TIMEOUT_SECONDS=1 \
         "$supervise" --restart 2>&1)"; rc=$?
 rm -f "$work/no-start"
 if [[ $rc -ne 0 ]]; then
@@ -265,17 +310,167 @@ fi
 # restart. Without it the fire can start a tick that the restart then does not
 # know about, and the machine ends up with two ticks dispatching into one
 # HOST_MAX_CONCURRENT.
+#
+# An operator's gesture WAITS for it rather than standing down. Exiting 0 on a
+# held lock reported success without restarting anything, and an operator
+# running `git pull && supervise.sh --restart` was told the whole chain worked
+# while the tick kept running the pre-pull skill.
 write_registry idle
 : >"$stopped"
-"$withlock" "$work/supervise.lock" 30 -- sleep 3 &
+"$withlock" "$work/supervise.lock" 30 -- sleep 2 &
 holder=$!
-sleep 1
+sleep 0.3
 out="$(run --restart)"; rc=$?
 wait "$holder" 2>/dev/null
-if [[ $rc -eq 0 && ! -s "$stopped" ]]; then
-  ok "a restart stands down while another supervisor holds the lock"
+if [[ $rc -eq 0 && "$(cat "$stopped")" == "tick-1" ]]; then
+  ok "a restart waits for a supervisor that is about to finish, then runs"
 else
-  bad "the restart ran against a held lock (rc=$rc, stopped=$(tr '\n' ' ' <"$stopped")): $out"
+  bad "the restart did not wait for the lock (rc=$rc, stopped=$(tr '\n' ' ' <"$stopped")): $out"
+fi
+
+# Held for longer than the operator is willing to wait: refuse, do not exit 0.
+write_registry idle
+: >"$stopped"
+: >"$started"
+"$withlock" "$work/supervise.lock" 30 -- sleep 6 &
+holder=$!
+sleep 0.3
+out="$(run --restart)"; rc=$?
+kill "$holder" 2>/dev/null
+wait "$holder" 2>/dev/null
+if [[ $rc -ne 0 && ! -s "$stopped" && ! -s "$started" ]]; then
+  ok "a restart that never gets the lock refuses instead of exiting 0"
+else
+  bad "the restart exited $rc against a lock it never took: $out"
+fi
+
+# Run mode is the one that still stands down on a held lock: the next timer
+# fire is TICK_INTERVAL_MINUTES away and re-reads everything.
+: >"$started"
+"$withlock" "$work/supervise.lock" 30 -- sleep 3 &
+holder=$!
+sleep 0.3
+out="$(run)"; rc=$?
+kill "$holder" 2>/dev/null
+wait "$holder" 2>/dev/null
+if [[ $rc -eq 0 && ! -s "$started" ]]; then
+  ok "a timer fire stands down while another supervisor holds the lock"
+else
+  bad "run mode did not stand down on a held lock (rc=$rc): $out"
+fi
+
+# --- a second live tick behind the newest one
+# The registry reports only the NEWEST agent of a name, so a live tick sitting
+# behind a newer one is invisible to --status and to every health check. A
+# restart that stopped only the newest left it running and then started a
+# replacement beside it: two ticks running /loop /board against one
+# machine-wide HOST_MAX_CONCURRENT.
+write_registry idle tick-0:idle:120
+: >"$stopped"
+out="$(run --restart)"; rc=$?
+if [[ $rc -eq 0 && "$(live_ticks)" == "tick-2" ]]; then
+  ok "a restart stops every live tick, not only the newest"
+else
+  bad "the restart left these ticks live: $(live_ticks) (rc=$rc): $out"
+fi
+if [[ "$(tick_state card-a)" == "working" && "$(tick_state card-b)" == "working" ]]; then
+  ok "it still leaves both card agents running"
+else
+  bad "a card agent was stopped while clearing two ticks"
+fi
+
+# The same registry, with a --bg that spawns nothing. The survivor must not be
+# mistaken for the replacement: it satisfied "a live id that is not the one we
+# stopped" while no replacement had come up at all, and the operator who had
+# just pulled new install code was told the restart worked.
+write_registry idle tick-0:idle:120
+: >"$stopped"
+: >"$work/no-start"
+out="$(run --restart)"; rc=$?
+rm -f "$work/no-start"
+if [[ $rc -ne 0 ]]; then
+  ok "a survivor is not accepted as proof the replacement came up"
+else
+  bad "the restart confirmed a replacement that never spawned: $out"
+fi
+
+# --stop has the identical contract: it means every tick, not the newest one.
+write_registry idle tick-0:idle:120
+: >"$stopped"
+out="$(run --stop)"; rc=$?
+if [[ $rc -eq 0 && -z "$(live_ticks)" ]]; then
+  ok "a stop stops every live tick, not only the newest"
+else
+  bad "--stop left these ticks live: $(live_ticks) (rc=$rc): $out"
+fi
+
+# --- run mode reconciles the count itself
+# Two live ticks is a fault the watchdog repairs, not a state it judges the
+# health of. Run mode used to manufacture this state: with a live tick behind a
+# newer STOPPED one it read "the tick is stopped" and started a second live one.
+write_registry stopped tick-0:idle:120
+: >"$started"
+out="$(run)"; rc=$?
+if [[ $rc -eq 0 && "$(live_ticks)" == "tick-0" && ! -s "$started" ]]; then
+  ok "a timer fire leaves a healthy tick alone when a newer corpse sits above it"
+else
+  bad "run mode started a second tick (live=$(live_ticks), started=$(tr '\n' ' ' <"$started")): $out"
+fi
+
+write_registry idle tick-0:idle:120
+: >"$started"
+out="$(run)"; rc=$?
+if [[ $rc -eq 0 && "$(live_ticks)" == "tick-2" ]]; then
+  ok "a timer fire that finds two live ticks reconciles them to one"
+else
+  bad "run mode left these ticks live: $(live_ticks) (rc=$rc): $out"
+fi
+
+# --- run mode never dies on a stop that will not land
+# The tick whose stop is slowest to land is the wedged one this branch exists
+# for, and dying here marked foreman.service failed every ten minutes while
+# fixing nothing. It must start no replacement either.
+write_registry idle tick-0:idle:120
+: >"$started"
+: >"$work/stop-fails"
+out="$(run)"; rc=$?
+rm -f "$work/stop-fails"
+if [[ $rc -eq 0 && ! -s "$started" ]] && grep -q "ERROR" <<<"$out"; then
+  ok "a timer fire whose stop does not land says so and starts nothing"
+else
+  bad "run mode died or started a tick over a failed stop (rc=$rc): $out"
+fi
+
+# The same on the single-tick repair path, which is the one run mode exists
+# for. TICK_MAX_AGE_HOURS=0 forces the recycle branch on a healthy tick.
+write_registry idle
+: >"$started"
+: >"$work/stop-fails"
+out="$(env HOME="$home" FOREMAN_HOME="$home/.foreman" FOREMAN_INSTANCE=demo \
+        SUPERVISE_LOCK="$work/supervise.lock" TICK_MAX_AGE_HOURS=0 \
+        TICK_DRAIN_SECONDS=1 TICK_STOP_TIMEOUT_SECONDS=1 \
+        "$supervise" 2>&1)"; rc=$?
+rm -f "$work/stop-fails"
+if [[ $rc -eq 0 && ! -s "$started" && "$(live_ticks)" == "tick-1" ]]; then
+  ok "a repair whose stop does not land leaves one tick and does not fail the unit"
+else
+  bad "the recycle path died or doubled the tick (rc=$rc, live=$(live_ticks)): $out"
+fi
+
+# --- the after-restart card report states what it saw, not why
+# card_agents() used to drop stopped rows, so an agent the restart had stopped
+# and one that finished looked identical, and the line printed over both said
+# "a build completing is not a disturbance".
+write_registry idle
+: >"$stopped"
+: >"$work/stop-card-a"
+out="$(run --restart)"; rc=$?
+rm -f "$work/stop-card-a"
+if grep -q "went from working to stopped" <<<"$out" \
+   && ! grep -q "not a disturbance" <<<"$out"; then
+  ok "a card agent that stops during the restart is reported as stopped, not as finished"
+else
+  bad "the after-restart report explained away a card agent that stopped: $out"
 fi
 
 # --- an unrecognised mode
@@ -296,10 +491,32 @@ write_registry idle
 : >"$stopped"
 : >"$started"
 out="$(BOARD_DRY_RUN=1 run --restart)"; rc=$?
-if [[ ! -s "$stopped" && ! -s "$started" ]]; then
+if [[ $rc -eq 0 && ! -s "$stopped" && ! -s "$started" ]]; then
   ok "a dry-run restart changes nothing"
 else
-  bad "BOARD_DRY_RUN=1 --restart still stopped or started an agent: $out"
+  bad "BOARD_DRY_RUN=1 --restart still stopped or started an agent (rc=$rc): $out"
+fi
+
+# Every mode that stops a tick now goes through one function, so a dry run must
+# answer for all of them rather than spinning out the stop bound and reporting
+# a tick that would not stop.
+write_registry idle tick-0:idle:120
+: >"$stopped"
+: >"$started"
+out="$(BOARD_DRY_RUN=1 run)"; rc=$?
+if [[ $rc -eq 0 && ! -s "$stopped" && ! -s "$started" ]] && grep -q "DRY RUN" <<<"$out"; then
+  ok "a dry-run timer fire says what it would do and changes nothing"
+else
+  bad "BOARD_DRY_RUN=1 run mode acted or failed (rc=$rc): $out"
+fi
+
+write_registry idle tick-0:idle:120
+: >"$stopped"
+out="$(BOARD_DRY_RUN=1 run --stop)"; rc=$?
+if [[ $rc -eq 0 && ! -s "$stopped" ]]; then
+  ok "a dry-run stop changes nothing"
+else
+  bad "BOARD_DRY_RUN=1 --stop still stopped an agent (rc=$rc): $out"
 fi
 
 [[ "$fail" -eq 0 ]] && printf 'PASS: --restart replaces the tick and leaves every card agent running\n'
