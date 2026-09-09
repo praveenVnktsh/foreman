@@ -153,7 +153,18 @@ for line in lines:
 
 # Placeholders, longest-first where one contains another, so `<ticket-body>`
 # is never half-substituted by `<T>`.
+#
+# `/tmp/` goes FIRST, and that ordering is load-bearing rather than cosmetic.
+# Every other replacement here is an absolute path inside the scratch
+# directory, and on Linux that directory is itself under `/tmp/` -- so a
+# `/tmp/` rule applied last rewrites the paths this table just inserted,
+# turning /tmp/tmp.X/install into /tmp/tmp.X/tmp.X/install and pointing every
+# command at a directory that does not exist. Running it first means only
+# the `/tmp/` scratch paths SKILL.md itself writes are touched, which is
+# for. The bug hid on macOS, where mktemp answers under /var/folders and no
+# substituted path contains `/tmp/` at all: green locally, red on the runner.
 subs = [
+    ("/tmp/", work + "/"),
     ("~/.foreman/install/skills/board", shim),
     ("<ticket-body>", body),
     ("<headRefOid>", sha),
@@ -163,7 +174,6 @@ subs = [
     ("<n>", "1"),
     ("<r>", "1"),
     ("<N>", "1"),
-    ("/tmp/", work + "/"),
 ]
 
 KINDS = ["plan", "build", "replan", "review"]
