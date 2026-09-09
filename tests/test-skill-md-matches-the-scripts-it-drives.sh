@@ -276,25 +276,29 @@ JSON
 env HOME="$home" FOREMAN_INSTANCE=demo "$shim/plancomments.py" \
   < "$work/comments.json" > "$work/plan.json"
 
-if out="$(run_block "$blocks/replan.sh" 2>&1)"; then
-  ok "SKILL.md's replan block runs: it resumes the agent the plan block spawned"
-else
-  bad "SKILL.md's replan block does not run as written:
-$out"
-fi
+# Judged on what the block SAID, not on the status it returned. `run_block`
+# evals the extracted lines under `set -e`, and the runner's bash 5 does not
+# abort that eval when a middle line exits non-zero the way bash 3.2 does -- so
+# the status reads 0 on one machine and 1 on the other for the very same
+# refused block. The refusal text is the same on both, and it is the evidence
+# the case actually wants.
+out="$(run_block "$blocks/replan.sh" 2>&1)" || true
+case "$out" in
+  *"foreman: "*)
+    bad "SKILL.md's replan block does not run as written:
+$out" ;;
+  *)
+    ok "SKILL.md's replan block runs: it resumes the agent the plan block spawned" ;;
+esac
 
 # The role in that block is load-bearing, not decoration: dispatch.sh builds
 # the agent name it resumes out of `--role`, so `--role build` there hunts for
 # an agent no plan dispatch ever spawned. Proving the block fails when the role
 # is wrong is what makes the case above evidence rather than a coincidence.
 sed 's/--role plan/--role build/' "$blocks/replan.sh" > "$work/replan-wrong-role.sh"
-# The status is captured on its own line rather than read off `if out="$(...)"`.
-# That shorter form disagreed with itself across bash versions here: the same
-# refused block read as a failure on bash 3.2 and as a success on the runner's
-# bash 5, so the mutation case passed on a laptop and reported the opposite on
-# CI. A case that exists to prove a failure has to be certain it saw one.
-out="$(run_block "$work/replan-wrong-role.sh" 2>&1)" && rc=0 || rc=$?
-if [[ "$rc" -eq 0 ]]; then
+# Same rule as the case above: read the refusal, never the status.
+out="$(run_block "$work/replan-wrong-role.sh" 2>&1)" || true
+if [[ -z "$out" ]]; then
   bad "the replan block still runs with --role build, so its --role plan proves nothing"
 else
   case "$out" in
