@@ -288,7 +288,13 @@ fi
 # an agent no plan dispatch ever spawned. Proving the block fails when the role
 # is wrong is what makes the case above evidence rather than a coincidence.
 sed 's/--role plan/--role build/' "$blocks/replan.sh" > "$work/replan-wrong-role.sh"
-if out="$(run_block "$work/replan-wrong-role.sh" 2>&1)"; then
+# The status is captured on its own line rather than read off `if out="$(...)"`.
+# That shorter form disagreed with itself across bash versions here: the same
+# refused block read as a failure on bash 3.2 and as a success on the runner's
+# bash 5, so the mutation case passed on a laptop and reported the opposite on
+# CI. A case that exists to prove a failure has to be certain it saw one.
+out="$(run_block "$work/replan-wrong-role.sh" 2>&1)" && rc=0 || rc=$?
+if [[ "$rc" -eq 0 ]]; then
   bad "the replan block still runs with --role build, so its --role plan proves nothing"
 else
   case "$out" in
