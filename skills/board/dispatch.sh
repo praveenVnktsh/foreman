@@ -149,14 +149,19 @@ fi
 # build agents that execute it do not.
 #
 # A table rather than a chain: there are three roles now, each naming one model
-# and one worktree shape, and a fourth would be one more row. `plan` and
-# `build` both work on the card's own branch, cut from origin/main, because the
-# plan is committed and pushed on that branch and `reconcile.py plan_pushed`
-# asks origin for exactly it. A reviewer never writes to the branch, so it gets
-# a throwaway worktree detached at the head it is reading.
+# and one worktree shape, and a fourth would be one more row. `build` is the
+# only role that writes to the card's own branch, so it is the only one cut
+# with `-B <branch>`. A plan agent posts its graph to the Linear card as a
+# comment and pushes nothing -- a branch on the card would be both unnecessary
+# and harmful, since a build dispatched afterwards would inherit or reset it --
+# so plan gets a throwaway worktree detached at origin/main, composing its own
+# name the same way review composes its own from ticket, role and attempt so
+# the two throwaway worktrees can never collide with each other or with the
+# card's build worktree. A reviewer never writes to the branch either, so it
+# gets a throwaway worktree detached at the head it is reading.
 case "$ROLE" in
   plan)
-    WORKTREE="$(worktree_path "$TICKET")"
+    WORKTREE="$(worktree_path "${TICKET}-${ROLE}-${ATTEMPT}${SLOT}")"
     MODEL="$PLAN_MODEL"
     ;;
   build)
@@ -250,6 +255,13 @@ export -f branch_name
   git -C "$REPO" worktree prune
   if [[ "$ROLE" == "review" ]]; then
     git -C "$REPO" worktree add --quiet --detach "$WORKTREE" "$REF"
+  elif [[ "$ROLE" == "plan" ]]; then
+    # A plan always reads origin/main -- there is no branch to detach at yet,
+    # since the plan agent is the one that has not run. Detached, like review,
+    # because this worktree is thrown away: the plan posts its graph to the
+    # Linear card as a comment and never pushes, so a branch cut here would
+    # sit on the card for a later build dispatch to inherit or reset.
+    git -C "$REPO" worktree add --quiet --detach "$WORKTREE" origin/main
   else
     git -C "$REPO" worktree add --quiet -B "$(branch_name "$TICKET")" "$WORKTREE" origin/main
   fi

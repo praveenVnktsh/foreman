@@ -35,7 +35,7 @@ def _load_config() -> dict[str, str]:
     keys = (
         "REPO", "BOARD_HOME", "REQUIRED_CHECKS", "HIGH_RISK_PATHS",
         "DEPLOY_WORKFLOW", "DEPLOY_STEP", "CI_WORKFLOW", "INSTANCE",
-        "FOREMAN_HOME", "HOST_SLOT_STALE_MINUTES", "PLAN_DIR",
+        "FOREMAN_HOME", "HOST_SLOT_STALE_MINUTES",
     )
     script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.sh")
     printf = 'printf "%s\\0" ' + " ".join(f'"${k}"' for k in keys)
@@ -82,17 +82,6 @@ if not _CFG["CI_WORKFLOW"]:
     )
 CI_WORKFLOW = _CFG["CI_WORKFLOW"]
 FOREMAN_HOME = _CFG["FOREMAN_HOME"]
-# The directory the build agent pushes its plan into. config.sh defaults it to
-# a real path, so blank here means an environment override (PLAN_DIR=) blanked
-# it out. Refuse instead of carrying it: `f.startswith("")` is true of every
-# path, so a blank would read the first pushed source file as the card's plan
-# and move the card out of the plan column before any plan existed.
-if not _CFG["PLAN_DIR"]:
-    raise SystemExit(
-        "reconcile: PLAN_DIR is empty -- config.sh defaults it to a real "
-        "directory, so this can only mean an environment override blanked it"
-    )
-PLAN_DIR = _CFG["PLAN_DIR"]
 # Empty means "disabled" -- see host_slots()'s docstring for why that is a
 # real, supported value and not just an unset-variable accident.
 HOST_SLOT_STALE_MINUTES = (
@@ -114,6 +103,23 @@ def run(args: list[str], cwd: str | None = None) -> tuple[int, str]:
 
 
 def run_json(args: list[str], cwd: str | None = None):
+    """The command's JSON, or None because the lookup FAILED.
+
+    None is a third answer, and every caller owes it one. "GitHub did not
+    answer" is not "GitHub answered nothing", and folding the two is this
+    file's characteristic defect: it always fails in the direction of acting,
+    because an empty answer is the quiet one every branch below already
+    handles. It has cost real damage three times -- a failed `gh pr list` read
+    as "no pull request" charged a card a build attempt it never earned, an
+    unreadable diff read as "no files" merged a migration with no operator,
+    and an unreadable agent registry read as "no agents" started a second
+    board. Each of those sites carries its own note; this is the rule they are
+    all instances of.
+
+    So a caller that cannot act on an unknown must report it as one --
+    `pr_for`'s `lookup_failed`, `risk: unknown`, `load_agents`'s None -- and
+    never spend a budget or move a card on evidence nobody gathered.
+    """
     code, out = run(args, cwd)
     if code != 0:
         return None
@@ -254,85 +260,12 @@ def check_rollup(pr: dict) -> dict:
 def branch_for(ticket: str) -> str:
     """The branch dispatch.sh cuts for a card.
 
-    One function because two callers need it. `pr_for` looks the pull request up
-    by this branch and `plan_pushed` asks origin for it, so a second copy of the
-    format string sends them at different branches — and each reads its own miss
-    as an absence: no pull request, and no plan.
+    One function because the format is one fact. `pr_for` looks the card's pull
+    request up by this branch, so a copy of the format string that drifts from
+    what dispatch.sh actually cuts finds nothing — and a miss reads as an
+    absence: the card has no pull request, on evidence about the wrong branch.
     """
     return f"foreman/{INSTANCE}/{ticket}"
-
-
-def plan_pushed(branch: str) -> dict:
-    """Has this card's plan reached origin? `present`, `absent` or `unknown`.
-
-    The build agent commits its graph under PLAN_DIR and pushes it before it
-    writes any implementation code, so a file the branch ADDS under PLAN_DIR is
-    the only evidence the board has that planning finished. Step 2 moves the
-    card out of the plan column on it.
-
-    The comparison is against `main`. After the card's pull request merges the
-    branch adds nothing main does not already have, so this field reads `absent`
-    — correctly: it answers a question only a card that has not opened a pull
-    request needs asked.
-    """
-    # A network read on purpose, and never `origin/<branch>` or the working
-    # tree. No fetch is guaranteed to have refreshed a local remote-tracking ref
-    # — the reason skills/board/evidence.sh exists — and a stale "not pushed"
-    # here parks a card in the plan column with its plan already pushed and its
-    # build agent already off implementing.
-    code, _ = run(
-        ["git", "ls-remote", "--exit-code", "--heads", "origin", branch], cwd=REPO
-    )
-    # Three answers, never two. Exit 2 is git's own code for "no matching ref";
-    # any OTHER non-zero is the lookup failing — no network, no credential, a
-    # timeout — and folding that into `absent` is this file's characteristic
-    # defect, the same one load_agents(), pr_for() and the diff read each carry a
-    # comment about. It costs more here than a wrong report: the card sits in the
-    # plan column for as long as GitHub is unreachable, and the tick keeps
-    # waiting for a plan that was pushed an hour ago.
-    if code == 2:
-        return {"state": "absent", "reason": f"origin has no branch {branch}"}
-    if code != 0:
-        return {"state": "unknown",
-                "reason": f"git ls-remote failed for {branch}; whether the "
-                          "branch exists is unknown"}
-    # Status as well as filename, because "changed" and "added" are different
-    # answers. A card whose diff EDITS an existing plan — a card about the plan
-    # directory itself, or one correcting a sibling card's graph — changes a
-    # path under PLAN_DIR while adding no plan of its own, and reading that as
-    # `present` releases the card from the plan column before it has planned.
-    code, out = run(
-        ["gh", "api", f"repos/{{owner}}/{{repo}}/compare/main...{branch}",
-         "--jq", "[.files[] | {status: .status, filename: .filename}]"],
-        cwd=REPO,
-    )
-    if code != 0:
-        # ls-remote already answered that the branch exists, so this is a failed
-        # lookup and never a branch that adds nothing.
-        return {"state": "unknown",
-                "reason": f"gh api compare failed for {branch}; what it adds "
-                          "was never read"}
-    try:
-        files = json.loads(out)
-    except json.JSONDecodeError:
-        # Exit 0 with output nothing can parse is still a read that did not
-        # happen, and it takes the same answer as a non-zero exit above.
-        return {"state": "unknown",
-                "reason": f"gh api compare returned unreadable JSON for "
-                          f"{branch}; what it adds was never read"}
-    under = PLAN_DIR.rstrip("/") + "/"
-    plans = [
-        f["filename"]
-        for f in files
-        if isinstance(f, dict)
-        and f.get("status") == "added"
-        and str(f.get("filename", "")).startswith(under)
-    ]
-    if not plans:
-        return {"state": "absent", "reason": f"{branch} adds nothing under {PLAN_DIR}"}
-    return {"state": "present",
-            "reason": f"{branch} adds {len(plans)} file(s) under {PLAN_DIR}",
-            "files": plans}
 
 
 def pr_for(ticket: str) -> dict | None:
@@ -1304,29 +1237,39 @@ def board_order(foreman_home: str) -> dict:
     }
 
 
-def build_attempts(entries: list[dict]) -> int:
-    """How many build attempts this card has actually consumed.
+def _attempts(entries: list[dict], role: str) -> int:
+    """How many attempts of one role this card has actually consumed.
 
     Counts distinct attempt labels rather than spawn lines: a spawn and a later
     resume of the same attempt are one attempt, and re-dispatching the same
     attempt number after an environment repair must not count twice.
 
-    A `void` entry removes an attempt from the count. The attempt budget exists
-    to stop a card looping on a ticket that cannot be built; an attempt killed by
+    A `void` entry removes an attempt from the count. An attempt budget exists
+    to stop a card looping on a ticket that cannot be done; an attempt killed by
     a full disk is evidence about the machine and none at all about the ticket,
     so spending the budget on it retires work that was never tried. Voiding is
-    for environment faults only — a build that genuinely failed keeps its cost.
+    for environment faults only — an attempt that genuinely failed keeps its
+    cost.
+
+    One body for both roles because that is one rule, not two. A second copy
+    drifts, and a drifted copy is a budget that quietly stops counting on one
+    stage while the operator still believes both are capped.
     """
     seen, voided = set(), set()
     for e in entries:
         ev = e.get("event") or {}
-        if ev.get("role") != "build":
+        if ev.get("role") != role:
             continue
         if ev.get("action") == "spawn":
             seen.add(str(ev.get("attempt")))
         elif ev.get("action") == "void":
             voided.add(str(ev.get("attempt")))
     return len(seen - voided)
+
+
+def build_attempts(entries: list[dict]) -> int:
+    """Build attempts consumed, which step 2 checks against MAX_BUILD_ATTEMPTS."""
+    return _attempts(entries, "build")
 
 
 def plan_rounds(entries: list[dict]) -> int:
@@ -1366,6 +1309,33 @@ def plan_rounds(entries: list[dict]) -> int:
         if (e.get("event") or {}).get("action") == "resume"
         and (e.get("event") or {}).get("role") == "plan"
     )
+
+
+def plan_attempts(entries: list[dict]) -> int:
+    """Plan attempts consumed, which step 2 checks against MAX_PLAN_ATTEMPTS.
+
+    A separate counter from `build_attempts` because it answers a separate
+    question. A card whose plan agent keeps dying would otherwise reach the
+    build stage with its build budget already spent on a stage that produced no
+    plan, and then fail the build almost at once for a reason the build agent
+    had nothing to do with. Counted separately, a card that cannot be planned is
+    parked for exactly that reason, and the build budget stays whole.
+
+    Counted from `history.jsonl` by ROLE, never from agent names, and this is
+    the same ambiguity `plan_rounds` above solves the same way: `agents_for()`
+    reports an agent under a deterministic `<role>-<attempt>` name, and nothing
+    outside history says which stage a given attempt belonged to. So this counts
+    only entries that name their role explicitly -- the `role` field
+    `dispatch.sh` writes on every spawn, and the one SKILL.md's `void` line
+    carries -- and a generic entry that names no role counts for nothing here.
+
+    Failed plan attempts only, in the sense `_attempts` gives: a plan agent
+    resumed at the same attempt number is still one attempt, and an attempt
+    voided for an environment fault is none. An operator asking for a revision
+    of a plan that WAS posted is not a failure at all; that is `plan_rounds`,
+    counted from resume entries, and the two caps are independent.
+    """
+    return _attempts(entries, "plan")
 
 
 def death_report(path: str | None) -> dict | None:
@@ -1445,11 +1415,11 @@ def reconcile(ticket: str, agents: list[dict]) -> dict:
         "history": entries,
         "build_attempts": build_attempts(entries),
         "plan_rounds": plan_rounds(entries),
+        "plan_attempts": plan_attempts(entries),
         "agents": mine,
         "worktree": worktree if os.path.isdir(worktree) else None,
         "pr": pr,
         "merged": bool(pr and pr.get("state") == "MERGED"),
-        "plan": plan_pushed(branch_for(ticket)),
         "deploy": {"verified": False, "reason": "not merged"},
     }
     if record["merged"]:

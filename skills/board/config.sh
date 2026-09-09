@@ -159,22 +159,6 @@ if ! _foreman_load_pairs "$REPO/board.toml" "$_foreman_root/bin/contract.py" "$R
 fi
 export REPO KEY_FILE INSTANCE INSTANCE_HOME BOARD_HOME
 
-# Where a build agent's plan lands, relative to REPO.
-#
-# The one place this path is written. brief.py renders it into the build
-# prompt, and reconcile.py reads the pushed branch for a file under it. A
-# prompt that names one path and a check that reads another leaves every card
-# stuck in the Plan column, with its plan committed and pushed and sitting
-# right there.
-#
-# skills/graphplan/SKILL.md writes to this same path by default. An override
-# therefore moves the instruction and the check together, and does not move
-# the skill's own default.
-#
-# `-`, not `:-`: an explicitly empty override must mean empty, the same
-# distinction every other override in this file makes.
-PLAN_DIR="${PLAN_DIR-docs/plans}"
-
 MAX_BUDGET_USD="${MAX_BUDGET_USD:-}"
 
 # One model per STAGE, because the three stages need different things.
@@ -200,6 +184,26 @@ MAX_BUDGET_USD="${MAX_BUDGET_USD:-}"
 PLAN_MODEL="${PLAN_MODEL-fable}"
 BUILD_MODEL="${BUILD_MODEL:-opus}"
 REVIEW_MODEL="${REVIEW_MODEL:-opus}"
+
+# How many times a card may FAIL to be planned before it is parked, separate
+# from MAX_BUILD_ATTEMPTS and MAX_PLAN_ROUNDS.
+#
+# MAX_PLAN_ROUNDS counts an operator revising a plan already posted -- the
+# plan agent is doing its job, just not done yet. This counts the other kind
+# of failure: the plan agent dies, times out, or never posts a valid comment
+# at all, and a fresh attempt is dispatched from scratch. Sharing a counter
+# with MAX_BUILD_ATTEMPTS would let a card that burned through failed plan
+# attempts arrive at the build stage with its build budget already spent on
+# a stage that never even produced a plan -- the card would then fail build
+# almost immediately, for a reason that has nothing to do with the build
+# agent. Keeping the two separate means a card that cannot be planned is
+# parked for that reason, named as that reason, with the build budget still
+# whole for the card that replaces it.
+#
+# `:-`, not `-`: this is a numeric cap like HOST_MAX_CONCURRENT below, not a
+# value where an explicitly empty override must reach through -- there is no
+# "disabled" reading of an empty attempt count, only a nonsensical one.
+MAX_PLAN_ATTEMPTS="${MAX_PLAN_ATTEMPTS:-2}"
 
 # The MACHINE's ceiling, across every instance sharing it -- not this
 # repository's `MAX_CONCURRENT`, which is a per-instance limit declared in
