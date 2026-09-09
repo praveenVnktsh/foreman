@@ -75,6 +75,16 @@ Documentation=file://$INSTALL_ROOT/skills/board/SKILL.md
 
 [Service]
 Type=oneshot
+# Signal only this unit's own main process. The default, KillMode=control-group,
+# kills every process left in the cgroup when the unit deactivates, and a
+# oneshot deactivates as soon as ExecStart returns -- a second after
+# supervise.sh has spawned the tick. On a host where nothing had started the
+# shared claude daemon yet, 'claude --bg' starts it inside this unit's cgroup,
+# and every card agent that daemon later spawns lives there too. Under the
+# default, 'systemctl --user restart foreman.service' -- the gesture an operator
+# reaches for -- kills every in-flight build on the machine, and the ordinary
+# timer fire kills the tick it just started.
+KillMode=process
 WorkingDirectory=$INSTALL_ROOT
 Environment=FOREMAN_HOME=$FOREMAN_HOME
 # systemd gives a user unit a minimal PATH. The claude CLI usually lives under

@@ -540,9 +540,71 @@ Inspect or control it by hand:
 ```bash
 ~/.foreman/install/skills/board/supervise.sh --status   # what it sees, changes nothing
 ~/.foreman/install/skills/board/supervise.sh --stop     # stop ticking
+~/.foreman/install/skills/board/supervise.sh --restart  # replace the tick, leave builds alone
 ~/.foreman/install/skills/board/supervise.sh            # start or repair now
 claude attach <id>                             # watch a tick live
 ```
+
+**`--restart` is how you pick up newly pulled install code, or replace a tick
+that looks wrong.** It stops the tick agent and nothing else. Every in-flight
+card keeps building, for the reason given above: its agent is parented to the
+`claude daemon`, not to the tick. The tick holds no state, so the replacement
+re-derives every card's position from Linear, `gh` and `claude agents`. The card
+agents are logged before and after, so you can check that rather than trust it.
+
+**One is the only correct number of ticks**, and every gesture that changes the
+tick acts on all of them. Several agents can genuinely share the name: a
+`--bg --resume` fork inherits it, and a stop that does not land leaves the old
+one beside the new. `--status` collapses them to the one that is running, so
+counting them is the script's job, not the reader's.
+
+A restart happens in four bounded steps, and every bound is in `config.sh`.
+
+1. **Take the machine lock**, waiting up to `TICK_LOCK_WAIT_SECONDS`. Only an
+   operator's gesture waits; a timer fire that finds the lock held stands down,
+   because the next fire is minutes away. Nothing re-runs what you typed.
+2. **Drain**, up to `TICK_DRAIN_SECONDS`: wait for the tick to finish the turn
+   it is in, then stop it anyway. A courtesy, not a correctness bound. Cutting a
+   stateless tick mid-turn costs only a transcript that stops mid-sentence.
+3. **Stop every live tick and confirm each is gone**, up to
+   `TICK_STOP_TIMEOUT_SECONDS`, *before* starting anything. This one is a
+   correctness bound, and the stop is re-issued on every poll rather than once.
+   `claude stop` is asynchronous and it can fail; a replacement started beside a
+   tick that never stopped gives the machine two ticks dispatching into one
+   `HOST_MAX_CONCURRENT`. When this bound passes, the restart refuses, which
+   leaves the machine with the ticks it already had, still ticking.
+4. **Confirm it started**, up to `TICK_START_TIMEOUT_SECONDS`: the registry must
+   hold exactly one live tick, and it must not be one of the ids just stopped.
+   `claude --bg` returns as soon as an agent is *spawned*, so "started" is not
+   evidence that a tick exists. Accepting "some live tick that is not the one I
+   stopped" instead let a survivor stand in for a replacement that never
+   spawned, and reported success for it.
+
+**The card agents are listed before and after, and the report states what it
+saw.** It names any agent whose state changed and says which ids this restart
+issued `claude stop` for, which is always only the tick. It does not tell you a
+missing build finished; nothing in the registry can distinguish that from one
+something else stopped, and a reassuring guess is worse than the fact.
+
+**`--stop` and `--restart` refuse rather than exit 0 when they did not act** —
+an unreadable registry, a lock they never got, a tick that would not stop. Run
+mode stands down or logs an error and carries on instead. The difference is who
+retries. A timer fire re-reads in ten minutes and re-enters the same branch;
+nothing re-runs a gesture an operator typed, so a `--restart` that exited 0 left
+the old tick running the old skill forever, having told the operator their newly
+pulled install code had taken effect.
+
+**A timer fire never fails the unit over a tick that will not stop.** It says so
+and starts no replacement beside it, then asks again on the next fire. Dying
+there marked `foreman.service` failed every ten minutes and fixed nothing, and
+the tick whose stop is slowest to land is the wedged one the watchdog is for.
+
+**A running tick keeps reading the skill it started with.** So
+`git -C ~/.foreman/install pull` changes nothing by itself, and `--restart` is
+what makes the new install take effect.
+
+`systemctl --user restart foreman.service` is **not** this gesture: it re-runs
+the watchdog, which finds a healthy tick and does nothing.
 
 **Why not `withlock.py` around `claude -p "/board"` any more.** That worked
 because `-p` blocks for the whole run, so the lock genuinely covered it. It does

@@ -45,3 +45,13 @@ when the repository it is building is foreman itself. A board that reads its own
 uncommitted code cannot survive merging a broken change to itself: the tick that
 would notice is the tick that just replaced itself. `git -C ~/.foreman/install
 pull` moves the pin, deliberately by hand.
+
+Pulling is only half of it. A running tick keeps reading the skill it started
+with, so the new install takes effect at the next restart:
+
+    ~/.foreman/install/skills/board/supervise.sh --restart
+
+That replaces the tick and leaves every card that is mid-build alone. Each
+dispatched agent is parented to the shared `claude daemon` rather than to the
+tick, and the tick holds no state, so the replacement re-derives every card's
+position from Linear, `gh` and `git`.

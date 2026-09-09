@@ -298,6 +298,65 @@ TICK_DEAD_MINUTES="${TICK_DEAD_MINUTES:-60}"
 # state, so a fresh agent re-derives the identical picture from Linear, gh and git.
 TICK_MAX_AGE_HOURS="${TICK_MAX_AGE_HOURS:-12}"
 
+# How long `supervise.sh --restart` waits for the tick to finish the turn it is
+# in before stopping it anyway.
+#
+# NOT a correctness bound. Stopping a tick mid-turn is safe: it holds no state,
+# and its replacement re-derives every card's position from Linear, gh and git.
+# This exists for the operator. A restart that routinely cuts a half-finished
+# merge or dispatch in two leaves a transcript that stops mid-sentence, and the
+# person reading it next cannot tell that from a crash.
+#
+# 120 seconds is longer than a merge or a dispatch and far shorter than a wedged
+# turn, which TICK_STALL_MINUTES already covers.
+TICK_DRAIN_SECONDS="${TICK_DRAIN_SECONDS:-120}"
+
+# How long `supervise.sh --stop` and `--restart` wait for another supervisor to
+# release the machine lock before refusing.
+#
+# Only an operator's gesture waits. A timer fire that finds the lock held stands
+# down, because the next fire is TICK_INTERVAL_MINUTES away and loses nothing;
+# nothing re-runs a gesture an operator typed, so standing down there reported
+# success without restarting anything.
+#
+# 240 seconds because that exceeds the longest a supervisor can legitimately
+# hold the lock: another operator's restart, which is TICK_DRAIN_SECONDS plus
+# TICK_STOP_TIMEOUT_SECONDS plus TICK_START_TIMEOUT_SECONDS, 210 with the
+# defaults. Waiting less would refuse a gesture that was only ever queued.
+TICK_LOCK_WAIT_SECONDS="${TICK_LOCK_WAIT_SECONDS:-240}"
+
+# How long supervise.sh waits for a tick it asked `claude stop` to close to
+# actually leave the registry, before refusing to start a replacement.
+#
+# THIS BOUND IS A CORRECTNESS BOUND, unlike TICK_DRAIN_SECONDS above.
+# `claude stop` is not instantaneous and it can fail, and a replacement started
+# beside a tick that never stopped gives one machine two ticks, both running
+# `/loop /board` against one HOST_MAX_CONCURRENT -- the double-dispatch
+# supervise.sh exists to prevent. Worse, it is invisible: the registry read
+# reports only the NEWEST agent of that name, so every later fire sees the
+# healthy replacement and never the survivor behind it. supervise.sh therefore
+# proves EVERY live tick is gone BEFORE it starts a new one, and refuses when it
+# cannot -- which leaves the machine with the ticks it already had.
+#
+# The stop is re-issued on every poll inside this bound, not once at the top:
+# the tick whose stop is slowest to land is the wedged one the watchdog exists
+# to replace, so one attempt followed by a wait gave up on the case that matters.
+#
+# 30 seconds is far longer than `claude stop` takes on a healthy daemon and
+# short enough that an operator waiting on a restart is not left guessing.
+TICK_STOP_TIMEOUT_SECONDS="${TICK_STOP_TIMEOUT_SECONDS:-30}"
+
+# How long `supervise.sh --restart` waits for the REPLACEMENT tick to appear in
+# the agent registry before reporting failure.
+#
+# `claude --bg` returns as soon as the agent is SPAWNED, so the "started
+# foreman/tick" line supervise.sh prints is not evidence that a tick exists. A
+# restart that reports success over a tick which never came up leaves the board
+# silently stopped until the next timer fire, and the operator has just been
+# told it worked, so nobody looks. A restart is the one gesture that cannot
+# afford to be believed on faith.
+TICK_START_TIMEOUT_SECONDS="${TICK_START_TIMEOUT_SECONDS:-60}"
+
 # Convergence: how long one tick may keep working before handing over.
 #
 # A tick runs passes until nothing changes, waiting for work it started itself
