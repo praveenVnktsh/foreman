@@ -14,6 +14,11 @@
 # unreadable priority now costs only its own card; the card is still refused,
 # but out loud on stderr, and every other card still dispatches.
 #
+# PRA-342: a board where every card is unrankable used to exit 0 with empty
+# stdout -- exactly what an empty Todo list produces. The tick could not tell
+# a stalled board from an idle one. Exit 2 is what separates them: it means
+# cards came in and not one of them could be ranked.
+#
 # It drives the real script over a pipe. No fixture instance, no git repository.
 set -uo pipefail
 
@@ -43,23 +48,24 @@ refuses() {
   esac
 }
 
-# $1 name, $2 expected stdout (newline separated, "" for none), $3 identifier
-# the stderr skip line must name, $4 substring the skip reason must carry,
-# $5 JSON on stdin
+# $1 name, $2 expected exit status (0 if some card ranked, 2 if none did),
+# $3 expected stdout (newline separated, "" for none), $4 identifier the
+# stderr skip line must name, $5 substring the skip reason must carry, $6
+# JSON on stdin
 #
 # orders() and refuses() fold stderr into stdout with 2>&1, which cannot judge
-# a skip: a skip writes to BOTH streams and exits 0, so neither "wanted one
-# stream" helper can tell it apart from an order or a refusal. queue.py is a
-# pure filter -- same input, same output, no side effect -- so running it
-# twice, once with stderr discarded and once with stdout discarded, reads each
-# stream on its own with no scratch file.
+# a skip: a skip writes to BOTH streams, so neither "wanted one stream" helper
+# can tell it apart from an order or a refusal. queue.py is a pure filter --
+# same input, same output, no side effect -- so running it twice, once with
+# stderr discarded and once with stdout discarded, reads each stream on its
+# own with no scratch file.
 skips() {
-  local name="$1" want_out="$2" want_id="$3" want_word="$4" json="$5"
+  local name="$1" want_status="$2" want_out="$3" want_id="$4" want_word="$5" json="$6"
   local out out_status err
   out="$(printf '%s' "$json" | "$queue" 2>/dev/null)"; out_status=$?
   err="$(printf '%s' "$json" | "$queue" 2>&1 >/dev/null)"
-  if [[ $out_status -ne 0 ]]; then
-    bad "$name: exited $out_status, wanted 0"
+  if [[ $out_status -ne $want_status ]]; then
+    bad "$name: exited $out_status, wanted $want_status"
     return
   fi
   if [[ "$out" != "$want_out" ]]; then
@@ -108,31 +114,31 @@ orders "a float priority ranks as its integer value: 1.0 sorts as Urgent" \
     {"identifier":"ABC-2","priority":4}]'
 
 skips "a missing priority skips its own card, and the message names it" \
-  "ABC-7" "ABC-8" "missing" \
+  0 "ABC-7" "ABC-8" "missing" \
   '[{"identifier":"ABC-7","priority":1},{"identifier":"ABC-8"}]'
 
 skips "a null priority skips its own card rather than read as untriaged" \
-  "" "ABC-7" "null" \
+  2 "" "ABC-7" "null" \
   '[{"identifier":"ABC-7","priority":null}]'
 
 skips "a boolean priority skips its own card rather than read as urgent" \
-  "" "ABC-7" "boolean" \
+  2 "" "ABC-7" "boolean" \
   '[{"identifier":"ABC-7","priority":true}]'
 
 skips "a priority outside the scale skips its own card, named by value" \
-  "" "ABC-7" "9" \
+  2 "" "ABC-7" "9" \
   '[{"identifier":"ABC-7","priority":9}]'
 
 skips "a priority name Linear does not use skips its own card" \
-  "" "ABC-7" "critical" \
+  2 "" "ABC-7" "critical" \
   '[{"identifier":"ABC-7","priority":"critical"}]'
 
 skips "a float that is not a whole number skips only its own card" \
-  "ABC-2" "ABC-1" "whole number" \
+  0 "ABC-2" "ABC-1" "whole number" \
   '[{"identifier":"ABC-1","priority":2.5},{"identifier":"ABC-2","priority":1}]'
 
 skips "one unrankable card is skipped and every other card is still ordered" \
-  "$(printf 'ABC-1\nABC-3')" "ABC-2" "missing" \
+  0 "$(printf 'ABC-1\nABC-3')" "ABC-2" "missing" \
   '[{"identifier":"ABC-1","priority":1},
     {"identifier":"ABC-2"},
     {"identifier":"ABC-3","priority":4}]'
@@ -142,10 +148,10 @@ board='[{"identifier":"ABC-1","priority":null},
         {"identifier":"ABC-3","priority":9}]'
 out="$(printf '%s' "$board" | "$queue" 2>/dev/null)"; out_status=$?
 err="$(printf '%s' "$board" | "$queue" 2>&1 >/dev/null)"
-if [[ $out_status -eq 0 && -z "$out" \
+if [[ $out_status -eq 2 && -z "$out" \
       && "$err" == *"skipped ABC-1"* && "$err" == *"skipped ABC-2"* \
       && "$err" == *"skipped ABC-3"* ]]; then
-  ok "a whole board of unrankable cards prints nothing on stdout, reports every one on stderr, and exits 0"
+  ok "a whole board of unrankable cards exits 2, distinct from an empty Todo list, and names every card on stderr"
 else
   bad "a whole board of unrankable cards: stdout=[$out] stderr=[$err] exit=$out_status"
 fi

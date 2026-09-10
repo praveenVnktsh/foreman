@@ -9,12 +9,14 @@ has them from Linear MCP. Each item needs an "identifier" ("ABC-7") and a
 the tick pipes issues through untouched.
 
     stdout  one identifier per line, most urgent first, and nothing else.
-    stderr  one line per card that could not be ranked, and one line for a
-            refusal of the whole batch.
+    stderr  one line per card that could not be ranked, and one line for the
+            whole batch when it is refused or ranks nothing.
     exit 0  stdin was read and an order was computed from every card that could
-            be ranked. An empty list, and a batch whose every card was skipped,
-            both print nothing on stdout and exit 0.
-    exit 1  there is no order at all. stdout is empty.
+            be ranked. An empty list is a board with no work: it prints nothing
+            on stdout and exits 0.
+    exit 1  the batch is refused and there is no order at all. stdout is empty.
+    exit 2  cards came in and not one of them could be ranked. stdout is empty,
+            and every skipped card is named on stderr.
 
 This exists so the tick stops judging urgency by eye. Linear already carries a
 priority on every card, and until this file the board never read it.
@@ -27,6 +29,13 @@ refused, out loud on stderr, and the tick reports it to the operator who sets
 the priority in Linear. It is never ranked at a default: a confident order built
 on a priority nobody set is worse than a short one, because nothing downstream
 would say so.
+
+A batch that ranks nothing exits 2, not 0. The refusal still stops at the card,
+one card at a time. But an empty stdout with exit 0 is byte-for-byte what an idle
+board prints, so a tick that cannot tell a stalled board from an idle one does
+not report the stall, and nobody sets the priority. That is the same silence, one
+level up. An empty input list is the one case that stays exit 0: no cards came
+in, so there is nothing to stall.
 
 A card can only be skipped if it can be named, and the identifier is how a
 report names it. So a missing or malformed identifier still refuses the whole
@@ -74,6 +83,11 @@ NAME_PRIORITIES = {
 # every untriaged card ahead of every Urgent one, and a board whose backlog is
 # mostly untriaged then dispatches its least understood work first.
 PRIORITY_BANDS = {0: 5, 1: 1, 2: 2, 3: 3, 4: 4}
+
+# Exit status for a batch that came in with cards and ranked none of them. It is
+# not 1: stdin was read and every card was reported, so this is a stalled board
+# and not a refused input.
+NOTHING_RANKED = 2
 
 # A Linear identifier: a team key, a hyphen, a number. The team key admits no
 # hyphen, so the number is everything after the one hyphen.
@@ -194,6 +208,17 @@ def main(argv: list[str]) -> int:
         # newcomers starves a card that has already waited.
         number = int(identifier.rsplit("-", 1)[1])
         keys.append((rank, number, identifier))
+
+    if issues and not keys:
+        # An empty stdout with exit 0 is exactly what an idle board prints, so a
+        # tick that cannot tell the two apart never reports the stall and nobody
+        # sets the priority. That is the silence PRA-197 removed per card,
+        # reappearing for the whole batch.
+        sys.stderr.write(
+            "queue: nothing was ranked: every card's priority was unreadable. "
+            "Each one is named above. Set their priority in Linear.\n"
+        )
+        return NOTHING_RANKED
 
     # The identifier is the final tiebreak, so the order is total: the same
     # input always prints the same lines, whatever order Linear returned.
