@@ -42,6 +42,17 @@ home="$work/home"
 repo="$work/repo"
 mkdir -p "$home" "$repo"
 fixture_board_toml "$repo"
+
+# A distinctive number, appended after the fixture writes its own board.toml.
+# 80 is bin/contract.py's default, so asserting that number below would pass
+# even if brief.py hardcoded it and never read the target's own budget -- the
+# exact failure this case exists to catch.
+FIXTURE_MAX_LABEL_CHARS=57
+cat >> "$repo/board.toml" <<TOML
+[limits]
+max_label_chars = $FIXTURE_MAX_LABEL_CHARS
+TOML
+
 fixture_add_board "$home" demo "$repo"
 
 ask_brief() { env HOME="$home" FOREMAN_INSTANCE=demo "$brief" "$@"; }
@@ -89,6 +100,18 @@ if [[ "$plan_prompt" == *"$checker"* && -x "$checker" ]]; then
   ok "the plan prompt names an executable check-plan-graph.py ($checker)"
 else
   bad "the plan prompt does not name this installation's check-plan-graph.py (expected $checker):
+$plan_prompt"
+fi
+
+# The checker refuses a label wider than its budget, so a plan agent handed
+# the wrong number either writes labels the gate rejects or writes labels
+# wider than the target can read. That budget belongs to the target tree, not
+# to this installation, so the prompt must carry board.toml's own number
+# ($FIXTURE_MAX_LABEL_CHARS), never bin/check-plan-graph.py's built-in 80.
+if [[ "$plan_prompt" == *"$checker --max-label-chars $FIXTURE_MAX_LABEL_CHARS"* ]]; then
+  ok "the plan prompt's checker command carries the fixture's own max-label-chars"
+else
+  bad "the plan prompt does not put --max-label-chars $FIXTURE_MAX_LABEL_CHARS beside the checker path:
 $plan_prompt"
 fi
 

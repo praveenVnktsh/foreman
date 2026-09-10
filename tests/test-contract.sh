@@ -360,4 +360,111 @@ else
     *) printf 'FAIL error did not name max_review_rounds: %s\n' "$err"; fail=1 ;; esac
 fi
 
+cat >"$work/labelchars.toml" <<'TOML'
+[linear]
+team = "PRA"
+project = "foreman"
+[checks]
+required = ["Tests"]
+ci_workflow = "CI"
+[test]
+command = "make test"
+[limits]
+max_label_chars = 96
+TOML
+check "max_label_chars round-trips" "96" "$(read_key "$work/labelchars.toml" MAX_LABEL_CHARS)"
+
+# A target that declares no [limits] table at all -- not even an empty one --
+# must still get bin/contract.py's own default, the same as every other key
+# in LIMITS.
+cat >"$work/nolimits.toml" <<'TOML'
+[linear]
+team = "PRA"
+project = "foreman"
+[checks]
+required = ["Tests"]
+ci_workflow = "CI"
+[test]
+command = "make test"
+TOML
+check "no [limits] table at all still yields the max_label_chars default" \
+  "80" "$(read_key "$work/nolimits.toml" MAX_LABEL_CHARS)"
+
+# Junk is refused, naming the key. A contract that says less than its author
+# thought, and says it with exit code 0, is what this loader exists to
+# prevent -- a string or a negative number must not silently become a plan
+# checker running on the wrong budget.
+cat >"$work/labelchars_string.toml" <<'TOML'
+[linear]
+team = "PRA"
+project = "foreman"
+[checks]
+required = ["Tests"]
+ci_workflow = "CI"
+[test]
+command = "make test"
+[limits]
+max_label_chars = "96"
+TOML
+if err="$("$root/bin/contract.py" "$work/labelchars_string.toml" 2>&1 >/dev/null)"; then
+  printf 'FAIL max_label_chars = "96" (a string) must be refused\n'; fail=1
+else
+  case "$err" in *max_label_chars*) printf 'ok   max_label_chars as a string is refused\n' ;;
+    *) printf 'FAIL error did not name max_label_chars: %s\n' "$err"; fail=1 ;; esac
+fi
+
+cat >"$work/labelchars_negative.toml" <<'TOML'
+[linear]
+team = "PRA"
+project = "foreman"
+[checks]
+required = ["Tests"]
+ci_workflow = "CI"
+[test]
+command = "make test"
+[limits]
+max_label_chars = -1
+TOML
+if err="$("$root/bin/contract.py" "$work/labelchars_negative.toml" 2>&1 >/dev/null)"; then
+  printf 'FAIL max_label_chars = -1 must be refused\n'; fail=1
+else
+  case "$err" in *max_label_chars*) printf 'ok   negative max_label_chars is refused\n' ;;
+    *) printf 'FAIL error did not name max_label_chars: %s\n' "$err"; fail=1 ;; esac
+fi
+
+# max_label_chars = 0 LOADS. It is deliberately absent from LIMIT_MINIMUMS:
+# zero refuses every label, which starves planning loudly -- the card idles
+# unplanned -- unlike max_review_rounds = 0, which disarms the review gate and
+# lets an unreviewed diff merge. Same shape as the max_concurrent = 0 case
+# above: a limit whose zero only starves work, rather than skipping a check,
+# is a legitimate operator choice and must still load.
+cat >"$work/zero_labelchars.toml" <<'TOML'
+[linear]
+team = "PRA"
+project = "foreman"
+[checks]
+required = ["Tests"]
+ci_workflow = "CI"
+[test]
+command = "make test"
+[limits]
+max_label_chars = 0
+TOML
+check "max_label_chars = 0 still loads (starves planning, disarms nothing)" \
+  "0" "$(read_key "$work/zero_labelchars.toml" MAX_LABEL_CHARS)"
+
+# The default of 80 is written twice on purpose -- bin/contract.py's LIMITS
+# and bin/check-plan-graph.py's DEFAULT_MAX_LABEL_CHARS cannot import each
+# other -- so this pins the two together instead of retyping either number.
+# If they drift, a target that declares no [limits] gets a plan judged
+# against one number by check-plan-graph.py while the prompt that told it to
+# write within budget named the other. The number here comes from
+# check-plan-graph.py's own --limits sentence, not from a copy typed in this
+# file: a test that retypes either number would stay green while the two
+# drifted, which is the defect this case exists to catch.
+plan_default="$(python3 "$root/bin/check-plan-graph.py" --limits |
+  sed -n 's/.*at most \([0-9]\+\) characters.*/\1/p')"
+check "check-plan-graph.py's default agrees with contract.py's MAX_LABEL_CHARS default" \
+  "$plan_default" "$(read_key "$work/nolimits.toml" MAX_LABEL_CHARS)"
+
 exit "$fail"

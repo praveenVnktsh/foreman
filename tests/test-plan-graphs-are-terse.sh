@@ -53,6 +53,16 @@
 # costs a review round, so both directions are cases here: what must be
 # refused, and what must be accepted.
 #
+# The seventh, PRA-346 on 2026-09-09: a `subgraph` statement sharing its line
+# with a graph statement and no ";" between them. The title ran from the first
+# "[" to the last "]", so the checker reported a title nobody wrote and, in the
+# same breath, a graph with no link -- on a line that draws one. The same card
+# gave the character budget a --max-label-chars option, because 80 is
+# calibrated on THIS tree and the gate runs against plans for any target. The
+# cases below: that subgraph line, the mirror of the fifth's keyword loop with
+# no ";" after the keyword, the bare `subgraph <title>` form, and
+# --max-label-chars moving the budget and refusing a junk value.
+#
 # What is deliberately NOT covered: rendering (another test owns it) and the
 # wording of SKILL.md's prose, only the lines it must reproduce verbatim.
 set -uo pipefail
@@ -585,6 +595,30 @@ for keyword in "class a hot" "classDef hot fill:#f00" "style a fill:#f00" \
   fi
 done
 
+# The mirror of the loop above, with no ";" after the keyword. `class`,
+# `classDef`, `style`, `linkStyle` and `direction` all take an operand that
+# mermaid itself reads to a ";" or the end of the statement, wherever that
+# falls -- there is no other separator in their grammar. So text packed after
+# one of them with no ";" is that keyword's own operand, not a second
+# statement, and the loop above proves the opposite only because its ";" is
+# what turns the packed text into one. This loop packs the same 200-character
+# label with no ";" and expects it swallowed, unmeasured, because it was never
+# a node statement to begin with.
+for keyword in "class a hot" "classDef hot fill:#f00" "style a fill:#f00" \
+               "linkStyle 0 stroke:#f00" "direction LR"; do
+  {
+    printf '```mermaid\nflowchart TD\n  a["one"] --> b["two"]\n'
+    printf '  %s c1["%s"] --> c2["ok"]\n' "$keyword" "$(printf 'x%.0s' {1..200})"
+    printf '```\n'
+  } >"$work_dir/keyword-no-semicolon.md"
+  if out="$(python3 "$checker" "$work_dir/keyword-no-semicolon.md" 2>&1)"; then
+    [[ -z "$out" ]] && ok "\`$keyword\` with no \";\" folds the rest of the line into its own operand" \
+      || bad "accepted \`$keyword\` with no \";\", but printed something: $out"
+  else
+    bad "\`$keyword\` with no \";\" was refused, though the packed text is its operand, not a statement: $out"
+  fi
+done
+
 # A subgraph sharing its line with a graph statement: accepted. The title is
 # read from the statement, not from the line. Read from the line, it ran to the
 # last `]` on it, so this graph was refused for a five-word title nobody wrote
@@ -601,6 +635,53 @@ if out="$(python3 "$checker" "$work_dir/subgraph-line.md" 2>&1)"; then
     || bad "accepted, but printed something: $out"
 else
   bad "a subgraph sharing its line with an edge was refused: $out"
+fi
+
+# The same line with no ";" between the subgraph statement and the graph
+# statement: refused, naming the trailing text and the missing separator.
+# Mermaid puts a separator after the title's "]" and does not render this line
+# either. Until PRA-346 on 2026-09-09 the title ran from the first "[" to the
+# last "]" on the line, so this was refused for a five-word title nobody wrote
+# and, in the same breath, for having no link -- though the line draws one.
+# Neither false claim may come back.
+cat >"$work_dir/subgraph-no-semicolon.md" <<'MD'
+```mermaid
+flowchart TD
+  subgraph s["the board"] a["one"] --> b["two"]
+  end
+```
+MD
+if out="$(python3 "$checker" "$work_dir/subgraph-no-semicolon.md" 2>&1)"; then
+  bad "a subgraph sharing its line with a graph statement and no \";\" was accepted"
+else
+  case "$out" in
+    *"no link between any two nodes"*)
+      bad "a subgraph line missing \";\" was told it draws no link, though the line draws one: $out" ;;
+    *"subgraph title"*"words"*)
+      bad "a subgraph line missing \";\" was refused for a title nobody wrote: $out" ;;
+    *"text after the title"*)
+      ok "a subgraph sharing its line with a graph statement and no \";\" is refused, naming the trailing text and the missing separator" ;;
+    *) bad "refused, but not for the missing \";\": $out" ;;
+  esac
+fi
+
+# The bare form of a subgraph title, with no id and no brackets: still
+# measured against the four-word budget. `the whole board title` is exactly
+# four words, so a checker that skipped this form, or measured it off by one,
+# would show it here instead of on a plan.
+cat >"$work_dir/subgraph-bare-title.md" <<'MD'
+```mermaid
+flowchart TD
+  subgraph the whole board title
+    a["one"] --> b["two"]
+  end
+```
+MD
+if out="$(python3 "$checker" "$work_dir/subgraph-bare-title.md" 2>&1)"; then
+  [[ -z "$out" ]] && ok "a bare subgraph title at the four-word budget is accepted silently" \
+    || bad "accepted, but printed something: $out"
+else
+  bad "a bare subgraph title at the four-word budget was refused: $out"
 fi
 
 # A `;` inside a label is text, not a separator. The statement split is what
@@ -662,6 +743,60 @@ if out="$(python3 "$checker" "$work_dir/terse.md" 2>&1)"; then
 else
   bad "a terse graph inside the budget was refused: $out"
 fi
+
+# --- 2b. --max-label-chars: the budget a deeper target raises -------------
+#
+# limits.max_label_chars in a target's board.toml reaches this file as this
+# flag -- see the comment above DEFAULT_MAX_LABEL_CHARS for why 80 is a
+# default calibrated on this tree and not a ceiling on every tree.
+ninety_chars="$(printf 'x%.0s' {1..90})"
+printf '%s\n' \
+  '```mermaid' \
+  'flowchart TD' \
+  "  c1[\"$ninety_chars\"] --> c2[\"ok\"]" \
+  '```' \
+  >"$work_dir/max-label-chars.md"
+
+if out="$(python3 "$checker" "$work_dir/max-label-chars.md" 2>&1)"; then
+  bad "a 90-character node label was accepted at the default --max-label-chars"
+else
+  case "$out" in
+    *"node c1"*"characters"*) ok "a 90-character node label is refused at the default --max-label-chars" ;;
+    *) bad "refused, but not for the character count: $out" ;;
+  esac
+fi
+
+if out="$(python3 "$checker" --max-label-chars 96 "$work_dir/max-label-chars.md" 2>&1)"; then
+  [[ -z "$out" ]] && ok "the same 90-character node label is accepted under --max-label-chars 96" \
+    || bad "accepted under --max-label-chars 96, but printed something: $out"
+else
+  bad "a 90-character node label was refused under --max-label-chars 96: $out"
+fi
+
+case "$(python3 "$checker" --limits)" in
+  *"at most 80 characters"*) ok "--limits with no option prints the default of 80 characters" ;;
+  *) bad "--limits with no option did not print the default of 80 characters: $(python3 "$checker" --limits)" ;;
+esac
+
+case "$(python3 "$checker" --limits --max-label-chars 96)" in
+  *"at most 96 characters"*) ok "--limits --max-label-chars 96 prints 96, not the default" ;;
+  *) bad "--limits --max-label-chars 96 did not print 96: $(python3 "$checker" --limits --max-label-chars 96)" ;;
+esac
+
+# A junk value for --max-label-chars: a usage error naming the option, exit 2,
+# never a stack trace and never a silent fallback to the default.
+for junk in "wide" "-5"; do
+  out="$(python3 "$checker" --max-label-chars "$junk" "$work_dir/max-label-chars.md" 2>&1)"
+  status=$?
+  if [[ $status -ne 2 ]]; then
+    bad "--max-label-chars $junk exited $status, not 2: $out"
+  else
+    case "$out" in
+      *"--max-label-chars"*) ok "--max-label-chars $junk is a usage error naming the option" ;;
+      *) bad "--max-label-chars $junk exited 2 but did not name the option: $out" ;;
+    esac
+  fi
+done
 
 # --- 3. Drift: SKILL.md states the budget the checker enforces -------------
 #

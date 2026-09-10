@@ -64,12 +64,23 @@ Any label line: at most 80 characters, counted as it renders.
 c4["<b>c4 · config.sh</b> · CHANGE<br/>loads one board's environment<br/><i>opus · high</i>"]
 ```
 
+80 is `bin/check-plan-graph.py`'s default, not a ceiling every target shares. A
+target raises it by setting `limits.max_label_chars` in its own `board.toml`;
+the board reads that value and passes it to the checker as `--max-label-chars
+N` on the command line in the plan agent's prompt. A plan is judged by the
+number on that command line, not by the number printed above.
+
 **A path that will not fit goes on a line of its own.** A node names the file
-it builds, and in a deep tree `c1 · ` plus the path plus ` · CHANGE` passes 80
-characters. A node label has four lines: put the path on one of them by itself.
+it builds, and in a deep tree `c1 · ` plus the path plus ` · CHANGE` passes the
+budget. A node label has four lines: put the path on one of them by itself.
 If the path alone is still too wide, write the tail that identifies it,
 `.../service/BoardStatusTest.java`, and let the prompt carry the whole path. The
 prompt has no budget; the picture does.
+
+**When the whole tree runs deep, raise the budget instead of trimming every
+label.** A target whose paths are long throughout is not solved node by node;
+its `board.toml` declares a wider `limits.max_label_chars` once, and every
+label in every plan gets the room the target actually needs.
 
 **Quote every label the brackets hold:** `c1["..."]`. Brackets nest and mermaid
 has a dozen node shapes, so an unquoted label has no unambiguous end. The check

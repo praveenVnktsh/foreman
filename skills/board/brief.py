@@ -145,7 +145,7 @@ def _load_target_config(ticket: str) -> dict[str, str]:
     agent to create a branch (`board/{ticket}`) that nothing else looked for,
     after every other branch name moved to `foreman/<instance>/<ticket>`.
     """
-    keys = ("TEST_COMMAND", "REQUIRED_DOCS")
+    keys = ("TEST_COMMAND", "REQUIRED_DOCS", "MAX_LABEL_CHARS")
     script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.sh")
     printf = (
         'printf "%s\\0" ' + " ".join(f'"${k}"' for k in keys) + ' "$(branch_name "$1")"'
@@ -239,6 +239,15 @@ def plan(args) -> str:
         )
 
     cfg = _load_target_config(args.ticket)
+    max_label_chars = cfg["MAX_LABEL_CHARS"]
+    # config.sh lets any environment variable override a contract value
+    # (`eval "$key=\"\${$key-\$value}\""` in _foreman_load_pairs), so the string
+    # reaching us here is not guaranteed to be the integer bin/contract.py
+    # validated. It is about to sit on a command line inside this prompt, so a
+    # non-digit value is refused rather than spliced in unchecked.
+    if not max_label_chars.isdigit():
+        _refuse(f"plan: MAX_LABEL_CHARS is {max_label_chars!r}; expected a run of digits")
+
     return f"""\
 You are planning Linear ticket {args.ticket}. You draw the plan and nothing else.
 
@@ -265,7 +274,10 @@ at a time. It also owns the budget every label you write is judged against.
 Draw ONE mermaid graph. No prose above it, none below it. Then check it, and \
 fix what it refuses:
 
-    {CHECK_PLAN_GRAPH} <file>
+    {CHECK_PLAN_GRAPH} --max-label-chars {max_label_chars} <file>
+
+That {max_label_chars} is this target's own budget, read from its board.toml, \
+not whatever number `skills/graphplan/SKILL.md` shows you as an example.
 
 Write the graph to any file in this worktree to run that check. `graphplan` \
 tells you to commit the plan under `docs/plans/`. On this board you do not: \
