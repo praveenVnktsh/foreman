@@ -1690,12 +1690,17 @@ merged but failed to deploy is building on something that is not there.
 
 `blocks` needs no handling: the gating always happens on the dependent's side.
 
-Order what is left with `queue.py`. Write this board's `Todo` cards to a file,
-as the JSON Linear returned, and pipe them in, sending the order and the skips
-to different places:
+Order what is left with `queue.py`. Make a scratch directory with `mktemp -d`
+first — a fixed name under `/tmp` is shared with every other instance on the
+machine and with anyone who can create the file first, so a name made fresh
+per tick is the only one nothing else can race or pre-create. Write this
+board's `Todo` cards to a file in it, as the JSON Linear returned, and pipe
+them in, sending the order and the skips to different places:
 
 ```bash
-~/.foreman/install/skills/board/queue.py < /tmp/todo.json > /tmp/queue.out 2> /tmp/queue.err
+Q="$(mktemp -d)"
+# write this board's Todo cards, as the JSON Linear returned, to "$Q/todo.json"
+~/.foreman/install/skills/board/queue.py < "$Q/todo.json" > "$Q/queue.out" 2> "$Q/queue.err"
 ```
 
 **Never read the two as one list.** A skip line names a card too, so a tick
@@ -1710,16 +1715,17 @@ by newer cards that share its priority.
 
 **A card `queue.py` cannot rank is skipped, not the batch.** It writes one
 `queue: skipped <T>: <reason>` line on stderr and ranks every other `Todo` card.
-Read `/tmp/queue.err`, dispatch from the order in `/tmp/queue.out`, and name
+Read `$Q/queue.err`, dispatch from the order in `$Q/queue.out`, and name
 every skipped card in the report. The operator sets the priority in Linear and
 the card queues on the next tick.
 
-Three exit codes, one meaning each: 0 is an order or an empty board, 2 is
-cards in and none ranked, 1 is the tick's own read being wrong.
+Four exit codes, one meaning each: 0 is an order or an empty board, 3 is
+cards in and none ranked, 1 is the tick's own read being wrong, 2 is the tick's
+own invocation being wrong.
 
 - **A skipped card is not a failed card.** Do not move it, do not label it, do
   not count a build attempt against it. Nothing about the card's work failed.
-- **Exit 2 means cards came in and not one of them ranked.** stdout is empty
+- **Exit 3 means cards came in and not one of them ranked.** stdout is empty
   and every skipped card is named on stderr. Dispatch nothing on this board's
   slice, and name every skipped card in the report so the operator sets the
   priority in Linear. Say it plainly: a stalled board and an idle one read the
@@ -1732,6 +1738,12 @@ cards in and none ranked, 1 is the tick's own read being wrong.
   report the refusal with its message, end the slice and take the next board.
   Never fall back to picking a card by eye — that is the failure `queue.py`
   exists to prevent.
+- **Exit 2 means the tick called `queue.py` wrong**, so nothing about the board
+  is known. Dispatch nothing on this board's slice, and report the invocation
+  the same way exit 1 is reported. Exit 2 never means a stalled board. Reading
+  it as one reports a mistyped command to the operator as "every card on this
+  board is untriaged", and an empty shell variable that got word-split away is
+  enough to produce it.
 
 Take **one** card: the first identifier `queue.py` prints on stdout that is
 dispatchable. stderr is never a source of cards. Walk down the list, because the dependency gate above may have made the first

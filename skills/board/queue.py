@@ -15,7 +15,9 @@ the tick pipes issues through untouched.
             be ranked. An empty list is a board with no work: it prints nothing
             on stdout and exits 0.
     exit 1  the batch is refused and there is no order at all. stdout is empty.
-    exit 2  cards came in and not one of them could be ranked. stdout is empty,
+    exit 2  the tool was called wrong: the argv is not `queue.py < todo.json`.
+            stdout is empty.
+    exit 3  cards came in and not one of them could be ranked. stdout is empty,
             and every skipped card is named on stderr.
 
 This exists so the tick stops judging urgency by eye. Linear already carries a
@@ -30,7 +32,7 @@ the priority in Linear. It is never ranked at a default: a confident order built
 on a priority nobody set is worse than a short one, because nothing downstream
 would say so.
 
-A batch that ranks nothing exits 2, not 0. The refusal still stops at the card,
+A batch that ranks nothing exits 3, not 0. The refusal still stops at the card,
 one card at a time. But an empty stdout with exit 0 is byte-for-byte what an idle
 board prints, so a tick that cannot tell a stalled board from an idle one does
 not report the stall, and nobody sets the priority. That is the same silence, one
@@ -40,7 +42,8 @@ in, so there is nothing to stall.
 A card can only be skipped if it can be named, and the identifier is how a
 report names it. So a missing or malformed identifier still refuses the whole
 batch, as do stdin that is not a JSON list, an item that is not a JSON object,
-one identifier listed twice, and the wrong argv.
+and one identifier listed twice. A wrong argv is not a refused batch and exits
+2: no batch was read at all.
 
 The `priority` here is Linear's per-CARD scale. It is NOT the `priority` key in
 ~/.foreman/boards.toml, which weighs how much of the machine a whole board may
@@ -87,7 +90,18 @@ PRIORITY_BANDS = {0: 5, 1: 1, 2: 2, 3: 3, 4: 4}
 # Exit status for a batch that came in with cards and ranked none of them. It is
 # not 1: stdin was read and every card was reported, so this is a stalled board
 # and not a refused input.
-NOTHING_RANKED = 2
+#
+# It is 3 and not 2 because 2 means "you called this tool wrong" everywhere else
+# on this board -- see the "WHY 3 AND NOT 2" paragraph at the top of waitfor.py,
+# which draws the same line. A stalled board and a mistyped invocation both
+# print nothing on stdout, so one code for both lets an empty shell variable
+# that got word-split away read to the tick as a stalled board, reported to the
+# operator as cards nobody triaged.
+NOTHING_RANKED = 3
+
+# Exit status for a wrong argv. It is argparse's own code for a usage error, and
+# every other board tool already means that by 2.
+CALLED_WRONG = 2
 
 # A Linear identifier: a team key, a hyphen, a number. The team key admits no
 # hyphen, so the number is everything after the one hyphen.
@@ -108,8 +122,19 @@ class Unrankable(Exception):
 
 
 def die(message: str) -> NoReturn:
+    """Refuse the whole batch. The tick's read of the board is wrong."""
     sys.stderr.write(f"queue: {message}\n")
     raise SystemExit(1)
+
+
+def die_usage() -> NoReturn:
+    """Refuse the invocation, which is a different failure from a refused batch.
+
+    Nothing was read here, so the board says nothing about itself. Exiting 1
+    would tell the tick that the cards it sent were bad.
+    """
+    sys.stderr.write("queue: usage: queue.py < todo.json\n")
+    raise SystemExit(CALLED_WRONG)
 
 
 def report_skip(identifier: str, reason: str) -> None:
@@ -178,7 +203,7 @@ def identifier_of(item: object) -> str:
 
 def main(argv: list[str]) -> int:
     if len(argv) != 1:
-        die("usage: queue.py < todo.json")
+        die_usage()
 
     try:
         issues = json.load(sys.stdin)
