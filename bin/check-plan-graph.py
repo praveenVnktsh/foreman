@@ -2,6 +2,7 @@
 """Refuse a plan that is not a graph, or whose labels have grown back into prose.
 
     check-plan-graph.py docs/plans/a.md docs/plans/b.md
+    check-plan-graph.py --max-label-chars 96 docs/plans/a.md
     check-plan-graph.py --limits
 
 Every label on a line is measured, not only the first. Review of PR #18 on
@@ -17,12 +18,13 @@ nothing asked: an empty ```mermaid fence and a prose plan wrapped in one both
 passed as plan graphs.
 
 `skills/graphplan/SKILL.md` states the budget in words. This file is where the
-numbers live, and a test compares the two, so the sentence below is built from
-the constants rather than typed a second time.
+default numbers live, and a test compares the two, so the sentence `--limits`
+prints is built from them rather than typed a second time.
 """
 
 from __future__ import annotations
 
+import argparse
 import html
 import re
 import sys
@@ -53,25 +55,47 @@ from typing import NamedTuple
 # wraps its prose at, and it leaves nine characters over the longest name a
 # plan must be able to write.
 #
-# 80 is a legibility rule and not a fact about this tree, so a target with a
-# deeper one does not raise it. A path that will not fit gets a label line of
-# its own, and a path too wide even for that gets its identifying tail, with
-# the whole path in the prompt -- the wording is in SKILL.md, beside the
-# budget, because a gate that refuses correct work without naming the compliant
-# form costs a card an attempt. tests/test-plan-graphs-are-terse.sh measures
-# the longest path THIS repository tracks; that guards this repository's own
-# plans, and the wording is what covers every other target.
-MAX_NODE_LINES = 4
-MAX_WORDS_PER_LINE = 6
-MAX_LABEL_WORDS = 4
-MAX_LABEL_CHARS = 80
+# So 80 is a default calibrated on THIS tree, and a target with a deeper one
+# says so itself: limits.max_label_chars in that target's board.toml reaches
+# this file as --max-label-chars. Only the character budget takes that option.
+# The word and line budgets are a property of how a diagram reads, which is the
+# same in every repository. tests/test-plan-graphs-are-terse.sh measures the
+# longest path THIS repository tracks against the default.
+#
+# No budget is wide enough for every path, so the wording for a path that fits
+# none of them lives in SKILL.md, beside the budget: a label line of its own,
+# and for a path too wide even for that, its identifying tail with the whole
+# path in the prompt. A gate that refuses correct work without naming the
+# compliant form costs a card an attempt.
+@dataclass(frozen=True)
+class Budget:
+    """Every number a label is measured against, in one value.
 
-LIMITS = (
-    f"A node label: at most {MAX_NODE_LINES} lines, "
-    f"at most {MAX_WORDS_PER_LINE} words a line.",
-    f"An edge or cluster label: at most {MAX_LABEL_WORDS} words.",
-    f"Any label line: at most {MAX_LABEL_CHARS} characters, counted as it renders.",
-)
+    One value, rather than three module constants beside one parameter: a
+    reader asking what a label is judged by has one place to look, and the day
+    a second number has to vary by target it is a field and its option, not six
+    signatures (review of PR #31, 2026-09-10).
+
+    Only `label_chars` varies by target, for the reason the comment above
+    gives. The others describe how a diagram reads, which is the same tree to
+    tree.
+    """
+
+    label_chars: int = 80
+    node_lines: int = 4
+    words_per_line: int = 6
+    label_words: int = 4
+
+    def stated(self) -> tuple[str, ...]:
+        """The budget in words, as `--limits` prints it and SKILL.md states it."""
+        return (
+            f"A node label: at most {self.node_lines} lines, "
+            f"at most {self.words_per_line} words a line.",
+            f"An edge or cluster label: at most {self.label_words} words.",
+            f"Any label line: at most {self.label_chars} characters, "
+            "counted as it renders.",
+        )
+
 
 FENCE = "```"
 FENCE_OPEN = "```mermaid"
@@ -97,6 +121,23 @@ LINK = re.compile(rf"{LINK_TAIL.pattern}?[-=.~]{{2,}}(?:[>ox])?")
 # {{}}, [//], [\\], and the asymmetric >].
 OPEN_RUN = re.compile(r"(?:[(\[{]+|>)[/\\]?")
 CLOSE_RUN = re.compile(r"[/\\]?[)\]}]+")
+# A character no styling operand holds and every packed statement shows: a
+# node shape either side, a quoted label, or an edge label's pipe. A link is
+# the other marker, and LINK above already spells one.
+#
+# Measured against mermaid 11.17.2 on 2026-09-10 rather than guessed: it
+# refuses `(`, `[`, `{`, `>`, `"`, `|`, `--`, `==` and `~~` inside a `style`,
+# `class`, `classDef`, `linkStyle` or `direction` operand, and accepts the
+# hex, comma and hyphen a real declaration is made of -- `fill:#e8f4ff`,
+# `stroke-width:2px`, `stroke-dasharray: 3 5`. So nothing correct is refused
+# by looking for these, and `[` alone missed every other node shape.
+PACKED_SHAPE = re.compile(r"""["|(){}\[\]>]""")
+# Mermaid strips a comment only where it BEGINS a line: cleanupComments is
+# `/^\s*%%(?!{)[^\n]+\n?/gm`. One written after a statement stays in the
+# source, so `a["one"] --> b["two"] %% why` is a parse error and the diagram
+# draws nothing -- measured on 2026-09-10, against the claim that mermaid
+# skips a comment wherever it starts.
+COMMENT = "%%"
 
 
 class InlineLink(NamedTuple):
@@ -134,10 +175,17 @@ HEADER_LIST = " or ".join(sorted(GRAPH_HEADERS))
 # `subgraph` carries a label; the rest are graph syntax, styling and cluster
 # ends, and carry none.
 SUBGRAPH = "subgraph"
+# The one keyword whose statement runs to the end of the LINE and not to the
+# next `;`. Mermaid's lexer matches it as `direction\s+<DIR>[^\n]*`, so a `;`
+# on that line separates nothing. Review of PR #31 on 2026-09-10 found
+# `direction LR; a["one"] --> b["two"]` read as a second statement and counted
+# as one link, so a block mermaid draws as an empty cluster -- no node, no edge
+# -- passed this gate as a plan graph.
+DIRECTION = "direction"
 KEYWORDS = GRAPH_HEADERS | frozenset(
     [
         SUBGRAPH,
-        "direction",
+        DIRECTION,
         "classDef",
         "class",
         "linkStyle",
@@ -149,16 +197,28 @@ KEYWORDS = GRAPH_HEADERS | frozenset(
 # What a message calls a label that is budgeted in words rather than in lines.
 SHORT_LABELS = {"edge": "edge label", "cluster": "subgraph title"}
 
-USAGE = "usage: check-plan-graph.py <plan.md>... | --limits"
-
-
-class LabelSyntax(Exception):
-    """A line the checker cannot read as nodes and links."""
+USAGE = "check-plan-graph.py [--max-label-chars N] <plan.md>... | --limits"
 
 
 # One label found on a line: its kind ("node" or "edge"), the node id it belongs
 # to, and its text. An edge label belongs to no node, so its id is empty.
 Label = tuple[str, str, str]
+
+
+class LabelSyntax(Exception):
+    """A line the checker cannot read as nodes and links.
+
+    `labels` carries what the failing statement had already read. A subgraph
+    title is measured even when the statement after it is missing its `;`:
+    review of PR #31 on 2026-09-10 found an over-budget title reported nowhere,
+    so the author fixed the separator and only then learned about the title.
+    scan() returns these beside the error, which is the policy its own
+    docstring states for every other label on the line.
+    """
+
+    def __init__(self, message: str, labels: list[Label] | None = None):
+        super().__init__(message)
+        self.labels: list[Label] = labels or []
 
 
 class Scanned(NamedTuple):
@@ -389,6 +449,20 @@ def opening_keyword(line: str, at: int) -> str:
     return word.group(0)
 
 
+def holds_a_statement(text: str) -> bool:
+    """Whether a keyword's operand has a graph statement packed onto it.
+
+    A packed statement always shows one of two things: a node shape, a quoted
+    label or an edge label's pipe -- PACKED_SHAPE -- or a link. A styling
+    operand mermaid accepts shows neither, so this refuses nothing correct.
+
+    The one thing it refuses that mermaid allows is a bare `..` inside an
+    operand, which LINK reads as a dotted link. No style declaration writes
+    one, and the message names the line either way.
+    """
+    return bool(PACKED_SHAPE.search(text) or LINK.search(text))
+
+
 def read_keyword_statement(line: str, at: int, keyword: str) -> tuple[int, list[Label]]:
     """A statement opening with a keyword, its label if it has one, and its end.
 
@@ -396,11 +470,38 @@ def read_keyword_statement(line: str, at: int, keyword: str) -> tuple[int, list[
     Their statement is skipped to its `;` and no further: until 2026-09-09 a
     line whose first word was a keyword was skipped whole, so review of PR #18
     found `classDef chg fill:#eee; c1["<eight words>"]` passing with exit 0.
+
+    `direction` is skipped to the end of the LINE instead -- see DIRECTION.
+
+    A statement packed into what is skipped is refused rather than skipped
+    with it. Mermaid draws nothing of one: `style`, `class`, `classDef` and
+    `linkStyle` fail to parse, and `direction` swallows it in silence. Review
+    of PR #31 on 2026-09-10 found `style a fill:#f00 c1["<200 characters>"]`
+    passing with exit 0, the same hole this card had just closed for
+    `subgraph`.
+
+    The first fix for that looked for a `[` alone, and every other node shape
+    walked through it: `style a fill:#f00 c1(("<200 characters>"))` and the
+    `{}` and `>]` forms all passed, as did an edge whose label sits in pipes
+    and carries no bracket at all. holds_a_statement() is what marks one now.
     """
+    if keyword == DIRECTION:
+        if holds_a_statement(line[at:]):
+            # Not the `;` the others name: a `;` separates nothing here.
+            raise LabelSyntax(
+                f"{DIRECTION}: text after the {DIRECTION} statement; it takes "
+                "the rest of the line, so put that on a line of its own"
+            )
+        return len(line), []
     end = statement_end(line, at)
-    if keyword != SUBGRAPH:
-        return end, []
-    return end, [("cluster", "", subgraph_title(line[at:end]))]
+    if keyword == SUBGRAPH:
+        return end, [("cluster", "", subgraph_title(line[at:end]))]
+    if holds_a_statement(line[at:end]):
+        raise LabelSyntax(
+            f"{keyword}: text after the {keyword} statement; "
+            'separate statements with ";"'
+        )
+    return end, []
 
 
 def scan(line: str) -> Scanned:
@@ -429,6 +530,11 @@ def scan(line: str) -> Scanned:
     starting, expect_node = True, True
     try:
         while at < len(line):
+            if line.startswith(COMMENT, at):
+                raise LabelSyntax(
+                    f'a "{COMMENT}" comment must begin its own line; '
+                    "mermaid reads this one as graph syntax"
+                )
             if line[at] == ";":
                 at, starting, expect_node, labels = at + 1, True, True, []
             elif starting and (keyword := opening_keyword(line, at)):
@@ -446,23 +552,85 @@ def scan(line: str) -> Scanned:
             found += labels
             at = skip_space(line, at)
     except LabelSyntax as unreadable:
-        return Scanned(found, links, str(unreadable))
+        return Scanned(found + unreadable.labels, links, str(unreadable))
     return Scanned(found, links, None)
 
 
+def read_bracketed_title(statement: str, at: int, where: str) -> tuple[int, str]:
+    """A subgraph title inside its brackets, and where the closing `]` leaves off.
+
+    `at` is the opening `[`. A quoted title may hold a `]` of its own, so the
+    quote ends it and the bracket after that closes it. An unquoted title runs
+    to the first `]`, which is how mermaid reads it: `SQS text SQE`.
+    """
+    opened = at + 1
+    if opened < len(statement) and statement[opened] == '"':
+        quoted = statement.find('"', opened + 1)
+        if quoted < 0:
+            raise LabelSyntax(f"{where}: title opens with a quote that never closes")
+        closed = skip_space(statement, quoted + 1)
+        if closed >= len(statement) or statement[closed] != "]":
+            raise LabelSyntax(f"{where}: title is never closed by its bracket")
+        return closed + 1, statement[opened + 1 : quoted]
+    closed = statement.find("]", opened)
+    if closed < 0:
+        raise LabelSyntax(f"{where}: title is never closed by its bracket")
+    return closed + 1, statement[opened:closed]
+
+
 def subgraph_title(statement: str) -> str:
-    """The title of one subgraph statement, from its brackets or from the rest.
+    """The title of one subgraph statement: `subgraph id["title"]`, or the rest.
 
     A statement, never a line: `subgraph s["a"]; x --> y` read as a line gives a
     title running to the last `]` on it, which is node syntax and not a title.
+
+    One statement holds one shape, so anything but whitespace after the closing
+    bracket is refused. Mermaid's grammar puts a separator there -- `subgraph
+    SPACE textNoTags SQS text SQE separator document end` -- so a line without
+    one does not render. Until 2026-09-09 this read past it, and
+    `subgraph s["the board"] a["one"] --> b["two"]` was reported as a five-word
+    title and as a line with no link on it. Both claims were false, and the
+    plan they passed judgement on draws nothing.
+
+    A statement with no bracket at all keeps mermaid's bare form, where the
+    title is the rest of it: `subgraph the whole board`.
+
+    The bracket is what tells the two forms apart, not the shape of the id.
+    Mermaid puts no constraint on a subgraph id beyond the `[` that ends it, so
+    matching one here refused correct plans: review of PR #31 on 2026-09-10
+    found `subgraph skills/board["<78 characters>"]` read as the bare form,
+    which measured the id and the brackets as part of the title and reported
+    94 characters against a budget of 80. Every id holding a `/`, `:`, `#`, a
+    space or a non-ASCII letter failed the same way.
     """
-    opened, closed = statement.find("["), statement.rfind("]")
-    if 0 <= opened < closed:
-        return statement[opened + 1 : closed].strip().strip('"').strip()
-    return statement[len(SUBGRAPH) :].strip().strip('"').strip()
+    rest = statement[len(SUBGRAPH) :]
+    opened = rest.find("[")
+    if opened < 0:
+        return rest.strip().strip('"').strip()
+    ident = rest[:opened].strip()
+    where = f"{SUBGRAPH} {ident}" if ident else SUBGRAPH
+    ends, title = read_bracketed_title(rest, opened, where)
+    after = rest[ends:].strip()
+    # A comment gets its own remedy. Adding a `;` does not put one on a line of
+    # its own, so naming a `;` here sends the author round again (review of
+    # PR #31, 2026-09-10).
+    if after.startswith(COMMENT):
+        raise LabelSyntax(
+            f'{where}: a "{COMMENT}" comment must begin its own line; '
+            "mermaid reads this one as part of the graph",
+            [("cluster", "", title.strip())],
+        )
+    if after:
+        raise LabelSyntax(
+            f'{where}: text after the title; separate statements with ";"',
+            [("cluster", "", title.strip())],
+        )
+    return title.strip()
 
 
-def measure(where: str, subject: str, text: str, max_words: int) -> list[str]:
+def measure(
+    where: str, subject: str, text: str, max_words: int, budget: Budget
+) -> list[str]:
     """One label against both budgets: its words, then its rendered width."""
     problems: list[str] = []
     count = len(words(text))
@@ -471,45 +639,55 @@ def measure(where: str, subject: str, text: str, max_words: int) -> list[str]:
             f"{where}: {subject} has {count} words, at most {max_words} allowed"
         )
     size = width(text)
-    if size > MAX_LABEL_CHARS:
+    if size > budget.label_chars:
         problems.append(
             f"{where}: {subject} is {size} characters, "
-            f"at most {MAX_LABEL_CHARS} allowed"
+            f"at most {budget.label_chars} allowed"
         )
     return problems
 
 
-def measure_short_label(where: str, kind: str, text: str) -> list[str]:
+def measure_short_label(
+    where: str, kind: str, text: str, budget: Budget
+) -> list[str]:
     """An edge label or a subgraph title, budgeted in words and characters."""
-    return measure(where, f'{SHORT_LABELS[kind]} "{text}"', text, MAX_LABEL_WORDS)
+    return measure(
+        where, f'{SHORT_LABELS[kind]} "{text}"', text, budget.label_words, budget
+    )
 
 
-def measure_node_label(where: str, ident: str, text: str) -> list[str]:
+def measure_node_label(
+    where: str, ident: str, text: str, budget: Budget
+) -> list[str]:
     """A node label, budgeted in lines, and in words and characters a line."""
     problems: list[str] = []
     parts = BREAK.split(text)
-    if len(parts) > MAX_NODE_LINES:
+    if len(parts) > budget.node_lines:
         problems.append(
             f"{where}: node {ident}, label has {len(parts)} lines, "
-            f"at most {MAX_NODE_LINES} allowed"
+            f"at most {budget.node_lines} allowed"
         )
     for index, part in enumerate(parts, 1):
         problems += measure(
-            where, f"node {ident}, label line {index}", part, MAX_WORDS_PER_LINE
+            where,
+            f"node {ident}, label line {index}",
+            part,
+            budget.words_per_line,
+            budget,
         )
     return problems
 
 
-def check_line(path: str, number: int, line: str) -> Read:
+def check_line(path: str, number: int, line: str, budget: Budget) -> Read:
     """What one line of the graph draws, and what is wrong with it."""
     where = f"{path}:{number}"
     scanned = scan(line)
     problems: list[str] = []
     for kind, ident, text in scanned.labels:
         if kind == "node":
-            problems += measure_node_label(where, ident, text)
+            problems += measure_node_label(where, ident, text, budget)
         else:
-            problems += measure_short_label(where, kind, text)
+            problems += measure_short_label(where, kind, text, budget)
     if scanned.unreadable:
         problems.append(f"{where}: {scanned.unreadable}")
     return Read(tuple(problems), scanned.links, scanned.unreadable is not None)
@@ -573,7 +751,10 @@ def graph_lines(
             if "}%%" not in line:
                 directive_at = number
             continue
-        if line.startswith("%%") or not line:
+        # A comment only where it BEGINS a line -- see COMMENT. One written
+        # after a statement is graph syntax to mermaid, so scan() refuses it
+        # rather than this dropping it and reporting on a line nobody wrote.
+        if line.startswith(COMMENT) or not line:
             continue
         lines.append((number, line))
     if directive_at:
@@ -583,7 +764,9 @@ def graph_lines(
     return lines, problems
 
 
-def check_block(path: str, block: list[tuple[int, str]]) -> list[str]:
+def check_block(
+    path: str, block: list[tuple[int, str]], budget: Budget
+) -> list[str]:
     lines, problems = graph_lines(path, block)
     if problems:
         # An unclosed %%{init directive swallows every line after it, so what
@@ -611,7 +794,9 @@ def check_block(path: str, block: list[tuple[int, str]]) -> list[str]:
             "a plan is one mermaid graph and nothing else"
         ]
 
-    read = Read.merge([check_line(path, number, line) for number, line in lines])
+    read = Read.merge(
+        [check_line(path, number, line, budget) for number, line in lines]
+    )
     problems += list(read.problems)
     if not read.links and not read.unread:
         # A fence with no link in it is a list with boxes drawn round it. A
@@ -631,7 +816,7 @@ def check_block(path: str, block: list[tuple[int, str]]) -> list[str]:
     return problems
 
 
-def check_file(path: str) -> list[str]:
+def check_file(path: str, budget: Budget) -> list[str]:
     try:
         text = Path(path).read_text(encoding="utf-8")
     except (OSError, ValueError) as unreadable:
@@ -639,27 +824,47 @@ def check_file(path: str) -> list[str]:
     block, problems = read_block(path, text)
     if block is None:
         return problems
-    return problems + check_block(path, block)
+    return problems + check_block(path, block, budget)
+
+
+def label_chars(text: str) -> int:
+    """--max-label-chars, parsed at the edge, so the rest of the file has an int."""
+    if not text.isdigit():
+        raise argparse.ArgumentTypeError(
+            f"expected a non-negative integer, not {text!r}"
+        )
+    return int(text)
 
 
 def main(argv: list[str]) -> int:
-    if not argv:
-        print(USAGE, file=sys.stderr)
-        return 2
-    if "--limits" in argv:
-        if argv != ["--limits"]:
-            print(f"{USAGE}\n--limits takes no other arguments", file=sys.stderr)
-            return 2
-        print("\n".join(LIMITS))
+    # allow_abbrev=False so `--max` never becomes `--max-label-chars`. An
+    # abbreviation is a name this file never chose, and it stops being valid
+    # the day a second option shares its prefix.
+    parser = argparse.ArgumentParser(
+        prog="check-plan-graph.py", usage=USAGE, allow_abbrev=False
+    )
+    parser.add_argument("paths", nargs="*", metavar="plan.md")
+    parser.add_argument("--limits", action="store_true")
+    parser.add_argument(
+        "--max-label-chars",
+        type=label_chars,
+        default=Budget().label_chars,
+        metavar="N",
+    )
+    args = parser.parse_args(argv)
+    budget = Budget(label_chars=args.max_label_chars)
+
+    if args.limits:
+        if args.paths:
+            parser.error("--limits states the budget and checks no file")
+        print("\n".join(budget.stated()))
         return 0
-    unknown = [arg for arg in argv if arg.startswith("-")]
-    if unknown:
-        print(f"{USAGE}\nunknown option: {unknown[0]}", file=sys.stderr)
-        return 2
+    if not args.paths:
+        parser.error("name a plan to check, or --limits")
 
     problems: list[str] = []
-    for path in argv:
-        problems += check_file(path)
+    for path in args.paths:
+        problems += check_file(path, budget)
     for problem in problems:
         print(problem)
     return 1 if problems else 0

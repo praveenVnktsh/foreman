@@ -57,7 +57,7 @@
 | Manage a board | `bin/boardctl add\|list\|status\|halt\|resume` | editing `boards.toml` by hand |
 | Make skills resolvable | `bin/install-skills.sh` | assuming the install directory is searched |
 | View a diagram | `bin/render-diagram.sh <file.md>` | committing the render |
-| Check a plan is a graph | `bin/check-plan-graph.py <file>` | reading the plan by eye |
+| Check a plan is a graph | `bin/check-plan-graph.py --max-label-chars <N> <file>` | reading the plan by eye, or the checker's default budget over a target that sets its own |
 | Restart the tick, leaving cards alone | `skills/board/supervise.sh --restart` | `systemctl --user restart foreman.service`; it finds a healthy tick |
 
 - `git show origin/main:<path>` reads a **local** ref. No fetch is guaranteed to
