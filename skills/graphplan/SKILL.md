@@ -31,6 +31,11 @@ That constraint is the point. Prose lets a plan stay vague about what depends on
 what, and the vagueness is exactly what makes the work serial. A graph cannot be
 vague about dependencies: either the edge is there or it is not.
 
+`bin/check-plan-graph.py` refuses a block that is not a graph: an empty fence,
+a fence that opens with anything other than `flowchart` or `graph`, and a fence
+with no edge between any two nodes. A plan that cannot state a dependency has
+not been planned.
+
 **The graph carries identity and dependency. The prompt carries the
 instructions.** The agent that runs a node is a fresh subagent with none of your
 context, so the detail has to live somewhere. It lives in the prompt: the label
@@ -54,9 +59,17 @@ Every node label carries four things and nothing else:
 ```
 A node label: at most 4 lines, at most 6 words a line.
 An edge or cluster label: at most 4 words.
+Any label line: at most 80 characters, counted as it renders.
 
 c4["<b>c4 · config.sh</b> · CHANGE<br/>loads one board's environment<br/><i>opus · high</i>"]
 ```
+
+**A path that will not fit goes on a line of its own.** A node names the file
+it builds, and in a deep tree `c1 · ` plus the path plus ` · CHANGE` passes 80
+characters. A node label has four lines: put the path on one of them by itself.
+If the path alone is still too wide, write the tail that identifies it,
+`.../service/BoardStatusTest.java`, and let the prompt carry the whole path. The
+prompt has no budget; the picture does.
 
 **Quote every label the brackets hold:** `c1["..."]`. Brackets nest and mermaid
 has a dozen node shapes, so an unquoted label has no unambiguous end. The check
@@ -79,7 +92,8 @@ Label it with the verb, in four words or fewer.
 
 **Where build order differs from the runtime relationship, draw the edge
 dotted:** `-.->`. B reads A at runtime, but only A's interface is needed to
-start B. The label stays inside four words.
+start B, so a dotted edge orders nothing and its head can start first. The
+label stays inside four words.
 
 **Do not draw an edge for tidiness.** An edge is a claim about how the system
 works, and a false one is a false claim before it is a scheduling mistake.
@@ -89,8 +103,7 @@ works, and a false one is a false claim before it is a scheduling mistake.
 - Two `NEW` or `CHANGE` nodes with no path between them can be built at once.
 - A node whose only inbound edges come from untouched components has nothing to
   wait for.
-- A dotted edge is a runtime relationship, not a build order. Its head can start
-  first.
+- A dotted edge orders nothing, as **What an edge is** says above.
 
 You do not schedule the work. You read the schedule off the diagram.
 
@@ -146,7 +159,9 @@ was drawn for. The mapping is mechanical:
 
 - a `NEW` or `CHANGE` node → `agent(prompt, {label, model, effort})`
 - an untouched node → context in the prompt, never an agent
-- a path between two changed nodes → a `pipeline()` stage boundary
+- a solid path between two changed nodes → a `pipeline()` stage boundary
+- a dotted path and no solid one between two changed nodes → no stage
+  boundary; a dotted edge orders nothing, so both ends start together
 - changed nodes with no path between them → the same `parallel()` call
 - nodes that write files concurrently → `isolation: 'worktree'`
 

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Claim: every plan under docs/plans/ is a graph inside the word budget,
+# Claim: every plan under docs/plans/ is a graph inside the budget,
 # bin/check-plan-graph.py refuses one that is not, and skills/graphplan/SKILL.md
 # states the exact budget the checker enforces.
 #
@@ -22,22 +22,39 @@
 # cases assert the refusal, because a checker that stays quiet about what it
 # cannot read is worse than no checker: it reports coverage it does not have.
 #
-# A third failure, found reviewing PR #18 on 2026-09-09: scan() stopped at the
-# first ";" on a line. A plan that packed several node statements behind
-# semicolons had every label after the first go unmeasured, and exited 0 with
-# no output at all. The same review found two edge-label forms mermaid allows
-# that scan() never read, two valid node forms it refused as unreadable, and a
-# failure message that could name a node id no link in the graph produces.
+# The third failure, found reviewing PR #18 on 2026-09-09: a gate that reads
+# the labels inside a fence without ever asking whether the fence holds a
+# graph. An empty fence passed, one-word-per-line text passed, and a single
+# 200-character token passed a budget counted in words. Each is a case below,
+# because each was accepted by the version of the checker that this file
+# already called green.
 #
-# The first fix for that third failure had two holes of its own, found in the
-# next review round on 2026-09-09. An inline edge label ended at any run of
-# link characters, so `a -- reads the plan, then... builds --> b` was cut at
-# the "..." and passed at five words against a budget of four. And a line whose
-# first word was a keyword was still skipped whole, so a node packed after a
-# `classDef` on that line was never measured. Both exited 0 with no output.
+# The fourth, from the same review: scan() stopped at the first ";" on a line.
+# A plan that packed several node statements behind semicolons had every label
+# after the first go unmeasured, and exited 0 with no output at all. That
+# review also found two edge-label forms mermaid allows that scan() never read,
+# two valid node forms it refused as unreadable, and a failure message that
+# could name a node id no link in the graph produces.
+#
+# The fifth, in the rounds that fixed the fourth: an inline edge label ended at
+# any run of link characters, so `a -- reads the plan, then... builds --> b`
+# was cut at the "..." and passed at five words against a budget of four. And a
+# statement packed after a keyword on the same line was never measured, because
+# a line whose first word was a keyword was skipped whole. That one was found
+# twice -- first for `flowchart` and `graph`, then for `class`, `classDef`,
+# `style`, `linkStyle`, `direction` and `end`, four of which real plans under
+# docs/plans/ use. A fix that closes one seventh of a hole looks exactly like a
+# fix, so every keyword is a case below.
+#
+# The sixth: a character budget calibrated on what plans had already said
+# rather than on what a plan must be able to say. It refused a correct label
+# for six tracked files and offered no compliant wording. A gate that refuses
+# correct work costs a card an attempt exactly as a gate that admits wrong work
+# costs a review round, so both directions are cases here: what must be
+# refused, and what must be accepted.
 #
 # What is deliberately NOT covered: rendering (another test owns it) and the
-# wording of SKILL.md's prose, only the two lines it must reproduce verbatim.
+# wording of SKILL.md's prose, only the lines it must reproduce verbatim.
 set -uo pipefail
 
 repo_root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -371,6 +388,257 @@ else
   case "$out" in
     *"expected a link or a label"*) ok "a line the checker cannot read is refused" ;;
     *) bad "refused, but not for being unreadable: $out" ;;
+  esac
+fi
+
+# An empty mermaid fence: refused. It is a plan that says nothing, and it
+# passed this gate until 2026-09-09.
+cat >"$work_dir/empty-fence.md" <<'MD'
+```mermaid
+```
+MD
+if out="$(python3 "$checker" "$work_dir/empty-fence.md" 2>&1)"; then
+  bad "an empty mermaid fence was accepted"
+else
+  case "$out" in
+    *"empty"*"mermaid graph and nothing else"*) ok "an empty mermaid fence is refused" ;;
+    *) bad "refused, but not for being empty: $out" ;;
+  esac
+fi
+
+# A fence holding prose, not a graph: refused. Lines of one word each are what
+# slipped through the old word-per-line budget, because a bare word parses as
+# a node id with no label. The claim here is narrower: a fence with no
+# flowchart/graph header is not a graph, whatever else it contains.
+cat >"$work_dir/prose-fence.md" <<'MD'
+```mermaid
+this
+document
+explains
+the
+plan
+```
+MD
+if out="$(python3 "$checker" "$work_dir/prose-fence.md" 2>&1)"; then
+  bad "a fence holding prose with no graph header was accepted"
+else
+  case "$out" in
+    *"not flowchart or graph"*) ok "a fence holding prose with no graph header is refused" ;;
+    *) bad "refused, but not for the missing graph header: $out" ;;
+  esac
+fi
+
+# A fence with a header and nodes but no edge: refused. A plan graph states
+# what depends on what; boxes with nothing drawn between them are a list.
+cat >"$work_dir/no-edge.md" <<'MD'
+```mermaid
+flowchart TD
+  c1["a node"]
+  c2["another node"]
+```
+MD
+if out="$(python3 "$checker" "$work_dir/no-edge.md" 2>&1)"; then
+  bad "a graph with no edge between any two nodes was accepted"
+else
+  case "$out" in
+    *"no link between any two nodes"*) ok "a fence with nodes but no edge is refused" ;;
+    *) bad "refused, but not for the missing edge: $out" ;;
+  esac
+fi
+
+# A node label that is one 200-character token: refused for its character
+# count. This is the case the ticket names: a single long token is one word,
+# so it satisfied a six-word budget whose comment said it existed for
+# on-screen legibility, while filling the screen anyway.
+long_token="$(printf 'x%.0s' {1..200})"
+printf '%s\n' \
+  '```mermaid' \
+  'flowchart TD' \
+  "  c1[\"$long_token\"] --> c2[\"y\"]" \
+  '```' \
+  >"$work_dir/long-token.md"
+if out="$(python3 "$checker" "$work_dir/long-token.md" 2>&1)"; then
+  bad "a 200-character node label was accepted"
+else
+  case "$out" in
+    *"node c1"*"characters"*) ok "a node label that is one 200-character token is refused" ;;
+    *) bad "refused, but not for the character count: $out" ;;
+  esac
+fi
+
+# The label a plan MUST be able to write: a node naming the longest path this
+# repository tracks, in the form SKILL.md prescribes. The character budget was
+# first set from the widest label already in docs/plans/, which refused a
+# correct plan for six tracked files and offered no wording that would pass
+# (found in review on 2026-09-09). The longest path is read from git rather
+# than typed, so adding a longer one fails here -- where it is a budget to
+# raise -- instead of on a card, where it costs a plan attempt.
+longest_path="$(git -C "$repo_root" ls-files |
+  awk '{ if (length($0) > n) { n = length($0); p = $0 } } END { print p }')"
+if [[ -z "$longest_path" ]]; then
+  bad "git ls-files named no path; the budget cannot be checked against what a plan must say"
+else
+  {
+    printf '```mermaid\nflowchart TD\n'
+    printf '  c1["<b>c1 · %s</b> · CHANGE<br/>does the work<br/><i>opus · high</i>"] --> c2["<b>c2 · done</b>"]\n' \
+      "$longest_path"
+    printf '```\n'
+  } >"$work_dir/longest-path.md"
+  if out="$(python3 "$checker" "$work_dir/longest-path.md" 2>&1)"; then
+    ok "a node naming the longest tracked path is inside the budget"
+  else
+    bad "the budget refuses a plan node naming $longest_path, and SKILL.md offers no shorter form:
+$out"
+  fi
+fi
+
+# A label written on the header line: measured, not skipped. `flowchart TD;` is
+# a keyword line, and skipping the whole line let the 200-character label above
+# clear the budget by moving one line up (found in review on 2026-09-09).
+{
+  printf '```mermaid\n'
+  printf 'flowchart TD; a["%s"] --> b["ok"]\n' "$(printf 'x%.0s' {1..200})"
+  printf '```\n'
+} >"$work_dir/header-line-label.md"
+if out="$(python3 "$checker" "$work_dir/header-line-label.md" 2>&1)"; then
+  bad "a 200-character label on the header line was accepted"
+else
+  case "$out" in
+    *"node a"*"characters"*) ok "a label on the header line is measured, not skipped" ;;
+    *) bad "refused, but not for the character count: $out" ;;
+  esac
+fi
+
+# Mermaid's one-line form: accepted. The header line carries the only edge, so
+# a checker that skips that line reports a graph with one edge as having none.
+cat >"$work_dir/one-line.md" <<'MD'
+```mermaid
+graph TD; a["one"] --> b["two"]
+```
+MD
+if out="$(python3 "$checker" "$work_dir/one-line.md" 2>&1)"; then
+  [[ -z "$out" ]] && ok "a graph written on one line is accepted silently" \
+    || bad "accepted, but printed something: $out"
+else
+  bad "a graph whose only edge is on the header line was refused: $out"
+fi
+
+# A graph whose only link is invisible: refused. Mermaid draws `~~~` as
+# nothing, so the boxes state no relationship and the fence is a list again.
+cat >"$work_dir/invisible-link.md" <<'MD'
+```mermaid
+flowchart TD
+  a["one"] ~~~ b["two"]
+```
+MD
+if out="$(python3 "$checker" "$work_dir/invisible-link.md" 2>&1)"; then
+  bad "a graph whose only link is invisible was accepted"
+else
+  case "$out" in
+    *"no link between any two nodes"*) ok "a graph whose only link is invisible is refused" ;;
+    *) bad "refused, but not for the missing link: $out" ;;
+  esac
+fi
+
+# An unclosed %%{init directive: reported once, and never as an empty block.
+# The directive swallows every line after it, so the lines are unread, not
+# absent, and saying the block is empty would be false.
+cat >"$work_dir/unclosed-directive.md" <<'MD'
+```mermaid
+%%{init: {
+"theme": "base"
+flowchart TD
+  a["one"] --> b["two"]
+```
+MD
+if out="$(python3 "$checker" "$work_dir/unclosed-directive.md" 2>&1)"; then
+  bad "a block whose directive never closes was accepted"
+else
+  case "$out" in
+    *empty*) bad "an unread block was reported as empty: $out" ;;
+    *"never closed"*) ok "an unclosed directive is reported once, not as an empty block" ;;
+    *) bad "refused, but not for the unclosed directive: $out" ;;
+  esac
+fi
+
+# A label written after a keyword on the same line: measured, not skipped. A
+# `;` separates statements, so a keyword is the first word of a STATEMENT and
+# never of the line. Skipping the line let `class a hot; c1["<200 characters>"]`
+# out of the budget entirely, and the file exited 0 with no output at all --
+# found in review on 2026-09-09, after the same hole was closed for `flowchart`
+# and `graph` alone. Every keyword the checker knows is tried here, because the
+# first fix closed one seventh of the hole and looked complete.
+for keyword in "class a hot" "classDef hot fill:#f00" "style a fill:#f00" \
+               "linkStyle 0 stroke:#f00" "direction LR"; do
+  {
+    printf '```mermaid\nflowchart TD\n  a["one"] --> b["two"]\n'
+    printf '  %s; c1["%s"] --> c2["ok"]\n' "$keyword" "$(printf 'x%.0s' {1..200})"
+    printf '```\n'
+  } >"$work_dir/keyword-line.md"
+  if out="$(python3 "$checker" "$work_dir/keyword-line.md" 2>&1)"; then
+    bad "a 200-character label after \`$keyword;\` was accepted"
+  else
+    case "$out" in
+      *"node c1"*"characters"*) ok "a label after \`$keyword;\` is measured, not skipped" ;;
+      *) bad "refused, but not for the character count: $out" ;;
+    esac
+  fi
+done
+
+# A subgraph sharing its line with a graph statement: accepted. The title is
+# read from the statement, not from the line. Read from the line, it ran to the
+# last `]` on it, so this graph was refused for a five-word title nobody wrote
+# and for having no link, while drawing one (review, 2026-09-09).
+cat >"$work_dir/subgraph-line.md" <<'MD'
+```mermaid
+flowchart TD
+  subgraph s["the board"]; a["one"] --> b["two"]
+  end
+```
+MD
+if out="$(python3 "$checker" "$work_dir/subgraph-line.md" 2>&1)"; then
+  [[ -z "$out" ]] && ok "a subgraph sharing its line with an edge is accepted silently" \
+    || bad "accepted, but printed something: $out"
+else
+  bad "a subgraph sharing its line with an edge was refused: $out"
+fi
+
+# A `;` inside a label is text, not a separator. The statement split is what
+# makes every case above work, and a split that ignored quotes would cut this
+# label in half and report syntax nobody wrote.
+cat >"$work_dir/semicolon-label.md" <<'MD'
+```mermaid
+flowchart TD
+  a["one; two"] --> b["three"]
+```
+MD
+if out="$(python3 "$checker" "$work_dir/semicolon-label.md" 2>&1)"; then
+  [[ -z "$out" ]] && ok "a semicolon inside a label is text, not a statement break" \
+    || bad "accepted, but printed something: $out"
+else
+  bad "a label holding a semicolon was refused: $out"
+fi
+
+# A line the checker cannot read is never also reported as a missing edge. The
+# statement draws one; nothing could read it, so nothing is claimed about it.
+# Reporting "no link between any two nodes" told the plan agent -- which
+# brief.py tells to fix what the checker refuses -- to add a dependency the
+# graph already stated, which is the one edge SKILL.md forbids (review,
+# 2026-09-09).
+cat >"$work_dir/unreadable-edge.md" <<'MD'
+```mermaid
+flowchart TD
+  c1[builds the thing] --> c2["done"]
+```
+MD
+if out="$(python3 "$checker" "$work_dir/unreadable-edge.md" 2>&1)"; then
+  bad "an unquoted label on the only edge line was accepted"
+else
+  case "$out" in
+    *"no link between any two nodes"*)
+      bad "a graph that draws an edge was told it draws none: $out" ;;
+    *"not quoted"*) ok "an unreadable line is not also reported as a missing edge" ;;
+    *) bad "refused, but not for the missing quotes: $out" ;;
   esac
 fi
 
