@@ -82,13 +82,17 @@ TAG = re.compile(r"<[^>]*>")
 # A node id: a word, with a dot or a dash only between two of them, so `a-->b`
 # reads as one id, a link and one id rather than as the id `a--`.
 IDENT = re.compile(r"[A-Za-z0-9_]+(?:[.-][A-Za-z0-9_]+)*")
+# The tail of a link: the character mermaid draws the edge with where it
+# starts, as in `o--`, `x==` and `<-.`. LINK is built from it so the two agree,
+# because inline_opener() has to be able to take a tail back off again.
+LINK_TAIL = re.compile(r"[<ox]")
 # A link: an optional tail, a run of arrow characters, an optional head.
 # `-->`, `---`, `-.->`, `==>`, `~~~`, `<-->`, `---o`, `--x`, `o--o`. The head is
 # one character, so `a-->ok` reads as the node `ok` while `a---ob` reads as the
 # link `---o` and the node `b`. Until 2026-09-09 an `o` or `x` head was only
 # accepted with a space after it, and reviewing PR #18 found `a---ob["x"]`
 # reported against a node `ob` that no graph contains.
-LINK = re.compile(r"(?:[<ox])?[-=.~]{2,}(?:[>ox])?")
+LINK = re.compile(rf"{LINK_TAIL.pattern}?[-=.~]{{2,}}(?:[>ox])?")
 # The brackets around a node label. Any mermaid shape: [], (), ([]), [()],
 # {{}}, [//], [\\], and the asymmetric >].
 OPEN_RUN = re.compile(r"(?:[(\[{]+|>)[/\\]?")
@@ -288,6 +292,20 @@ def read_inline_label(line: str, at: int, opener: str) -> tuple[int, list[Label]
     return closing.end(), [("edge", "", line[at : closing.start()].strip().strip('"'))]
 
 
+def inline_opener(link: str) -> str:
+    """The link with its tail removed, which is what an inline label closes.
+
+    A tail says how mermaid draws the edge where it starts and says nothing
+    about which characters end a label written on the link, so `o--`, `x--` and
+    `<--` all carry the label that `--` carries. Review of PR #25 on 2026-09-09
+    found the whole link looked up in INLINE_LINKS, where a tailed one matches
+    no key: the label on `a o-- one two three four five --> b` was never
+    measured, and `two` was reported as a node the graph does not contain.
+    """
+    tail = LINK_TAIL.match(link)
+    return link[tail.end() :] if tail else link
+
+
 def states_a_relationship(link: str) -> bool:
     """Whether a link says anything about the two nodes it joins.
 
@@ -314,11 +332,12 @@ def read_link(line: str, at: int) -> tuple[int, list[Label], bool]:
     if not link:
         raise LabelSyntax(f'expected a link or a label at "{line[at:]}"')
     states = states_a_relationship(link.group(0))
+    opener = inline_opener(link.group(0))
     at = skip_space(line, link.end())
     if at < len(line) and line[at] == "|":
         ends, labels = read_pipe_label(line, at)
-    elif link.group(0) in INLINE_LINKS:
-        ends, labels = read_inline_label(line, at, link.group(0))
+    elif opener in INLINE_LINKS:
+        ends, labels = read_inline_label(line, at, opener)
     else:
         ends, labels = at, []
     return ends, labels, states
@@ -339,12 +358,35 @@ def statement_end(line: str, at: int) -> int:
     return at
 
 
+def continues_a_node(line: str, at: int) -> bool:
+    """Whether node syntax continues at `at`, so the word before it was an id.
+
+    Three things follow a node id and never follow a keyword statement: the
+    brackets round its label, a `:::className` suffix, and a link, which mermaid
+    lets a space precede as in `end --> b`.
+    """
+    return bool(
+        OPEN_RUN.match(line, at)
+        or CLASS_SUFFIX.match(line, at)
+        or LINK.match(line, skip_space(line, at))
+    )
+
+
 def opening_keyword(line: str, at: int) -> str:
-    """The keyword this statement opens with, or "" when it opens with a node."""
+    """The keyword this statement opens with, or "" when it opens with a node.
+
+    A word in KEYWORDS opens a keyword statement only where a node id cannot
+    continue. Until 2026-09-09 the word alone decided it, so a node whose id
+    spells a keyword was skipped as styling: review of PR #25 found
+    `end["<a long label>"] --> b` reaching the diagram unmeasured, with exit 0,
+    where the checker before that fix measured it.
+    """
     word = IDENT.match(line, at)
-    if word and word.group(0) in KEYWORDS:
-        return word.group(0)
-    return ""
+    if not word or word.group(0) not in KEYWORDS:
+        return ""
+    if continues_a_node(line, word.end()):
+        return ""
+    return word.group(0)
 
 
 def read_keyword_statement(line: str, at: int, keyword: str) -> tuple[int, list[Label]]:

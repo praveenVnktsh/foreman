@@ -53,6 +53,24 @@
 # costs a review round, so both directions are cases here: what must be
 # refused, and what must be accepted.
 #
+# The seventh, in round-2 review of PR #25 on 2026-09-09: three holes in the
+# fifth and fourth failures' own shape, each closed with no fixture to guard
+# it from opening again.
+#
+# `a == text ==> b` is in INLINE_LINKS, and nothing drove it. A change that
+# dropped "==" from the dict, or let its closer match any run of "=" the way
+# the fifth failure's "--" closer once matched any run of link characters,
+# would still pass. Mermaid's tailed openers -- `o--`, `x--`, `<--`, and the
+# same tails on `==` and `-.` -- matched no key in INLINE_LINKS at all, so a
+# label on `a o-- one two three four five --> b` went unmeasured, or `one` was
+# reported as a node the graph does not otherwise name. And `opening_keyword()`
+# decided by the word alone, so a node id that spells a keyword, as in
+# `end["<label>"] --> b`, was swallowed as a keyword statement and exited 0
+# with no output -- where the checker measured it before that regression.
+#
+# SKILL.md carried a fourth hole of the same kind: "a four-word budget" typed
+# MAX_LABEL_WORDS a second time, in prose no test compared to the constant.
+#
 # What is deliberately NOT covered: rendering (another test owns it) and the
 # wording of SKILL.md's prose, only the lines it must reproduce verbatim.
 set -uo pipefail
@@ -318,6 +336,73 @@ else
     *) bad "refused, but not for the whole label at five words: $out" ;;
   esac
 fi
+
+# The thick inline form, `a == text ==> b`, is in INLINE_LINKS and until this
+# case existed nothing drove it (found in round-2 review of PR #25,
+# 2026-09-09). An over-budget label on it: refused for its edge word count.
+cat >"$work_dir/inline-edge-thick.md" <<'MD'
+```mermaid
+flowchart TD
+  a == one two three four five ==> b
+```
+MD
+if out="$(python3 "$checker" "$work_dir/inline-edge-thick.md" 2>&1)"; then
+  bad "an over-budget edge label on the thick inline form was accepted"
+else
+  case "$out" in
+    *"edge label"*"5 words"*) ok "an over-budget edge label on the thick inline form is refused" ;;
+    *) bad "refused, but not for edge word count: $out" ;;
+  esac
+fi
+
+# The same thick inline form, with link characters inside the label: measured
+# whole, not cut at the "...". This is the fifth failure's own case, for the
+# opener that had no case of its own -- a closer that matched any run of "="
+# would cut this one exactly as the "--" closer once cut the dotted case.
+cat >"$work_dir/inline-edge-thick-dots.md" <<'MD'
+```mermaid
+flowchart TD
+  a == reads the plan, then... builds ==> b
+```
+MD
+if out="$(python3 "$checker" "$work_dir/inline-edge-thick-dots.md" 2>&1)"; then
+  bad "a thick inline edge label was cut at the \"...\" inside it and passed at 5 words"
+else
+  case "$out" in
+    *"reads the plan, then... builds"*"5 words"*)
+      ok "a thick inline edge label is measured whole, past the link characters inside it" ;;
+    *) bad "refused, but not for the whole label at five words: $out" ;;
+  esac
+fi
+
+# Mermaid's tailed inline openers: `o--`, `x--`, `<--`, and the same three
+# tails on the "==" and "-." bodies. Before the fix reviewed in PR #25's round
+# 2 on 2026-09-09, a tailed opener matched no key in INLINE_LINKS, so its
+# label went unmeasured or a word inside it was reported as a node the graph
+# does not otherwise name. Looped the way the keyword case below loops over
+# keywords: one opener passing must not hide another failing, because the fix
+# that closed the bare openers looked exactly like a fix for all of them.
+# Each opener is paired with a closer mermaid actually accepts for it.
+for pair in "o--:-->" "x--:-->" "<--:-->" \
+            "o==:==>" "x==:==>" "<==:==>" \
+            "o-.:.->" "x-.:.->" "<-.:.->"; do
+  opener="${pair%%:*}"
+  closer="${pair##*:}"
+  {
+    printf '```mermaid\nflowchart TD\n'
+    printf '  a %s one two three four five %s b\n' "$opener" "$closer"
+    printf '```\n'
+  } >"$work_dir/tailed-opener.md"
+  if out="$(python3 "$checker" "$work_dir/tailed-opener.md" 2>&1)"; then
+    bad "an over-budget edge label on tailed opener \"$opener\" was accepted"
+  else
+    case "$out" in
+      *"edge label"*"5 words"*)
+        ok "an over-budget edge label on tailed opener \"$opener\" is refused" ;;
+      *) bad "tailed opener \"$opener\" refused, but not for edge word count: $out" ;;
+    esac
+  fi
+done
 
 # A statement packed after a styling statement on the same line: measured. The
 # ";" fix of 2026-09-09 landed inside scan(), but check_line still skipped a
@@ -585,6 +670,33 @@ for keyword in "class a hot" "classDef hot fill:#f00" "style a fill:#f00" \
   fi
 done
 
+# A node id that spells a keyword: an over-budget label on it is measured and
+# refused, naming the node id. Before the fix reviewed in PR #25's round 2 on
+# 2026-09-09, `opening_keyword()` decided by the word alone, so
+# `end["<label>"] --> b` was swallowed as a keyword statement and exited 0
+# with no output -- where the checker measured it before that regression.
+# Every keyword the checker knows is tried here, for the reason the keyword-
+# line loop above tries every one of them: a fix that covers one looks exactly
+# like a fix for all. The other direction -- a real keyword statement still
+# read as one -- is already covered by the keyword-line loop above; it is not
+# repeated here.
+for keyword in flowchart graph subgraph direction classDef class linkStyle style end; do
+  {
+    printf '```mermaid\nflowchart TD\n  a["one"] --> b["two"]\n'
+    printf '  %s["one two three four five six seven"] --> c["ok"]\n' "$keyword"
+    printf '```\n'
+  } >"$work_dir/keyword-node-id.md"
+  if out="$(python3 "$checker" "$work_dir/keyword-node-id.md" 2>&1)"; then
+    bad "a node id spelling the keyword \"$keyword\" hid an over-budget label, exit 0"
+  else
+    case "$out" in
+      *"node $keyword"*"7 words"*)
+        ok "a node id spelling the keyword \"$keyword\" is measured, naming the node id" ;;
+      *) bad "refused, but not naming node \"$keyword\": $out" ;;
+    esac
+  fi
+done
+
 # A subgraph sharing its line with a graph statement: accepted. The title is
 # read from the statement, not from the line. Read from the line, it ran to the
 # last `]` on it, so this graph was refused for a five-word title nobody wrote
@@ -684,5 +796,33 @@ updated to match. If SKILL.md was changed, its budget sentence no longer
 reads as the checker's LIMITS constant, word for word."
     ;;
 esac
+
+# SKILL.md is allowed exactly one copy of the budget numbers: the fenced block
+# just compared above, verbatim, against --limits. Every other line that types
+# "four", "six", "eighty" or a digit against words/lines/characters is a
+# second copy quietly drifting out of step with MAX_LABEL_WORDS and friends --
+# what "a four-word budget" was, in prose nothing compared to the constant,
+# until round-2 review of PR #25 caught it on 2026-09-09.
+budget_marker="$(grep -n '\*\*The budget\*\*' "$skill" | head -1 | cut -d: -f1)"
+if [[ -z "$budget_marker" ]]; then
+  bad "SKILL.md has no \"**The budget**\" marker; the drift guard cannot find the one fenced copy to exempt"
+else
+  fence_bounds="$(grep -n '^```$' "$skill" | cut -d: -f1 | awk -v m="$budget_marker" '$1 >= m' | sed -n '1p;2p')"
+  fence_start="$(printf '%s\n' "$fence_bounds" | sed -n '1p')"
+  fence_end="$(printf '%s\n' "$fence_bounds" | sed -n '2p')"
+  if [[ -z "$fence_start" || -z "$fence_end" ]]; then
+    bad "\"**The budget**\" in SKILL.md is not followed by a fenced block; the drift guard cannot find the one copy to exempt"
+  else
+    offenders="$(grep -n -E '(\b[0-9]+|four|six|eighty)[ -](words?|lines?|characters?)' "$skill" |
+      awk -F: -v s="$fence_start" -v e="$fence_end" '$1 < s || $1 > e')"
+    if [[ -z "$offenders" ]]; then
+      ok "no line of SKILL.md outside the fenced budget block types a budget number"
+    else
+      bad "SKILL.md types a budget number outside its one fenced copy (lines $fence_start-$fence_end):
+$offenders
+Point this line at the fenced block instead of restating the number."
+    fi
+  fi
+fi
 
 exit "$fail"
