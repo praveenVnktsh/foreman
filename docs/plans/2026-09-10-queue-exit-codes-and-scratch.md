@@ -5,7 +5,7 @@ graph TD
     c2["<b>c2 · operator</b><br/>reads the tick report<br/>sets a priority in Linear"]
   end
   subgraph board["The board"]
-    c3["<b>c3 · skills/board/SKILL.md</b> · CHANGE<br/>queue files under mktemp -d scratch<br/>exit 3 stalled, 2 bad invocation<br/><i>sonnet · medium</i>"]
+    c3["<b>c3 · skills/board/SKILL.md</b> · CHANGE<br/>reads both streams in one block<br/>exit 3 stalled, 2 bad invocation<br/><i>sonnet · medium</i>"]
     c4["<b>c4 · tick</b><br/>runs step 6 of SKILL.md<br/>picks one card, writes the report"]
     c5["<b>c5 · skills/board/queue.py</b> · CHANGE<br/>exit 3: cards in, none ranked<br/>exit 2: wrong argv; 1: refused<br/><i>opus · medium</i>"]
     c6["<b>c6 · tests/test-todo-queue-order.sh</b> · CHANGE<br/>refuses() pins exit 1<br/>none ranked 3, wrong argv 2<br/><i>sonnet · medium</i>"]

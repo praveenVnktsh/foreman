@@ -1239,7 +1239,7 @@ a footer, and nothing else on the card is evidence of a plan.
 
 `plancomments.py` computes it. It holds no Linear key and opens no socket — read
 the card's comments with Linear MCP, write them to a file as the JSON Linear
-returned, and pipe them in, the same way `queue.py` is fed:
+returned, and pipe them in:
 
 ```bash
 B=~/.foreman/install/skills/board
@@ -1690,34 +1690,43 @@ merged but failed to deploy is building on something that is not there.
 
 `blocks` needs no handling: the gating always happens on the dependent's side.
 
-Order what is left with `queue.py`. Its three files live under `$BOARD_HOME`,
-the directory `config.sh` exports for this slice. Write this board's `Todo`
-cards, as the JSON Linear returned, to `$BOARD_HOME/queue/todo.json` and pipe
-them in, sending the order and the skips to different places:
+Order what is left with `queue.py`. One block writes the cards and reads both
+of its streams, so no file outlives the tool call that made it:
 
 ```bash
-mkdir -p "$BOARD_HOME/queue"
-# write this board's Todo cards, as the JSON Linear returned,
-# to $BOARD_HOME/queue/todo.json
-~/.foreman/install/skills/board/queue.py \
-  < "$BOARD_HOME/queue/todo.json" \
-  > "$BOARD_HOME/queue/queue.out" \
-  2> "$BOARD_HOME/queue/queue.err"
+B=~/.foreman/install/skills/board
+Q="${AGENT_TMP_ROOT:?source config.sh first}/queue"
+mkdir -p "$Q"
+cat > "$Q/todo.json" <<'JSON'
+[ ... this board's Todo cards, as the JSON Linear returned ... ]
+JSON
+echo '--- order ---'
+"$B/queue.py" < "$Q/todo.json" 2>/dev/null; echo "--- exit: $? ---"
+echo '--- skipped ---'
+"$B/queue.py" < "$Q/todo.json" >/dev/null
 ```
+
+**One block, and no `queue.out`.** `queue.py` is a pure filter: same input, same
+output, no side effect. Running it twice, once with stderr discarded and once
+with stdout discarded, reads each stream on its own and keeps nothing on disk —
+`tests/test-todo-queue-order.sh` reads it the same way and says why. An order
+parked in a file is read by the next tick when this one fails before writing,
+and it dispatches a card that is already in flight.
 
 **Not `/tmp`, and not a directory this block invents.** A fixed name under
 `/tmp` is shared with every other instance on the machine, and the truncating
 `>` follows a symlink someone created there first. A directory from `mktemp -d`
-closes both of those and loses the path instead: the name exists only in that
-block's shell, cannot be derived a second time, and the step below is then left
-with no file to read. `$BOARD_HOME` is this board's own directory. Every block
-that sources `config.sh` derives the same path, one tick runs at a time on the
-machine, and each tick overwrites the three files rather than leaving a new
-directory behind.
+closes both and loses the path instead: the name exists only in that block's
+shell. `AGENT_TMP_ROOT` is neither. `config.sh` derives it from
+`bin/tmp-dir.sh`, the one place that answers where a board's scratch goes, so
+`FOREMAN_TMP_ROOT` moves this file with everything else rather than leaving it
+behind. It is one file, rewritten by every tick, so nothing accumulates for a
+sweep to reap.
 
-**Never read the two as one list.** A skip line names a card too, so a tick
-that concatenates them takes an identifier off stderr and dispatches the
-untriaged card `queue.py` refused.
+**Never read the two sections as one list.** A skip line names a card too, so a
+tick that reads past `--- skipped ---` takes an identifier off stderr and
+dispatches the untriaged card `queue.py` refused. Every line `queue.py` writes
+to stderr begins `queue: `; a dispatchable identifier never does.
 
 **Never order by Linear's raw `priority` number.** `0` there means "no
 priority", not "most urgent", so an ascending sort queues every untriaged card
@@ -1726,10 +1735,10 @@ one priority on the lower card number, so a card that has waited is not starved
 by newer cards that share its priority.
 
 **A card `queue.py` cannot rank is skipped, not the batch.** It writes one
-`queue: skipped <T>: <reason>` line on stderr and ranks every other `Todo` card.
-Read `$BOARD_HOME/queue/queue.err`, dispatch from the order in
-`$BOARD_HOME/queue/queue.out`, and name every skipped card in the report. The
-operator sets the priority in Linear and the card queues on the next tick.
+`queue: skipped <T>: <reason>` line under `--- skipped ---` and ranks every
+other `Todo` card. Dispatch from the order, and name every skipped card in the
+report. The operator sets the priority in Linear and the card queues on the next
+tick.
 
 Four exit codes, one meaning each: 0 is an order or an empty board, 3 is
 cards in and none ranked, 1 is the tick's own read being wrong, 2 is the tick's
@@ -1756,12 +1765,16 @@ own invocation being wrong.
   cards: report it as a foreman defect, not as a card the operator must triage
   and not as the refused batch exit 1 describes.
 
-**A failure before `queue.py` runs is the machine, not the board.** A `mkdir`
-that fails or a redirect that cannot be opened — a full disk, a directory that
-is not writable — makes the shell print its own error and never start
-`queue.py`, so no `queue.out` is written at all. Report that as an environment
-failure and name the command. None of the four codes above applies, because
-nothing read the cards.
+**Read the message, never the number alone.** The four codes above are
+`queue.py`'s. The machine has its own, and they overlap: a redirect that cannot
+be opened exits 1, which this table calls a refused batch, and a `queue.py`
+killed part-written by a full disk exits 120, which this table does not define
+at all. The prefix is what separates them. Every line `queue.py` writes begins
+`queue: `, and nothing else does — `/bin/bash: ...: No such file or directory`
+and `OSError: [Errno 28] No space left on device` are the shell and Python
+speaking. Output that carries no `queue: ` line is an environment failure:
+report it, name the command, dispatch nothing, and do not read it as a fact
+about the cards.
 
 Take **one** card: the first identifier `queue.py` prints on stdout that is
 dispatchable. stderr is never a source of cards. Walk down the list, because the dependency gate above may have made the first
