@@ -69,7 +69,36 @@
 # with no output -- where the checker measured it before that regression.
 #
 # SKILL.md carried a fourth hole of the same kind: "a four-word budget" typed
-# MAX_LABEL_WORDS a second time, in prose no test compared to the constant.
+# the label-word budget a second time, in prose no test compared to it.
+#
+# The eighth, PRA-346 on 2026-09-09: a `subgraph` statement sharing its line
+# with a graph statement and no ";" between them. The title ran from the first
+# "[" to the last "]", so the checker reported a title nobody wrote and, in the
+# same breath, a graph with no link -- on a line that draws one. The same card
+# gave the character budget a --max-label-chars option, because 80 is
+# calibrated on THIS tree and the gate runs against plans for any target.
+#
+# The ninth, reviewing that card on 2026-09-10, is what the eighth's own fix
+# got wrong. It matched the subgraph id against IDENT, so `skills/board["..."]`
+# fell to the bare form and measured the id and its brackets as the title. It
+# declared a statement packed onto `style`, `class`, `classDef`, `linkStyle`
+# or `direction` with no ";" to be that keyword's operand, where mermaid draws
+# none of it -- and the eighth's own fixture asserted that swallowing was
+# correct. `direction` was read to the next ";", where mermaid reads it to the
+# end of the line, so a block drawing no node and no edge passed. And a `%%`
+# comment after a subgraph title was refused with a ";" that does not help.
+#
+# The tenth, reviewing the ninth on 2026-09-10, is what the ninth got wrong,
+# and it was settled by running mermaid 11.17.2's own flow parser rather than
+# by reading its lexer. A `%%` is a comment only where it BEGINS a line:
+# mermaid's cleanupComments is `/^\s*%%(?!{)[^\n]+\n?/gm`, so
+# `a["one"] --> b["two"] %% why` is a parse error and the diagram draws
+# nothing, while the ninth dropped that comment and called the block a graph.
+# The same run showed `subgraph theboard %% one two three four five` keeping
+# all seven words as its title. And the marker for a statement packed onto a
+# keyword was a "[", which every other node shape walked through: mermaid
+# refuses `style a fill:#f00 c1(("<200 characters>"))` and the {} and pipe
+# forms alike, and this file passed all of them.
 #
 # The eighth, in review of PR #30 on 2026-09-10: a keyword-spelled node id at
 # the head of a node list. `continues_a_node()` counted brackets, a `:::`
@@ -680,8 +709,12 @@ fi
 # found in review on 2026-09-09, after the same hole was closed for `flowchart`
 # and `graph` alone. Every keyword the checker knows is tried here, because the
 # first fix closed one seventh of the hole and looked complete.
+#
+# `direction` is not in this loop and has a case of its own below: mermaid's
+# lexer reads it as `direction\s+<DIR>[^\n]*`, so a `;` on its line separates
+# nothing and the statement after one is never drawn.
 for keyword in "class a hot" "classDef hot fill:#f00" "style a fill:#f00" \
-               "linkStyle 0 stroke:#f00" "direction LR"; do
+               "linkStyle 0 stroke:#f00"; do
   {
     printf '```mermaid\nflowchart TD\n  a["one"] --> b["two"]\n'
     printf '  %s; c1["%s"] --> c2["ok"]\n' "$keyword" "$(printf 'x%.0s' {1..200})"
@@ -748,6 +781,167 @@ for keyword in flowchart graph subgraph direction classDef class linkStyle style
   fi
 done
 
+# The mirror of the `$keyword;` loop above, with no ";" after the keyword:
+# refused, and the message names the separator. Mermaid needs a separator to
+# end each of these statements, so a node packed on without one is drawn by
+# nothing: the line fails to parse and the whole diagram with it. The first
+# round of this card declared that swallowing correct, on the grounds that the
+# packed text was the keyword's operand; review of PR #31 on 2026-09-10 measured
+# mermaid's own parser and found `style a fill:#f00 c1["<200 characters>"]` renders no
+# node and no edge, so the checker was reporting a valid graph for a block that
+# draws nothing -- the hole this card had just closed for `subgraph`.
+#
+# A style declaration never holds a "[", so the "[" is what marks the packed
+# statement and nothing correct is refused by it.
+for keyword in "class a hot" "classDef hot fill:#f00" "style a fill:#f00" \
+               "linkStyle 0 stroke:#f00"; do
+  {
+    printf '```mermaid\nflowchart TD\n  a["one"] --> b["two"]\n'
+    printf '  %s c1["%s"] --> c2["ok"]\n' "$keyword" "$(printf 'x%.0s' {1..200})"
+    printf '```\n'
+  } >"$work_dir/keyword-no-semicolon.md"
+  if out="$(python3 "$checker" "$work_dir/keyword-no-semicolon.md" 2>&1)"; then
+    bad "a node packed onto \`$keyword\` with no \";\" was accepted, and mermaid draws neither"
+  else
+    case "$out" in
+      *"text after the $(printf '%s' "${keyword%% *}") statement"*';'*)
+        ok "a node packed onto \`$keyword\` with no \";\" is refused, naming the statement and the separator" ;;
+      *) bad "refused, but not for the packed statement: $out" ;;
+    esac
+  fi
+done
+
+# The same packed statement in the node shapes that carry no "[" at all, and
+# as an edge whose label sits in pipes. The round before this one marked a
+# packed statement by looking for a "[", so mermaid's round, diamond and
+# pipe-label forms all walked through the gate: review of PR #31 on 2026-09-10
+# ran mermaid 11.17.2 over each and got `Parse error on line 3`, with this
+# file exiting 0 and the 200-character label never measured.
+for shape in '(("|"))' '{"|"}'; do
+  open="${shape%%|*}"
+  close="${shape#*|}"
+  {
+    printf '```mermaid\nflowchart TD\n  a["one"] --> b["two"]\n'
+    printf '  style a fill:#f00 c1%s%s%s --> c2%sok%s\n' \
+      "$open" "$(printf 'x%.0s' {1..200})" "$close" "$open" "$close"
+    printf '```\n'
+  } >"$work_dir/keyword-packed-shape.md"
+  if out="$(python3 "$checker" "$work_dir/keyword-packed-shape.md" 2>&1)"; then
+    bad "a node packed onto \`style\` in the shape ${open}...${close} was accepted, and mermaid draws neither"
+  else
+    case "$out" in
+      *"text after the style statement"*)
+        ok "a node packed onto \`style\` in the shape ${open}...${close} is refused" ;;
+      *) bad "refused, but not for the packed statement: $out" ;;
+    esac
+  fi
+done
+
+# The packed statement with no bracket of any kind: an edge whose label sits
+# between pipes. Nothing on this line holds a "[", so the marker had to become
+# something else entirely.
+cat >"$work_dir/keyword-packed-pipe.md" <<'MD'
+```mermaid
+flowchart TD
+  a["one"] --> b["two"]
+  style a fill:#f00 c -->|"one two three four five"| d
+```
+MD
+if out="$(python3 "$checker" "$work_dir/keyword-packed-pipe.md" 2>&1)"; then
+  bad "an edge packed onto \`style\` with its label in pipes was accepted, and mermaid draws neither"
+else
+  case "$out" in
+    *"text after the style statement"*)
+      ok "an edge packed onto \`style\` with its label in pipes is refused" ;;
+    *) bad "refused, but not for the packed statement: $out" ;;
+  esac
+fi
+
+# And a real styling statement is still accepted. Every declaration here parses
+# in mermaid 11.17.2, so a marker that refused one of them would cost a card a
+# plan attempt for a line that renders.
+cat >"$work_dir/real-styling.md" <<'MD'
+```mermaid
+flowchart TD
+  a["one"] --> b["two"]
+  classDef chg fill:#e8f4ff,stroke:#4a90d9,stroke-width:2px
+  class a,b chg
+  style a fill:#f00,stroke:#333,stroke-width:2px
+  linkStyle 0 stroke:#f00,stroke-width:2px
+  linkStyle default stroke-dasharray: 3 5
+```
+MD
+if out="$(python3 "$checker" "$work_dir/real-styling.md" 2>&1)"; then
+  [[ -z "$out" ]] && ok "a real styling declaration is accepted, marker and all" \
+    || bad "accepted, but printed something: $out"
+else
+  bad "a styling declaration mermaid parses was refused as a packed statement: $out"
+fi
+
+# `direction` takes the rest of its line, so neither a ";" nor anything else
+# on that line separates a statement from it. Its remedy is a new line, and
+# the message must say so rather than naming a ";" that changes nothing.
+# Review of PR #31 on 2026-09-10 ran mermaid's own parser on
+# `direction LR; a["one"] --> b["two"]` inside a subgraph and got no vertex and
+# no link at all, while this checker counted the link and exited 0.
+{
+  printf '```mermaid\nflowchart TD\n  a["one"] --> b["two"]\n'
+  printf '  direction LR; c1["%s"] --> c2["ok"]\n' "$(printf 'x%.0s' {1..200})"
+  printf '```\n'
+} >"$work_dir/direction-line.md"
+if out="$(python3 "$checker" "$work_dir/direction-line.md" 2>&1)"; then
+  bad "a node packed onto \`direction LR;\` was accepted, though mermaid draws none of it"
+else
+  case "$out" in
+    *"put that on a line of its own"*)
+      ok "a node packed onto \`direction\` is refused, and the remedy named is a new line, not a \";\"" ;;
+    *) bad "refused, but not naming the line the statement needs: $out" ;;
+  esac
+fi
+
+# `direction` in a node shape that carries no "[" either. Mermaid parses this
+# line and then draws none of it -- the run on 2026-09-10 came back with only
+# a and b as vertices and only a->b as an edge -- so the label is never
+# measured and never rendered.
+{
+  printf '```mermaid\nflowchart TD\n  a["one"] --> b["two"]\n'
+  printf '  direction LR; c1(("%s")) --> c2(("ok"))\n' "$(printf 'x%.0s' {1..200})"
+  printf '```\n'
+} >"$work_dir/direction-round.md"
+if out="$(python3 "$checker" "$work_dir/direction-round.md" 2>&1)"; then
+  bad "a round node packed onto \`direction LR;\` was accepted, though mermaid draws none of it"
+else
+  case "$out" in
+    *"put that on a line of its own"*)
+      ok "a round node packed onto \`direction\` is refused, and the remedy named is a new line" ;;
+    *) bad "refused, but not naming the line the statement needs: $out" ;;
+  esac
+fi
+
+# The other half of the same claim, with no label on the line at all: a link
+# written behind `direction` is drawn by nothing, so a block whose only link
+# sits there is not a graph and does not pass. The link itself is what marks
+# the packed statement now, so the message names that rather than the missing
+# link -- it says what to change, where "no link between any two nodes" asked
+# the author to add an edge they had already drawn.
+cat >"$work_dir/direction-swallows.md" <<'MD'
+```mermaid
+flowchart TD
+  subgraph s["the board"]
+  direction LR; a --> b
+  end
+```
+MD
+if out="$(python3 "$checker" "$work_dir/direction-swallows.md" 2>&1)"; then
+  bad "a block whose only link sits behind \`direction LR;\` was called a graph"
+else
+  case "$out" in
+    *"put that on a line of its own"*)
+      ok "a link written behind \`direction\` on its line does not pass, and the message names the line it needs" ;;
+    *) bad "refused, but not for the statement packed onto direction: $out" ;;
+  esac
+fi
+
 # A subgraph sharing its line with a graph statement: accepted. The title is
 # read from the statement, not from the line. Read from the line, it ran to the
 # last `]` on it, so this graph was refused for a five-word title nobody wrote
@@ -764,6 +958,221 @@ if out="$(python3 "$checker" "$work_dir/subgraph-line.md" 2>&1)"; then
     || bad "accepted, but printed something: $out"
 else
   bad "a subgraph sharing its line with an edge was refused: $out"
+fi
+
+# The same line with no ";" between the subgraph statement and the graph
+# statement: refused, naming the trailing text and the missing separator.
+# Mermaid puts a separator after the title's "]" and does not render this line
+# either. Until PRA-346 on 2026-09-09 the title ran from the first "[" to the
+# last "]" on the line, so this was refused for a five-word title nobody wrote
+# and, in the same breath, for having no link -- though the line draws one.
+# Neither false claim may come back.
+cat >"$work_dir/subgraph-no-semicolon.md" <<'MD'
+```mermaid
+flowchart TD
+  subgraph s["the board"] a["one"] --> b["two"]
+  end
+```
+MD
+if out="$(python3 "$checker" "$work_dir/subgraph-no-semicolon.md" 2>&1)"; then
+  bad "a subgraph sharing its line with a graph statement and no \";\" was accepted"
+else
+  case "$out" in
+    *"no link between any two nodes"*)
+      bad "a subgraph line missing \";\" was told it draws no link, though the line draws one: $out" ;;
+    *"subgraph title"*"words"*)
+      bad "a subgraph line missing \";\" was refused for a title nobody wrote: $out" ;;
+    *"text after the title"*)
+      ok "a subgraph sharing its line with a graph statement and no \";\" is refused, naming the trailing text and the missing separator" ;;
+    *) bad "refused, but not for the missing \";\": $out" ;;
+  esac
+fi
+
+# The bare form of a subgraph title, with no id and no brackets: still
+# measured against the four-word budget. `the whole board title` is exactly
+# four words, so a checker that skipped this form, or measured it off by one,
+# would show it here instead of on a plan.
+cat >"$work_dir/subgraph-bare-title.md" <<'MD'
+```mermaid
+flowchart TD
+  subgraph the whole board title
+    a["one"] --> b["two"]
+  end
+```
+MD
+if out="$(python3 "$checker" "$work_dir/subgraph-bare-title.md" 2>&1)"; then
+  [[ -z "$out" ]] && ok "a bare subgraph title at the four-word budget is accepted silently" \
+    || bad "accepted, but printed something: $out"
+else
+  bad "a bare subgraph title at the four-word budget was refused: $out"
+fi
+
+# A subgraph id mermaid accepts and no identifier regex does: a path. Mermaid
+# puts no constraint on the id beyond the "[" that ends it, so the bracket is
+# what tells the bracketed form from the bare one. Review of PR #31 on
+# 2026-09-10 found the id matched against IDENT instead, which stopped at the
+# "/", read the whole statement as a bare title, and refused a 78-character
+# title as 94 characters -- quoting a title the author never wrote, which is
+# the failure the fix above was written to remove. Every id holding a "/", ":",
+# "#", "+", "&", a space or a non-ASCII letter failed the same way, so the
+# cases below spread across those shapes.
+for sub_id in "skills/board" "s:1" "s#1" "café"; do
+  {
+    printf '```mermaid\nflowchart TD\n'
+    printf '  subgraph %s["a title"]\n' "$sub_id"
+    printf '  a["one"] --> b["two"]\n  end\n```\n'
+  } >"$work_dir/subgraph-id.md"
+  if out="$(python3 "$checker" "$work_dir/subgraph-id.md" 2>&1)"; then
+    [[ -z "$out" ]] && ok "a subgraph id \"$sub_id\" is read as an id, not as part of the title" \
+      || bad "accepted the id \"$sub_id\", but printed something: $out"
+  else
+    bad "a subgraph id \"$sub_id\" made the checker measure the id as the title: $out"
+  fi
+done
+
+# An over-budget title on a statement that is ALSO missing its separator:
+# both are reported. The title was already read when the separator was found
+# missing, and scan()'s own docstring says a label already read comes back
+# beside the error. Review of PR #31 on 2026-09-10 found it thrown away with
+# the exception, so the author fixed the separator and only then learned the
+# title was over budget -- two rounds for one line.
+z85="$(printf 'z%.0s' {1..85})"
+{
+  printf '```mermaid\nflowchart TD\n'
+  printf '  subgraph s["%s"] a["one"] --> b["two"]\n' "$z85"
+  printf '  end\n```\n'
+} >"$work_dir/subgraph-title-and-separator.md"
+if out="$(python3 "$checker" "$work_dir/subgraph-title-and-separator.md" 2>&1)"; then
+  bad "a subgraph line over budget AND missing its separator was accepted"
+else
+  case "$out" in
+    *"85 characters"*"text after the title"*)
+      ok "an over-budget subgraph title is reported beside the separator it is missing" ;;
+    *) bad "refused, but did not report both the title and the separator: $out" ;;
+  esac
+fi
+
+# A `%%` comment written after a statement: refused, and the message says the
+# comment must begin its own line. Mermaid strips a comment ONLY where it
+# begins one -- cleanupComments is `/^\s*%%(?!{)[^\n]+\n?/gm` -- so the line
+# below is a parse error and the whole diagram draws nothing. The round before
+# this one read mermaid's lexer instead of running it, dropped the comment
+# wherever it fell, and called the block a graph; review of PR #31 on
+# 2026-09-10 ran mermaid 11.17.2 over both lines and got `Parse error on line
+# 2` for each.
+cat >"$work_dir/trailing-comment-edge.md" <<'MD'
+```mermaid
+flowchart TD
+  a["one"] --> b["two"] %% why
+```
+MD
+if out="$(python3 "$checker" "$work_dir/trailing-comment-edge.md" 2>&1)"; then
+  bad "a %% comment after an edge statement was accepted, though mermaid cannot parse the line"
+else
+  case "$out" in
+    *"must begin its own line"*)
+      ok "a %% comment after an edge statement is refused, naming the line a comment needs" ;;
+    *) bad "refused, but not for the comment: $out" ;;
+  esac
+fi
+
+# The same on a subgraph line, where the remedy the checker names is what the
+# round before got wrong twice: first a ";", which does not put a comment on a
+# line of its own, then dropping the comment entirely.
+cat >"$work_dir/trailing-comment-subgraph.md" <<'MD'
+```mermaid
+flowchart TD
+  subgraph s["the board"] %% the cluster
+  a["one"] --> b["two"]
+  end
+```
+MD
+if out="$(python3 "$checker" "$work_dir/trailing-comment-subgraph.md" 2>&1)"; then
+  bad "a %% comment after a subgraph title was accepted, though mermaid cannot parse the line"
+else
+  case "$out" in
+    *'separate statements with ";"'*)
+      bad "refused a trailing comment by naming a \";\", which does not put it on a line of its own: $out" ;;
+    *"must begin its own line"*)
+      ok "a %% comment after a subgraph title is refused, naming the line a comment needs" ;;
+    *) bad "refused, but not for the comment: $out" ;;
+  esac
+fi
+
+# A comment that DOES begin its line is dropped, as mermaid drops it. This is
+# the half of the rule the fix above must not take with it.
+cat >"$work_dir/own-line-comment.md" <<'MD'
+```mermaid
+flowchart TD
+  %% why this graph is shaped like this
+  a["one"] --> b["two"]
+```
+MD
+if out="$(python3 "$checker" "$work_dir/own-line-comment.md" 2>&1)"; then
+  [[ -z "$out" ]] && ok "a %% comment on a line of its own is dropped, as mermaid drops it" \
+    || bad "accepted, but printed something: $out"
+else
+  bad "a %% comment on its own line was read as graph syntax: $out"
+fi
+
+# A "%%" inside an edge label is label text, and the label is measured whole.
+# Mermaid parses this line and draws the edge, so refusing it would turn a
+# valid line into a rewrite the author has to guess at; the round before this
+# one truncated the line at the "%%" and reported an edge label that never
+# closes, naming a cause that is not there.
+cat >"$work_dir/percent-in-edge-label.md" <<'MD'
+```mermaid
+flowchart TD
+  a["one"] -->|100%% done here in this label| b["two"]
+```
+MD
+if out="$(python3 "$checker" "$work_dir/percent-in-edge-label.md" 2>&1)"; then
+  bad "an edge label holding %% was cut at it and passed under the word budget"
+else
+  case "$out" in
+    *"never closes"*)
+      bad "an edge label holding %% was reported as never closing, which is not what is wrong with it: $out" ;;
+    *"edge label"*"6 words"*)
+      ok "a %% inside an edge label is label text, and the label is measured whole" ;;
+    *) bad "refused, but not for the whole edge label's word count: $out" ;;
+  esac
+fi
+
+# And a "%%" written after a STYLING statement is accepted, because mermaid
+# accepts it: its style lexer skips a comment where the graph lexer does not.
+# Measured, not assumed -- `style a fill:#f00 %% why` and `direction LR %% turn`
+# both parse in mermaid 11.17.2.
+cat >"$work_dir/styling-comment.md" <<'MD'
+```mermaid
+flowchart TD
+  a["one"] --> b["two"]
+  style a fill:#f00 %% why
+  linkStyle 0 stroke:#f00 %% and this
+```
+MD
+if out="$(python3 "$checker" "$work_dir/styling-comment.md" 2>&1)"; then
+  [[ -z "$out" ]] && ok "a %% comment after a styling statement is accepted, as mermaid accepts it" \
+    || bad "accepted, but printed something: $out"
+else
+  bad "a %% comment after a styling statement was refused, though mermaid parses the line: $out"
+fi
+
+# The other side of that: a "%%" inside a quoted label is label text, and the
+# label is still measured. A stripper that ignored quotes would cut the label
+# in half and report a shorter one than the diagram draws.
+cat >"$work_dir/quoted-percent.md" <<'MD'
+```mermaid
+flowchart TD
+  c1["one two %% three four five six seven"] --> c2["ok"]
+```
+MD
+if out="$(python3 "$checker" "$work_dir/quoted-percent.md" 2>&1)"; then
+  bad "a label holding %% was cut at it and passed under the word budget"
+else
+  case "$out" in
+    *"node c1"*"words"*) ok "a %% inside a quoted label is label text, and the label is measured whole" ;;
+    *) bad "refused, but not for the whole label's word count: $out" ;;
+  esac
 fi
 
 # A `;` inside a label is text, not a separator. The statement split is what
@@ -825,6 +1234,60 @@ if out="$(python3 "$checker" "$work_dir/terse.md" 2>&1)"; then
 else
   bad "a terse graph inside the budget was refused: $out"
 fi
+
+# --- 2b. --max-label-chars: the budget a deeper target raises -------------
+#
+# limits.max_label_chars in a target's board.toml reaches this file as this
+# flag -- see the comment above Budget for why 80 is a default calibrated on
+# this tree and not a ceiling on every tree.
+ninety_chars="$(printf 'x%.0s' {1..90})"
+printf '%s\n' \
+  '```mermaid' \
+  'flowchart TD' \
+  "  c1[\"$ninety_chars\"] --> c2[\"ok\"]" \
+  '```' \
+  >"$work_dir/max-label-chars.md"
+
+if out="$(python3 "$checker" "$work_dir/max-label-chars.md" 2>&1)"; then
+  bad "a 90-character node label was accepted at the default --max-label-chars"
+else
+  case "$out" in
+    *"node c1"*"characters"*) ok "a 90-character node label is refused at the default --max-label-chars" ;;
+    *) bad "refused, but not for the character count: $out" ;;
+  esac
+fi
+
+if out="$(python3 "$checker" --max-label-chars 96 "$work_dir/max-label-chars.md" 2>&1)"; then
+  [[ -z "$out" ]] && ok "the same 90-character node label is accepted under --max-label-chars 96" \
+    || bad "accepted under --max-label-chars 96, but printed something: $out"
+else
+  bad "a 90-character node label was refused under --max-label-chars 96: $out"
+fi
+
+case "$(python3 "$checker" --limits)" in
+  *"at most 80 characters"*) ok "--limits with no option prints the default of 80 characters" ;;
+  *) bad "--limits with no option did not print the default of 80 characters: $(python3 "$checker" --limits)" ;;
+esac
+
+case "$(python3 "$checker" --limits --max-label-chars 96)" in
+  *"at most 96 characters"*) ok "--limits --max-label-chars 96 prints 96, not the default" ;;
+  *) bad "--limits --max-label-chars 96 did not print 96: $(python3 "$checker" --limits --max-label-chars 96)" ;;
+esac
+
+# A junk value for --max-label-chars: a usage error naming the option, exit 2,
+# never a stack trace and never a silent fallback to the default.
+for junk in "wide" "-5"; do
+  out="$(python3 "$checker" --max-label-chars "$junk" "$work_dir/max-label-chars.md" 2>&1)"
+  status=$?
+  if [[ $status -ne 2 ]]; then
+    bad "--max-label-chars $junk exited $status, not 2: $out"
+  else
+    case "$out" in
+      *"--max-label-chars"*) ok "--max-label-chars $junk is a usage error naming the option" ;;
+      *) bad "--max-label-chars $junk exited 2 but did not name the option: $out" ;;
+    esac
+  fi
+done
 
 # --- 3. Drift: SKILL.md states the budget the checker enforces -------------
 #

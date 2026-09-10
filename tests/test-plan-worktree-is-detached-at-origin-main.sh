@@ -38,6 +38,10 @@ if [[ -d "$plan_worktree" ]]; then
   ok "a plan dispatch cuts a worktree named for ticket, role and attempt"
 else
   bad "a plan dispatch cuts a worktree named for ticket, role and attempt: $plan_worktree does not exist"
+  # No worktree means the dispatch died before it cut one, and this line names
+  # neither what died nor why. The reason is in $DISPATCH_RUN_LOG, which the
+  # EXIT trap deletes with $work_dir a moment from now.
+  dispatch_fixture_show_run_log
 fi
 
 # HEAD in a detached worktree is a commit sha, not a branch, and `git branch
@@ -82,6 +86,7 @@ if [[ -d "$build_worktree" ]]; then
   fi
 else
   bad "a build dispatched afterwards still gets its own branch cut from origin/main: $build_worktree does not exist"
+  dispatch_fixture_show_run_log
 fi
 
 [[ "$fail" -eq 0 ]] && printf 'PASS: the plan stage cuts a detached worktree at origin/main\n'

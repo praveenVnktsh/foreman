@@ -64,13 +64,26 @@ Any label line: at most 80 characters, counted as it renders.
 c4["<b>c4 · config.sh</b> · CHANGE<br/>loads one board's environment<br/><i>opus · high</i>"]
 ```
 
+The character budget above is `bin/check-plan-graph.py`'s default, not a
+ceiling every target shares. A target raises it by setting
+`limits.max_label_chars` in its own `board.toml`; the board reads that value
+and passes it to the checker as `--max-label-chars N` on the command line in
+the plan agent's prompt. A plan is judged by the number on that command line,
+not by the one printed above.
+
 **A path that will not fit goes on a line of its own.** A node names the file
-it builds, and in a deep tree `c1 · ` plus the path plus ` · CHANGE` is wider
-than the budget above allows one label line to be. That budget leaves room for
-a line of its own: put the path there by itself. If the path alone is still too
-wide, write the tail that identifies it, `.../service/BoardStatusTest.java`,
-and let the prompt carry the whole path. The prompt has no budget; the picture
-does.
+it builds, and in a deep tree `c1 · ` plus the path plus ` · CHANGE` runs past
+the character budget. The label budget above leaves room for a line of its own:
+put the path there by itself. If the path alone is still too wide, write the
+tail that identifies it, `.../service/BoardStatusTest.java`, and let the prompt
+carry the whole path. The prompt has no budget; the picture does.
+
+**When the whole tree runs deep, ask the operator to raise the budget.** A
+target whose paths are long throughout is not solved node by node: one wider
+`limits.max_label_chars` in its `board.toml` gives every label in every plan
+the room the target needs. That edit is the operator's, not yours — a plan
+agent commits nothing and its worktree is thrown away — so say so in your
+report and write the plan within the budget you were given.
 
 **Quote every label the brackets hold:** `c1["..."]`. Brackets nest and mermaid
 has a dozen node shapes, so an unquoted label has no unambiguous end. The check
@@ -144,9 +157,13 @@ The graph is an artifact, not a checkpoint. Write it, commit it, and carry on.
 Nobody has to approve it.
 
 ```bash
-bin/check-plan-graph.py docs/plans/<file>.md
+bin/check-plan-graph.py --max-label-chars <N> docs/plans/<file>.md
 bin/render-diagram.sh docs/plans/<file>.md && open docs/plans/<file>.html
 ```
+
+`<N>` is the budget your prompt gave you. Leave the option off and the checker
+uses the default printed above, which is the wrong number for any target that
+declares one of its own.
 
 It is kept because the agents that execute it hold no memory of writing it,
 and because nothing else says why the work was cut up this way.

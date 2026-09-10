@@ -152,6 +152,21 @@ LIMITS = {
     # couple of minutes must not pay a full probe's cost merely to prove a
     # machine it is not about to build on is still healthy.
     "QUICK_PROBE_MB": 4,
+    # The character budget bin/check-plan-graph.py measures every plan-graph
+    # label line against. 80 is that checker's own default, chosen for the
+    # longest path this repository tracks. A target whose paths are deeper
+    # raises it here, so a correct plan node naming one of its files is not
+    # refused with no compliant wording to offer.
+    #
+    # Deliberately absent from LIMIT_MINIMUMS above: max_label_chars=0 refuses
+    # every label, which starves planning loudly -- the card idles unplanned,
+    # but nothing merges unreviewed, so zero is a legitimate (if unusual)
+    # operator choice, not a disarmed gate.
+    #
+    # The default 80 is written twice, here and in bin/check-plan-graph.py,
+    # because this loader deliberately depends on nothing. tests/test-contract.sh
+    # pins the two together.
+    "MAX_LABEL_CHARS": 80,
 }
 
 # Every top-level table this loader reads, and the keys it recognises inside
