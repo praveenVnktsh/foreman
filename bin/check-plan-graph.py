@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Refuse a plan graph whose labels have grown back into prose.
+"""Refuse a plan that is not a graph, or whose labels have grown back into prose.
 
     check-plan-graph.py docs/plans/a.md docs/plans/b.md
     check-plan-graph.py --limits
@@ -11,8 +11,10 @@ the constants rather than typed a second time.
 
 from __future__ import annotations
 
+import html
 import re
 import sys
+from dataclasses import dataclass
 from pathlib import Path
 
 # Why there is a budget at all. A plan label is read by a stranger inside a
@@ -21,14 +23,23 @@ from pathlib import Path
 # holding something the graph cannot draw as a dependency, which is the one
 # thing the graph was drawn for. Both failures look like helpfulness while they
 # are being written, so they need a gate rather than a reminder.
+#
+# Words catch prose. Characters catch width. A label must pass both, because
+# either budget alone has a hole: on 2026-09-03 an unquoted seventeen-word label
+# went unmeasured, and a single 200-character token is one word and clears any
+# word budget while filling the screen. 64 sits just above what a real plan
+# needs -- the widest label line in docs/plans/ on 2026-09-09 is 61 characters,
+# the test path in 2026-09-05-unselectable-renders.md.
 MAX_NODE_LINES = 4
 MAX_WORDS_PER_LINE = 6
 MAX_LABEL_WORDS = 4
+MAX_LABEL_CHARS = 64
 
 LIMITS = (
     f"A node label: at most {MAX_NODE_LINES} lines, "
     f"at most {MAX_WORDS_PER_LINE} words a line.",
     f"An edge or cluster label: at most {MAX_LABEL_WORDS} words.",
+    f"Any label line: at most {MAX_LABEL_CHARS} characters, counted as it renders.",
 )
 
 FENCE = "```"
@@ -51,9 +62,14 @@ CLOSE_RUN = re.compile(r"[/\\]?[)\]}]+")
 # that form with exactly two characters and closes it with the arrow.
 INLINE_TEXT_LINKS = frozenset(["--", "==", "-."])
 
+# The words a mermaid graph opens with. A block that opens with anything else
+# is not a graph, whatever the fence says.
+GRAPH_HEADERS = frozenset(["flowchart", "graph"])
+HEADER_LIST = " or ".join(sorted(GRAPH_HEADERS))
+
 # Lines that carry no label of their own: graph syntax, styling, cluster ends.
-KEYWORDS = frozenset(
-    ["flowchart", "graph", "direction", "classDef", "class", "linkStyle", "style", "end"]
+KEYWORDS = GRAPH_HEADERS | frozenset(
+    ["direction", "classDef", "class", "linkStyle", "style", "end"]
 )
 
 USAGE = "usage: check-plan-graph.py <plan.md>... | --limits"
@@ -63,9 +79,27 @@ class LabelSyntax(Exception):
     """A line the checker cannot read as nodes and links."""
 
 
+@dataclass(frozen=True)
+class Drawn:
+    """What one line of a graph draws: its labels, and its links between nodes."""
+
+    labels: list[tuple[str, str, str]]
+    links: int
+
+
 def words(text: str) -> list[str]:
     """The words of a label: markup removed, bare separators dropped."""
     return [word for word in TAG.sub(" ", text).split() if word != "·"]
+
+
+def width(text: str) -> int:
+    """The characters a label takes on screen once mermaid has rendered it.
+
+    Markup goes first, entities second. `&lt;b&gt;` renders as four characters
+    a reader sees; unescaping it first would turn it into a tag that TAG then
+    deletes, and the label would measure as narrower than it draws.
+    """
+    return len(" ".join(html.unescape(TAG.sub(" ", text)).split()))
 
 
 def skip_space(line: str, at: int) -> int:
@@ -95,15 +129,20 @@ def read_node_label(line: str, at: int, ident: str) -> tuple[int, str]:
     return closing.end(), line[at + 1 : close]
 
 
-def scan(line: str) -> list[tuple[str, str, str]]:
-    """Every label on one line, as (kind, node id, label text).
+def scan(line: str) -> Drawn:
+    """Every label on one line, as (kind, node id, label text), and its links.
 
     The line is read as mermaid writes it: a node, then a link, then a node,
     for as long as it runs. Anything that does not fit raises LabelSyntax and
     is reported. Nothing is skipped -- a label the checker cannot read is a
     label nothing has checked, and it reaches the diagram unmeasured.
+
+    The links are counted here because here is where they are already parsed. A
+    second reader of the same syntax drifts from this one, and a regex over the
+    raw line finds the `-->` inside a quoted label.
     """
     found: list[tuple[str, str, str]] = []
+    links = 0
     at = skip_space(line, 0)
     expect_node = True
     while at < len(line) and line[at] != ";":
@@ -125,6 +164,7 @@ def scan(line: str) -> list[tuple[str, str, str]]:
             if not link:
                 raise LabelSyntax(f'expected a link or a label at "{line[at:]}"')
             at = link.end()
+            links += 1
             if at < len(line) and line[at] == "|":
                 close = line.find("|", at + 1)
                 if close < 0:
@@ -137,7 +177,7 @@ def scan(line: str) -> list[tuple[str, str, str]]:
                 )
             expect_node = True
         at = skip_space(line, at)
-    return found
+    return Drawn(found, links)
 
 
 def subgraph_title(line: str) -> str:
@@ -148,34 +188,43 @@ def subgraph_title(line: str) -> str:
     return line[len("subgraph") :].strip().strip('"').strip()
 
 
-def check_line(path: str, number: int, line: str) -> list[str]:
+def check_label(where: str, subject: str, label: str, max_words: int) -> list[str]:
+    """One label against both budgets: its words, then its rendered width."""
+    problems: list[str] = []
+    count = len(words(label))
+    if count > max_words:
+        problems.append(
+            f"{where}: {subject} has {count} words, at most {max_words} allowed"
+        )
+    size = width(label)
+    if size > MAX_LABEL_CHARS:
+        problems.append(
+            f"{where}: {subject} is {size} characters, "
+            f"at most {MAX_LABEL_CHARS} allowed"
+        )
+    return problems
+
+
+def check_line(path: str, number: int, line: str) -> tuple[list[str], int]:
+    """What is wrong with one line of the graph, and how many links it draws."""
     where = f"{path}:{number}"
     first = line.split()[0]
     if first in KEYWORDS:
-        return []
+        return [], 0
     if first == "subgraph":
         title = subgraph_title(line)
-        count = len(words(title))
-        if count > MAX_LABEL_WORDS:
-            return [
-                f'{where}: subgraph title "{title}" has {count} words, '
-                f"at most {MAX_LABEL_WORDS} allowed"
-            ]
-        return []
+        return check_label(where, f'subgraph title "{title}"', title, MAX_LABEL_WORDS), 0
     try:
-        labels = scan(line)
+        drawn = scan(line)
     except LabelSyntax as unclosed:
-        return [f"{where}: {unclosed}"]
+        return [f"{where}: {unclosed}"], 0
 
     problems: list[str] = []
-    for kind, ident, label in labels:
+    for kind, ident, label in drawn.labels:
         if kind == "edge":
-            count = len(words(label))
-            if count > MAX_LABEL_WORDS:
-                problems.append(
-                    f'{where}: edge label "{label}" has {count} words, '
-                    f"at most {MAX_LABEL_WORDS} allowed"
-                )
+            problems += check_label(
+                where, f'edge label "{label}"', label, MAX_LABEL_WORDS
+            )
             continue
         parts = BREAK.split(label)
         if len(parts) > MAX_NODE_LINES:
@@ -184,17 +233,18 @@ def check_line(path: str, number: int, line: str) -> list[str]:
                 f"at most {MAX_NODE_LINES} allowed"
             )
         for index, part in enumerate(parts, 1):
-            count = len(words(part))
-            if count > MAX_WORDS_PER_LINE:
-                problems.append(
-                    f"{where}: node {ident}, label line {index} has {count} words, "
-                    f"at most {MAX_WORDS_PER_LINE} allowed"
-                )
-    return problems
+            problems += check_label(
+                where, f"node {ident}, label line {index}", part, MAX_WORDS_PER_LINE
+            )
+    return problems, drawn.links
 
 
-def read_block(path: str, text: str) -> tuple[list[tuple[int, str]], list[str]]:
-    """The lines inside the one mermaid fence, plus what was found outside it."""
+def read_block(path: str, text: str) -> tuple[list[tuple[int, str]] | None, list[str]]:
+    """The lines inside the one mermaid fence, plus what was found outside it.
+
+    The lines are None when the file has no fence: there is no block to read,
+    which is a different answer from a block that holds no lines.
+    """
     block: list[tuple[int, str]] = []
     problems: list[str] = []
     state = "before"
@@ -222,7 +272,7 @@ def read_block(path: str, text: str) -> tuple[list[tuple[int, str]], list[str]]:
         # One message, not one per line. A file with no fence at all is prose
         # from its first line to its last, and reporting every one of them
         # buries the single fact the reader needs under a thousand copies of it.
-        return [], [
+        return None, [
             f"{path}: no {FENCE_OPEN} block; a plan is one mermaid block and nothing else"
         ]
     if state == "inside":
@@ -230,7 +280,11 @@ def read_block(path: str, text: str) -> tuple[list[tuple[int, str]], list[str]]:
     return block, problems
 
 
-def check_block(path: str, block: list[tuple[int, str]]) -> list[str]:
+def graph_lines(
+    path: str, block: list[tuple[int, str]]
+) -> tuple[list[tuple[int, str]], list[str]]:
+    """The lines of the block that draw the graph: comments and blanks dropped."""
+    lines: list[tuple[int, str]] = []
     problems: list[str] = []
     # The %%{init: ...}%% directive spans many lines and holds no label.
     directive_at = 0
@@ -245,10 +299,45 @@ def check_block(path: str, block: list[tuple[int, str]]) -> list[str]:
             continue
         if line.startswith("%%") or not line:
             continue
-        problems += check_line(path, number, line)
+        lines.append((number, line))
     if directive_at:
         problems.append(
             f"{path}:{directive_at}: %%{{init directive opened here and never closed by }}%%"
+        )
+    return lines, problems
+
+
+def check_block(path: str, block: list[tuple[int, str]]) -> list[str]:
+    lines, problems = graph_lines(path, block)
+    if not lines:
+        # One message, for the same reason the missing fence gets one: the
+        # reader needs the file name and the one fact, not a line number
+        # inside a block that says nothing.
+        return problems + [
+            f"{path}: empty {FENCE_OPEN} block; a plan is one mermaid graph and nothing else"
+        ]
+    opened_at, opener = lines[0][0], lines[0][1].split()[0]
+    if opener not in GRAPH_HEADERS:
+        # Prose inside the fence. read_block() refuses prose outside it, and
+        # until 2026-09-09 nothing read what was in it, so a paragraph wrapped
+        # in ```mermaid passed the gate as a plan graph.
+        return problems + [
+            f'{path}:{opened_at}: block opens with "{opener}", not {HEADER_LIST}; '
+            "a plan is one mermaid graph and nothing else"
+        ]
+
+    links = 0
+    for number, line in lines:
+        found, drawn = check_line(path, number, line)
+        problems += found
+        links += drawn
+    if not links:
+        # A graph states what depends on what. A fence with no edge in it is a
+        # list with boxes drawn round it, and the build order it was drawn for
+        # is not in it.
+        problems.append(
+            f"{path}: no link between any two nodes; "
+            "a plan graph states what depends on what"
         )
     return problems
 
@@ -259,6 +348,8 @@ def check_file(path: str) -> list[str]:
     except (OSError, ValueError) as unreadable:
         return [f"{path}: cannot read: {unreadable}"]
     block, problems = read_block(path, text)
+    if block is None:
+        return problems
     return problems + check_block(path, block)
 
 

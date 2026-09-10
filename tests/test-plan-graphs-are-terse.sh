@@ -22,8 +22,15 @@
 # cases assert the refusal, because a checker that stays quiet about what it
 # cannot read is worse than no checker: it reports coverage it does not have.
 #
+# The third failure, found in review on 2026-09-09: a gate that reads the
+# labels inside the fence without ever asking whether the fence holds a graph.
+# A prose plan wrapped in a ```mermaid fence passed, an empty fence passed, and
+# a single 200-character token passed a budget counted in words. Each of the
+# three is a case below, because each one was accepted by the version of the
+# checker that this file already called green.
+#
 # What is deliberately NOT covered: rendering (another test owns it) and the
-# wording of SKILL.md's prose, only the two lines it must reproduce verbatim.
+# wording of SKILL.md's prose, only the lines it must reproduce verbatim.
 set -uo pipefail
 
 repo_root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -188,6 +195,81 @@ else
   case "$out" in
     *"expected a link or a label"*) ok "a line the checker cannot read is refused" ;;
     *) bad "refused, but not for being unreadable: $out" ;;
+  esac
+fi
+
+# An empty mermaid fence: refused. It is a plan that says nothing, and it
+# passed this gate until 2026-09-09.
+cat >"$work_dir/empty-fence.md" <<'MD'
+```mermaid
+```
+MD
+if out="$(python3 "$checker" "$work_dir/empty-fence.md" 2>&1)"; then
+  bad "an empty mermaid fence was accepted"
+else
+  case "$out" in
+    *"empty"*"mermaid graph and nothing else"*) ok "an empty mermaid fence is refused" ;;
+    *) bad "refused, but not for being empty: $out" ;;
+  esac
+fi
+
+# A fence holding prose, not a graph: refused. Lines of one word each are what
+# slipped through the old word-per-line budget, because a bare word parses as
+# a node id with no label. The claim here is narrower: a fence with no
+# flowchart/graph header is not a graph, whatever else it contains.
+cat >"$work_dir/prose-fence.md" <<'MD'
+```mermaid
+this
+document
+explains
+the
+plan
+```
+MD
+if out="$(python3 "$checker" "$work_dir/prose-fence.md" 2>&1)"; then
+  bad "a fence holding prose with no graph header was accepted"
+else
+  case "$out" in
+    *"not flowchart or graph"*) ok "a fence holding prose with no graph header is refused" ;;
+    *) bad "refused, but not for the missing graph header: $out" ;;
+  esac
+fi
+
+# A fence with a header and nodes but no edge: refused. A plan graph states
+# what depends on what; boxes with nothing drawn between them are a list.
+cat >"$work_dir/no-edge.md" <<'MD'
+```mermaid
+flowchart TD
+  c1["a node"]
+  c2["another node"]
+```
+MD
+if out="$(python3 "$checker" "$work_dir/no-edge.md" 2>&1)"; then
+  bad "a graph with no edge between any two nodes was accepted"
+else
+  case "$out" in
+    *"no link between any two nodes"*) ok "a fence with nodes but no edge is refused" ;;
+    *) bad "refused, but not for the missing edge: $out" ;;
+  esac
+fi
+
+# A node label that is one 200-character token: refused for its character
+# count. This is the case the ticket names: a single long token is one word,
+# so it satisfied a six-word budget whose comment said it existed for
+# on-screen legibility, while filling the screen anyway.
+long_token="$(printf 'x%.0s' {1..200})"
+printf '%s\n' \
+  '```mermaid' \
+  'flowchart TD' \
+  "  c1[\"$long_token\"] --> c2[\"y\"]" \
+  '```' \
+  >"$work_dir/long-token.md"
+if out="$(python3 "$checker" "$work_dir/long-token.md" 2>&1)"; then
+  bad "a 200-character node label was accepted"
+else
+  case "$out" in
+    *"node c1"*"characters"*) ok "a node label that is one 200-character token is refused" ;;
+    *) bad "refused, but not for the character count: $out" ;;
   esac
 fi
 
