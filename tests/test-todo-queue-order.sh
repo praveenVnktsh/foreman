@@ -16,8 +16,14 @@
 #
 # PRA-342: a board where every card is unrankable used to exit 0 with empty
 # stdout -- exactly what an empty Todo list produces. The tick could not tell
-# a stalled board from an idle one. Exit 2 is what separates them: it means
+# a stalled board from an idle one. Exit 3 is what separates them: it means
 # cards came in and not one of them could be ranked.
+#
+# PRA-352: that stall signal moved from 2 to 3. 2 is a usage error everywhere
+# else on this board -- skills/board/waitfor.py draws the same line -- so a
+# stalled board that exited 2 read to the tick the same as a mistyped
+# invocation. refuses() also accepted any non-zero exit, so it could not tell
+# a batch refusal from a nothing-ranked stall either; it now pins exit 1.
 #
 # It drives the real script over a pipe. No fixture instance, no git repository.
 set -uo pipefail
@@ -37,9 +43,10 @@ orders() {
 
 # $1 name, $2 substring the refusal must contain, $3 JSON on stdin
 refuses() {
-  local name="$1" want="$2" got
-  if got="$(printf '%s' "$3" | "$queue" 2>&1)"; then
-    bad "$name: accepted, printed [$got]"
+  local name="$1" want="$2" got status
+  got="$(printf '%s' "$3" | "$queue" 2>&1)"; status=$?
+  if [[ $status -ne 1 ]]; then
+    bad "$name: exited $status, wanted 1"
     return
   fi
   case "$got" in
@@ -48,7 +55,7 @@ refuses() {
   esac
 }
 
-# $1 name, $2 expected exit status (0 if some card ranked, 2 if none did),
+# $1 name, $2 expected exit status (0 if some card ranked, 3 if none did),
 # $3 expected stdout (newline separated, "" for none), $4 identifier the
 # stderr skip line must name, $5 substring the skip reason must carry, $6
 # JSON on stdin
@@ -118,19 +125,19 @@ skips "a missing priority skips its own card, and the message names it" \
   '[{"identifier":"ABC-7","priority":1},{"identifier":"ABC-8"}]'
 
 skips "a null priority skips its own card rather than read as untriaged" \
-  2 "" "ABC-7" "null" \
+  3 "" "ABC-7" "null" \
   '[{"identifier":"ABC-7","priority":null}]'
 
 skips "a boolean priority skips its own card rather than read as urgent" \
-  2 "" "ABC-7" "boolean" \
+  3 "" "ABC-7" "boolean" \
   '[{"identifier":"ABC-7","priority":true}]'
 
 skips "a priority outside the scale skips its own card, named by value" \
-  2 "" "ABC-7" "9" \
+  3 "" "ABC-7" "9" \
   '[{"identifier":"ABC-7","priority":9}]'
 
 skips "a priority name Linear does not use skips its own card" \
-  2 "" "ABC-7" "critical" \
+  3 "" "ABC-7" "critical" \
   '[{"identifier":"ABC-7","priority":"critical"}]'
 
 skips "a float that is not a whole number skips only its own card" \
@@ -148,23 +155,23 @@ board='[{"identifier":"ABC-1","priority":null},
         {"identifier":"ABC-3","priority":9}]'
 out="$(printf '%s' "$board" | "$queue" 2>/dev/null)"; out_status=$?
 err="$(printf '%s' "$board" | "$queue" 2>&1 >/dev/null)"
-if [[ $out_status -eq 2 && -z "$out" \
+if [[ $out_status -eq 3 && -z "$out" \
       && "$err" == *"skipped ABC-1"* && "$err" == *"skipped ABC-2"* \
       && "$err" == *"skipped ABC-3"* ]]; then
-  ok "a whole board of unrankable cards exits 2, distinct from an empty Todo list, and names every card on stderr"
+  ok "a whole board of unrankable cards exits 3, distinct from an empty Todo list, and names every card on stderr"
 else
   bad "a whole board of unrankable cards: stdout=[$out] stderr=[$err] exit=$out_status"
 fi
 
-# Exit 2 is a number. The line below it is the only thing that tells the
+# Exit 3 is a number. The line below it is the only thing that tells the
 # operator what the number means and what to do about it, so a status with no
 # statement is half the signal -- and deleting the statement leaves every other
 # case here green.
 case "$err" in
   *"nothing was ranked"*"priority in Linear"*)
-    ok "exit 2 says on stderr what it means and where the operator fixes it" ;;
+    ok "exit 3 says on stderr what it means and where the operator fixes it" ;;
   *)
-    bad "exit 2 never states that nothing ranked, or never sends the operator to Linear: $err" ;;
+    bad "exit 3 never states that nothing ranked, or never sends the operator to Linear: $err" ;;
 esac
 
 refuses "a malformed identifier is refused" \
@@ -192,6 +199,14 @@ if [[ $status -eq 0 && -z "$got" ]]; then
   ok "an empty list prints nothing and exits 0"
 else
   bad "an empty list printed [$got] and exited $status"
+fi
+
+out="$(printf '[]' | "$queue" extra-argument 2>/dev/null)"; out_status=$?
+err="$(printf '[]' | "$queue" extra-argument 2>&1 >/dev/null)"
+if [[ $out_status -eq 2 && -z "$out" && "$err" == *"usage"* ]]; then
+  ok "an extra argument exits 2 and names the usage on stderr"
+else
+  bad "an extra argument: stdout=[$out] stderr=[$err] exit=$out_status"
 fi
 
 exit "$fail"
