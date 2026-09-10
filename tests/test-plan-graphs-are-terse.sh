@@ -22,6 +22,20 @@
 # cases assert the refusal, because a checker that stays quiet about what it
 # cannot read is worse than no checker: it reports coverage it does not have.
 #
+# A third failure, found reviewing PR #18 on 2026-09-09: scan() stopped at the
+# first ";" on a line. A plan that packed several node statements behind
+# semicolons had every label after the first go unmeasured, and exited 0 with
+# no output at all. The same review found two edge-label forms mermaid allows
+# that scan() never read, two valid node forms it refused as unreadable, and a
+# failure message that could name a node id no link in the graph produces.
+#
+# The first fix for that third failure had two holes of its own, found in the
+# next review round on 2026-09-09. An inline edge label ended at any run of
+# link characters, so `a -- reads the plan, then... builds --> b` was cut at
+# the "..." and passed at five words against a budget of four. And a line whose
+# first word was a keyword was still skipped whole, so a node packed after a
+# `classDef` on that line was never measured. Both exited 0 with no output.
+#
 # What is deliberately NOT covered: rendering (another test owns it) and the
 # wording of SKILL.md's prose, only the two lines it must reproduce verbatim.
 set -uo pipefail
@@ -108,22 +122,6 @@ else
   esac
 fi
 
-# An edge label with too many words: refused.
-cat >"$work_dir/wordy-edge.md" <<'MD'
-```mermaid
-flowchart TD
-  c3 -->|this edge label has far too many words| c4
-```
-MD
-if out="$(python3 "$checker" "$work_dir/wordy-edge.md" 2>&1)"; then
-  bad "an edge label with too many words was accepted"
-else
-  case "$out" in
-    *"edge label"*"words"*) ok "an edge label with too many words is refused" ;;
-    *) bad "refused, but not for edge word count: $out" ;;
-  esac
-fi
-
 # Prose above the mermaid fence: refused.
 cat >"$work_dir/prose-above.md" <<'MD'
 # A plan with a stray sentence
@@ -159,19 +157,204 @@ else
   esac
 fi
 
-# An edge label written inline rather than in pipes: refused, not skipped.
-cat >"$work_dir/inline-edge.md" <<'MD'
+# Several node statements on one line, separated by ";": every one of them is
+# measured, not only the first. Before the fix reviewed in PR #18 on
+# 2026-09-09, scan() stopped at the first ";", so this line exited 0 with no
+# output at all. The assertion below checks the last of the three, because the
+# first was already being measured before that fix -- it is the ones after the
+# first ";" that prove the bug is gone.
+cat >"$work_dir/semicolons.md" <<'MD'
+```mermaid
+flowchart TD
+  n1["one two three four five six seven"]; n2["one two three four five six seven"]; n3["one two three four five six seven"]
+```
+MD
+if out="$(python3 "$checker" "$work_dir/semicolons.md" 2>&1)"; then
+  bad "three over-budget node labels packed behind \";\" on one line were accepted"
+else
+  case "$out" in
+    *"node n3"*"words"*) ok "a node label after \";\" on the same line is measured" ;;
+    *) bad "refused, but not naming node n3: $out" ;;
+  esac
+fi
+
+# The three forms mermaid writes an edge label in, one test each: pipes, inline
+# on a solid link, inline on a dotted link. All three are measured against the
+# same four-word budget, so all three refuse the same over-budget label.
+#
+# An over-budget edge label in the pipe form: refused.
+cat >"$work_dir/pipe-edge.md" <<'MD'
+```mermaid
+flowchart TD
+  a -->|one two three four five| b
+```
+MD
+if out="$(python3 "$checker" "$work_dir/pipe-edge.md" 2>&1)"; then
+  bad "an over-budget edge label in the pipe form was accepted"
+else
+  case "$out" in
+    *"edge label"*"words"*) ok "an over-budget edge label in the pipe form is refused" ;;
+    *) bad "refused, but not for edge word count: $out" ;;
+  esac
+fi
+
+# An over-budget edge label written inline on a solid link: refused.
+cat >"$work_dir/inline-edge-solid.md" <<'MD'
 ```mermaid
 flowchart TD
   c9 -- this edge label has far too many words to be allowed --> c10
 ```
 MD
-if out="$(python3 "$checker" "$work_dir/inline-edge.md" 2>&1)"; then
-  bad "an inline edge label was accepted, and it is 11 words long"
+if out="$(python3 "$checker" "$work_dir/inline-edge-solid.md" 2>&1)"; then
+  bad "an inline edge label on a solid link was accepted, and it is 11 words long"
 else
   case "$out" in
-    *"belongs in pipes"*) ok "an edge label written inline is refused" ;;
-    *) bad "refused, but not for the inline label: $out" ;;
+    *"edge label"*"words"*) ok "an over-budget edge label inline on a solid link is refused" ;;
+    *) bad "refused, but not for edge word count: $out" ;;
+  esac
+fi
+
+# An over-budget edge label written inline on a dotted link: refused.
+cat >"$work_dir/inline-edge-dotted.md" <<'MD'
+```mermaid
+flowchart TD
+  a -. one two three four five .-> b
+```
+MD
+if out="$(python3 "$checker" "$work_dir/inline-edge-dotted.md" 2>&1)"; then
+  bad "an inline edge label on a dotted link was accepted"
+else
+  case "$out" in
+    *"edge label"*"words"*) ok "an over-budget edge label inline on a dotted link is refused" ;;
+    *) bad "refused, but not for edge word count: $out" ;;
+  esac
+fi
+
+# A ":::className" suffix on a node, on a label inside the budget: accepted
+# silently. Before the fix reviewed in PR #18 on 2026-09-09, this valid mermaid
+# was refused as "expected a link or a label".
+cat >"$work_dir/class-suffix.md" <<'MD'
+```mermaid
+flowchart TD
+  c1["short label"]:::changed --> c2:::changed
+```
+MD
+if out="$(python3 "$checker" "$work_dir/class-suffix.md" 2>&1)"; then
+  [[ -z "$out" ]] && ok "a :::className suffix on a node is accepted silently" \
+    || bad "accepted, but printed something: $out"
+else
+  bad "a :::className suffix on a node, inside the budget, was refused: $out"
+fi
+
+# A pipe label separated from its arrow by a space, inside the budget:
+# accepted silently. Before the fix reviewed in PR #18 on 2026-09-09, this
+# valid mermaid was refused the same way.
+cat >"$work_dir/spaced-pipe.md" <<'MD'
+```mermaid
+flowchart TD
+  a --> |short label| b
+```
+MD
+if out="$(python3 "$checker" "$work_dir/spaced-pipe.md" 2>&1)"; then
+  [[ -z "$out" ]] && ok "a pipe label separated from its arrow by a space is accepted silently" \
+    || bad "accepted, but printed something: $out"
+else
+  bad "a pipe label separated from its arrow by a space, inside the budget, was refused: $out"
+fi
+
+# An unspaced link with an "o" head, as in a---ob[...]: refused for its real
+# node id. Before the fix reviewed in PR #18 on 2026-09-09, the tokeniser let
+# the link's "o" leak into the id, so the message named a node "ob" that no
+# link in the graph produces.
+cat >"$work_dir/unspaced-o-head.md" <<'MD'
+```mermaid
+flowchart TD
+  a---ob["one two three four five six seven eight"]
+```
+MD
+if out="$(python3 "$checker" "$work_dir/unspaced-o-head.md" 2>&1)"; then
+  bad "an over-budget label past an unspaced o-headed link was accepted"
+else
+  case "$out" in
+    *"node ob"*) bad "refused, but naming node ob, which the graph does not contain: $out" ;;
+    *"node b"*"words"*) ok "an unspaced o-headed link is refused, naming the node it actually links to" ;;
+    *) bad "refused, but not naming node b: $out" ;;
+  esac
+fi
+
+# Link characters inside an inline edge label are label text, not the end of
+# the label. Review of PR #18 on 2026-09-09 found the closer matching any run
+# of link characters, so this line was cut at the "..." and only its first
+# three words were measured -- exit 0, five words against a budget of four.
+cat >"$work_dir/inline-edge-dots.md" <<'MD'
+```mermaid
+flowchart TD
+  a -- reads the plan, then... builds --> b
+```
+MD
+if out="$(python3 "$checker" "$work_dir/inline-edge-dots.md" 2>&1)"; then
+  bad "an inline edge label was cut at the \"...\" inside it and passed at 5 words"
+else
+  case "$out" in
+    *"reads the plan, then... builds"*"5 words"*)
+      ok "an inline edge label is measured whole, past the link characters inside it" ;;
+    *) bad "refused, but not for the whole label at five words: $out" ;;
+  esac
+fi
+
+# A statement packed after a styling statement on the same line: measured. The
+# ";" fix of 2026-09-09 landed inside scan(), but check_line still skipped a
+# whole line whose first word was a keyword, so this one exited 0 with no
+# output. Five plans under docs/plans/ open a line with classDef.
+cat >"$work_dir/after-classdef.md" <<'MD'
+```mermaid
+flowchart TD
+  classDef chg fill:#eee; c1["one two three four five six seven eight"]
+```
+MD
+if out="$(python3 "$checker" "$work_dir/after-classdef.md" 2>&1)"; then
+  bad "a node label packed after classDef on one line was accepted at 8 words"
+else
+  case "$out" in
+    *"node c1"*"words"*) ok "a node label after a styling statement on the same line is measured" ;;
+    *) bad "refused, but not naming node c1: $out" ;;
+  esac
+fi
+
+# An over-budget subgraph title: refused. The title is read as one statement
+# among the others on its line, so this also proves a ";" does not hide it.
+cat >"$work_dir/wordy-cluster.md" <<'MD'
+```mermaid
+flowchart TD
+  subgraph out["a cluster title with far too many words"]
+  end
+```
+MD
+if out="$(python3 "$checker" "$work_dir/wordy-cluster.md" 2>&1)"; then
+  bad "a subgraph title with too many words was accepted"
+else
+  case "$out" in
+    *"subgraph title"*"words"*) ok "a subgraph title with too many words is refused" ;;
+    *) bad "refused, but not for the title word count: $out" ;;
+  esac
+fi
+
+# A label already measured is reported even when a later statement on the same
+# line cannot be read. An author told only about the second one fixes it and
+# only then learns about the first.
+cat >"$work_dir/measured-then-unreadable.md" <<'MD'
+```mermaid
+flowchart TD
+  n1["one two three four five six seven"]; a -- b
+```
+MD
+if out="$(python3 "$checker" "$work_dir/measured-then-unreadable.md" 2>&1)"; then
+  bad "an over-budget label before an unreadable statement was accepted"
+else
+  case "$out" in
+    *"node n1"*"words"*"never closes"*)
+      ok "a label measured before an unreadable statement is reported with it" ;;
+    *) bad "refused, but not naming both the label and the unreadable statement: $out" ;;
   esac
 fi
 

@@ -60,8 +60,10 @@ c4["<b>c4 · config.sh</b> · CHANGE<br/>loads one board's environment<br/><i>op
 
 **Quote every label the brackets hold:** `c1["..."]`. Brackets nest and mermaid
 has a dozen node shapes, so an unquoted label has no unambiguous end. The check
-refuses one rather than guessing where it stops. An edge label goes between
-pipes, `-->|"..."|`, never inline as `-- text -->`.
+refuses one rather than guessing where it stops. Write an edge label between
+pipes, `-->|"..."|`; that is house style here. The check measures all three of
+mermaid's forms against the four-word budget, so an inline label like
+`-- text -->` is measured, not refused.
 
 **Untouched components belong in the graph.** They are how a fresh agent
 understands what it is building into. A graph showing only the new parts is a

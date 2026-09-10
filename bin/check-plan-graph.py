@@ -4,6 +4,13 @@
     check-plan-graph.py docs/plans/a.md docs/plans/b.md
     check-plan-graph.py --limits
 
+Every label on a line is measured, not only the first. Review of PR #18 on
+2026-09-09 found two ways a label got past this file. A line packing several
+statements behind ";" was read only as far as the first one and passed with
+exit 0. An edge label written inline on the link, `a -- text --> b`, was
+refused rather than measured, which is loud but turns a valid line into a
+rewrite. Both forms are now read the way mermaid reads them.
+
 `skills/graphplan/SKILL.md` states the budget in words. This file is where the
 numbers live, and a test compares the two, so the sentence below is built from
 the constants rather than typed a second time.
@@ -14,6 +21,7 @@ from __future__ import annotations
 import re
 import sys
 from pathlib import Path
+from typing import NamedTuple
 
 # Why there is a budget at all. A plan label is read by a stranger inside a
 # diagram, at whatever size fits the whole graph on one screen -- not in a
@@ -40,27 +48,76 @@ TAG = re.compile(r"<[^>]*>")
 # A node id: a word, with a dot or a dash only between two of them, so `a-->b`
 # reads as one id, a link and one id rather than as the id `a--`.
 IDENT = re.compile(r"[A-Za-z0-9_]+(?:[.-][A-Za-z0-9_]+)*")
-# A link: the run of arrow characters between two nodes. `-->`, `---`, `-.->`,
-# `==>`, `~~~`, `<-->`, and the `--o`/`--x` heads when a space follows.
-LINK = re.compile(r"[-=.<>~]{2,}(?:[ox](?=\s))?")
+# A link: an optional tail, a run of arrow characters, an optional head.
+# `-->`, `---`, `-.->`, `==>`, `~~~`, `<-->`, `---o`, `--x`, `o--o`. The head is
+# one character, so `a-->ok` reads as the node `ok` while `a---ob` reads as the
+# link `---o` and the node `b`. Until 2026-09-09 an `o` or `x` head was only
+# accepted with a space after it, and reviewing PR #18 found `a---ob["x"]`
+# reported against a node `ob` that no graph contains.
+LINK = re.compile(r"(?:[<ox])?[-=.~]{2,}(?:[>ox])?")
 # The brackets around a node label. Any mermaid shape: [], (), ([]), [()],
 # {{}}, [//], [\\], and the asymmetric >].
 OPEN_RUN = re.compile(r"(?:[(\[{]+|>)[/\\]?")
 CLOSE_RUN = re.compile(r"[/\\]?[)\]}]+")
-# A link written to carry its label inline: `a -- text --> b`. Mermaid opens
-# that form with exactly two characters and closes it with the arrow.
-INLINE_TEXT_LINKS = frozenset(["--", "==", "-."])
 
-# Lines that carry no label of their own: graph syntax, styling, cluster ends.
+
+class InlineLink(NamedTuple):
+    """How mermaid closes an edge label written inline on the link."""
+
+    closer: re.Pattern[str]
+    example: str
+
+
+# A link written to carry its label inline: `a -- text --> b`, `a == text ==> b`
+# and `a -. text .-> b`. Each opener is closed by its own characters and by
+# nothing else, which is mermaid's own rule: its lexer leaves the label state on
+# `--+[-xo>]`, `==+[=xo>]` and `-?\.+-[xo>]?` respectively, and treats every
+# other character as label text.
+#
+# A closer that matched any run of link characters is what review of PR #18
+# found on 2026-09-09: `a -- reads the plan, then... builds --> b` ended at the
+# `...`, so three of its five words were measured and the label passed.
+INLINE_LINKS = {
+    "--": InlineLink(re.compile(r"-{2,}[-xo>]"), "-->"),
+    "==": InlineLink(re.compile(r"={2,}[=xo>]"), "==>"),
+    "-.": InlineLink(re.compile(r"-?\.+-[xo>]?"), ".->"),
+}
+# A class applied to a node: `c1:::changed` and `c1["label"]:::changed`. It
+# carries no label. Until 2026-09-09 the checker refused it as "expected a link
+# or a label", which named the wrong problem: the line is valid mermaid.
+CLASS_SUFFIX = re.compile(r":::[A-Za-z0-9_-]+")
+
+# Statements that open with a keyword rather than with a node id. Only
+# `subgraph` carries a label; the rest are graph syntax, styling and cluster
+# ends, and carry none.
+SUBGRAPH = "subgraph"
 KEYWORDS = frozenset(
-    ["flowchart", "graph", "direction", "classDef", "class", "linkStyle", "style", "end"]
+    [
+        SUBGRAPH,
+        "flowchart",
+        "graph",
+        "direction",
+        "classDef",
+        "class",
+        "linkStyle",
+        "style",
+        "end",
+    ]
 )
+
+# What a message calls a label that is budgeted in words rather than in lines.
+SHORT_LABELS = {"edge": "edge label", "cluster": "subgraph title"}
 
 USAGE = "usage: check-plan-graph.py <plan.md>... | --limits"
 
 
 class LabelSyntax(Exception):
     """A line the checker cannot read as nodes and links."""
+
+
+# One label found on a line: its kind ("node" or "edge"), the node id it belongs
+# to, and its text. An edge label belongs to no node, so its id is empty.
+Label = tuple[str, str, str]
 
 
 def words(text: str) -> list[str]:
@@ -95,49 +152,150 @@ def read_node_label(line: str, at: int, ident: str) -> tuple[int, str]:
     return closing.end(), line[at + 1 : close]
 
 
-def scan(line: str) -> list[tuple[str, str, str]]:
-    """Every label on one line, as (kind, node id, label text).
+def read_node(line: str, at: int) -> tuple[int, list[Label]]:
+    """One node -- its id, its bracketed label if it has one -- and where it ends.
 
-    The line is read as mermaid writes it: a node, then a link, then a node,
-    for as long as it runs. Anything that does not fit raises LabelSyntax and
-    is reported. Nothing is skipped -- a label the checker cannot read is a
-    label nothing has checked, and it reaches the diagram unmeasured.
+    A node carries at most one label, so the list holds one entry or none.
     """
-    found: list[tuple[str, str, str]] = []
+    ident = IDENT.match(line, at)
+    if not ident:
+        raise LabelSyntax(f'expected a node id at "{line[at:]}"')
+    at = ident.end()
+    found: list[Label] = []
+    brackets = OPEN_RUN.match(line, at)
+    if brackets:
+        at, label = read_node_label(line, brackets.end(), ident.group(0))
+        found.append(("node", ident.group(0), label))
+    styled = CLASS_SUFFIX.match(line, at)
+    if styled:
+        at = styled.end()
+    return at, found
+
+
+def read_pipe_label(line: str, at: int) -> tuple[int, list[Label]]:
+    """An edge label in pipes, `|"text"|`, and where it ends.
+
+    `at` is the opening pipe. Mermaid also allows a space between the link and
+    the pipe, as in `a --> |text| b`, so the caller skips whitespace first.
+    """
+    close = line.find("|", at + 1)
+    if close < 0:
+        raise LabelSyntax("edge label opened by | never closes on this line")
+    return close + 1, [("edge", "", line[at + 1 : close].strip().strip('"'))]
+
+
+def read_inline_label(line: str, at: int, opener: str) -> tuple[int, list[Label]]:
+    """An edge label inline on the link, `a -- text --> b`, and where it ends.
+
+    `at` is the first character of the text. The label runs to the arrow that
+    closes this opener, and every other character belongs to the label. A `...`
+    or a `~~` inside the text is text, not the end of the label.
+    """
+    inline = INLINE_LINKS[opener]
+    closing = inline.closer.search(line, at)
+    if not closing:
+        raise LabelSyntax(
+            f'edge label after "{opener}" never closes; '
+            f'expected "{inline.example}" to end it'
+        )
+    return closing.end(), [("edge", "", line[at : closing.start()].strip().strip('"'))]
+
+
+def read_link(line: str, at: int) -> tuple[int, list[Label]]:
+    """One link, the edge label it carries, and where it ends.
+
+    Mermaid writes an edge label three ways and all three are measured against
+    the same budget: `a -->|"text"| b`, `a -- text --> b`, `a -. text .-> b`.
+    Until 2026-09-09 the last two were refused with a message telling the author
+    to move the label into pipes. That refusal was loud, not silent, but it made
+    a valid mermaid line something the author had to rewrite to get measured.
+    """
+    link = LINK.match(line, at)
+    if not link:
+        raise LabelSyntax(f'expected a link or a label at "{line[at:]}"')
+    at = skip_space(line, link.end())
+    if at < len(line) and line[at] == "|":
+        return read_pipe_label(line, at)
+    if link.group(0) in INLINE_LINKS:
+        return read_inline_label(line, at, link.group(0))
+    return at, []
+
+
+def statement_end(line: str, at: int) -> int:
+    """Where the statement starting at `at` ends: its `;`, or the line's end.
+
+    Quotes are respected, so a `;` inside a label does not split a statement.
+    """
+    quoted = False
+    while at < len(line):
+        if line[at] == '"':
+            quoted = not quoted
+        elif line[at] == ";" and not quoted:
+            return at
+        at += 1
+    return at
+
+
+def opening_keyword(line: str, at: int) -> str:
+    """The keyword this statement opens with, or "" when it opens with a node."""
+    word = IDENT.match(line, at)
+    if word and word.group(0) in KEYWORDS:
+        return word.group(0)
+    return ""
+
+
+def read_keyword_statement(line: str, at: int, keyword: str) -> tuple[int, list[Label]]:
+    """A statement opening with a keyword, its label if it has one, and its end.
+
+    Only `subgraph` carries a label. The rest are graph syntax and styling.
+    Their statement is skipped to its `;` and no further: until 2026-09-09 a
+    line whose first word was a keyword was skipped whole, so review of PR #18
+    found `classDef chg fill:#eee; c1["<eight words>"]` passing with exit 0.
+    """
+    end = statement_end(line, at)
+    if keyword != SUBGRAPH:
+        return end, []
+    return end, [("cluster", "", subgraph_title(line[at:end]))]
+
+
+def scan(line: str) -> tuple[list[Label], str | None]:
+    """Every label on one line, and the first thing on it that cannot be read.
+
+    A label is (kind, node id, label text). The line is read as mermaid writes
+    it: statements separated by `;`, each a node, then a link, then a node, for
+    as long as it runs. Nothing is skipped -- a label the checker cannot read is
+    a label nothing has checked, and it reaches the diagram unmeasured.
+
+    The labels already measured are returned alongside the error rather than
+    thrown away with it. A line can hold an over-budget label and, after it, a
+    statement the checker cannot read, and an author who is told only about the
+    second one fixes it and then learns about the first.
+
+    Until 2026-09-09 the scan stopped at the first `;`, so review of PR #18
+    found `a["p"]; b["q"]; c["r"]` measured only the label of `a`.
+    """
+    found: list[Label] = []
     at = skip_space(line, 0)
-    expect_node = True
-    while at < len(line) and line[at] != ";":
-        if expect_node:
-            ident = IDENT.match(line, at)
-            if not ident:
-                raise LabelSyntax(f'expected a node id at "{line[at:]}"')
-            at = ident.end()
-            brackets = OPEN_RUN.match(line, at)
-            if brackets:
-                at, label = read_node_label(line, brackets.end(), ident.group(0))
-                found.append(("node", ident.group(0), label))
-            expect_node = False
-        elif line[at] == "&":
-            at += 1
-            expect_node = True
-        else:
-            link = LINK.match(line, at)
-            if not link:
-                raise LabelSyntax(f'expected a link or a label at "{line[at:]}"')
-            at = link.end()
-            if at < len(line) and line[at] == "|":
-                close = line.find("|", at + 1)
-                if close < 0:
-                    raise LabelSyntax("edge label opened by | never closes on this line")
-                found.append(("edge", "", line[at + 1 : close].strip().strip('"')))
-                at = close + 1
-            elif link.group(0) in INLINE_TEXT_LINKS:
-                raise LabelSyntax(
-                    f'edge label after "{link.group(0)}" belongs in pipes: -->|"..."|'
-                )
-            expect_node = True
-        at = skip_space(line, at)
-    return found
+    starting, expect_node = True, True
+    try:
+        while at < len(line):
+            if line[at] == ";":
+                at, starting, expect_node, labels = at + 1, True, True, []
+            elif starting and (keyword := opening_keyword(line, at)):
+                at, labels = read_keyword_statement(line, at, keyword)
+            elif line[at] == "&" and not expect_node:
+                at, expect_node, labels = at + 1, True, []
+            elif expect_node:
+                at, labels = read_node(line, at)
+                starting, expect_node = False, False
+            else:
+                at, labels = read_link(line, at)
+                expect_node = True
+            found += labels
+            at = skip_space(line, at)
+    except LabelSyntax as unreadable:
+        return found, str(unreadable)
+    return found, None
 
 
 def subgraph_title(line: str) -> str:
@@ -148,48 +306,47 @@ def subgraph_title(line: str) -> str:
     return line[len("subgraph") :].strip().strip('"').strip()
 
 
+def measure_short_label(where: str, kind: str, text: str) -> list[str]:
+    """An edge label or a subgraph title, budgeted in words."""
+    count = len(words(text))
+    if count <= MAX_LABEL_WORDS:
+        return []
+    return [
+        f'{where}: {SHORT_LABELS[kind]} "{text}" has {count} words, '
+        f"at most {MAX_LABEL_WORDS} allowed"
+    ]
+
+
+def measure_node_label(where: str, ident: str, text: str) -> list[str]:
+    """A node label, budgeted in lines and in words a line."""
+    problems: list[str] = []
+    parts = BREAK.split(text)
+    if len(parts) > MAX_NODE_LINES:
+        problems.append(
+            f"{where}: node {ident}, label has {len(parts)} lines, "
+            f"at most {MAX_NODE_LINES} allowed"
+        )
+    for index, part in enumerate(parts, 1):
+        count = len(words(part))
+        if count > MAX_WORDS_PER_LINE:
+            problems.append(
+                f"{where}: node {ident}, label line {index} has {count} words, "
+                f"at most {MAX_WORDS_PER_LINE} allowed"
+            )
+    return problems
+
+
 def check_line(path: str, number: int, line: str) -> list[str]:
     where = f"{path}:{number}"
-    first = line.split()[0]
-    if first in KEYWORDS:
-        return []
-    if first == "subgraph":
-        title = subgraph_title(line)
-        count = len(words(title))
-        if count > MAX_LABEL_WORDS:
-            return [
-                f'{where}: subgraph title "{title}" has {count} words, '
-                f"at most {MAX_LABEL_WORDS} allowed"
-            ]
-        return []
-    try:
-        labels = scan(line)
-    except LabelSyntax as unclosed:
-        return [f"{where}: {unclosed}"]
-
+    labels, unreadable = scan(line)
     problems: list[str] = []
-    for kind, ident, label in labels:
-        if kind == "edge":
-            count = len(words(label))
-            if count > MAX_LABEL_WORDS:
-                problems.append(
-                    f'{where}: edge label "{label}" has {count} words, '
-                    f"at most {MAX_LABEL_WORDS} allowed"
-                )
-            continue
-        parts = BREAK.split(label)
-        if len(parts) > MAX_NODE_LINES:
-            problems.append(
-                f"{where}: node {ident}, label has {len(parts)} lines, "
-                f"at most {MAX_NODE_LINES} allowed"
-            )
-        for index, part in enumerate(parts, 1):
-            count = len(words(part))
-            if count > MAX_WORDS_PER_LINE:
-                problems.append(
-                    f"{where}: node {ident}, label line {index} has {count} words, "
-                    f"at most {MAX_WORDS_PER_LINE} allowed"
-                )
+    for kind, ident, text in labels:
+        if kind == "node":
+            problems += measure_node_label(where, ident, text)
+        else:
+            problems += measure_short_label(where, kind, text)
+    if unreadable:
+        problems.append(f"{where}: {unreadable}")
     return problems
 
 
