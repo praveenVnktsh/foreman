@@ -31,6 +31,7 @@ check_model() { # description expected-repr
   got="$(dispatch_fixture_model)"
   if [[ -z "$got" ]]; then
     bad "$desc: the dispatch never reached \`claude --bg --model\`"
+    dispatch_fixture_show_run_log
   elif [[ "$got" == "$want" ]]; then
     ok "$desc"
   else
@@ -42,7 +43,15 @@ dispatch_fixture_run --ticket PRA-1 --role build --attempt 1
 check_model "a build dispatch runs on opus" "'opus'"
 
 subagent_model="$(cat "$DISPATCH_SUBAGENT_MODEL_LOG" 2>/dev/null || true)"
-if [[ "$subagent_model" == "<unset>" ]]; then
+if [[ -z "$subagent_model" ]]; then
+  # The stub `claude --bg` is the only writer of this log, so an empty one
+  # means the dispatch died before the spawn. Reading that as "no model was
+  # exported" makes a green claim about an agent nothing ever started: under a
+  # python3 the fixture had stripped a name from, this line printed `ok a build
+  # agent's subagents fall back to , not fable`.
+  bad "a build agent's subagents are given no model of their own: the dispatch never reached \`claude --bg\`"
+  dispatch_fixture_show_run_log
+elif [[ "$subagent_model" == "<unset>" ]]; then
   ok "a build agent's subagents are given no model of their own"
 elif [[ "$subagent_model" == "fable" ]]; then
   bad "a build agent's subagents are pushed to fable by CLAUDE_CODE_SUBAGENT_MODEL"

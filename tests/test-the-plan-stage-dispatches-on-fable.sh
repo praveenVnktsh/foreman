@@ -31,6 +31,12 @@ check_model() { # description expected-repr
   got="$(dispatch_fixture_model)"
   if [[ -z "$got" ]]; then
     bad "$desc: the dispatch never reached \`claude --bg --model\`"
+    # The reason is in the dispatch's own output, not in this assertion. Print
+    # it here, before the EXIT trap deletes $work_dir along with the log
+    # (PRA-349): two callers of this fixture shipped DISPATCH_RUN_LOG and then
+    # never printed it, so the next allowlist gap cost the same debugging
+    # round again with only "never reached `claude --bg`" in CI.
+    dispatch_fixture_show_run_log
   elif [[ "$got" == "$want" ]]; then
     ok "$desc"
   else
