@@ -6,11 +6,32 @@
 Reads a JSON list of Linear issues on stdin -- whole issues, as the tick already
 has them from Linear MCP. Each item needs an "identifier" ("ABC-7") and a
 "priority"; every other key is ignored, because Linear keeps adding fields and
-the tick pipes issues through untouched. Prints one identifier per line on
-stdout and nothing else. An empty list prints nothing and exits 0.
+the tick pipes issues through untouched.
+
+    stdout  one identifier per line, most urgent first, and nothing else.
+    stderr  one line per card that could not be ranked, and one line for a
+            refusal of the whole batch.
+    exit 0  stdin was read and an order was computed from every card that could
+            be ranked. An empty list, and a batch whose every card was skipped,
+            both print nothing on stdout and exit 0.
+    exit 1  there is no order at all. stdout is empty.
 
 This exists so the tick stops judging urgency by eye. Linear already carries a
 priority on every card, and until this file the board never read it.
+
+One card's unreadable priority costs that card and nothing else. A board that
+never dispatches looks exactly like a board with no work, so a single untriaged
+card used to stall every Urgent card behind it, in silence. The refusal moved
+from the batch to the card; it was not softened. A skipped card is still
+refused, out loud on stderr, and the tick reports it to the operator who sets
+the priority in Linear. It is never ranked at a default: a confident order built
+on a priority nobody set is worse than a short one, because nothing downstream
+would say so.
+
+A card can only be skipped if it can be named, and the identifier is how a
+report names it. So a missing or malformed identifier still refuses the whole
+batch, as do stdin that is not a JSON list, an item that is not a JSON object,
+one identifier listed twice, and the wrong argv.
 
 The `priority` here is Linear's per-CARD scale. It is NOT the `priority` key in
 ~/.foreman/boards.toml, which weighs how much of the machine a whole board may
@@ -26,10 +47,6 @@ The concurrency ceilings live in dispatch.sh because prose is not a gate, and
 this file exists for the same reason. It cannot live in dispatch.sh: that script
 is handed one ticket and never sees the cards it beat, so an order can only be
 computed where the candidates are.
-
-Anything this tool cannot make sense of is refused rather than degraded, in
-bin/boards.py's voice. A confident order built on a field the tick forgot to ask
-for is worse than no order at all, because nothing downstream would say so.
 """
 
 from __future__ import annotations
@@ -68,38 +85,69 @@ EXPECTED_PRIORITY = (
 )
 
 
+class Unrankable(Exception):
+    """One card's priority cannot be read, so that card cannot be ordered.
+
+    The message says what was wrong and what was expected. It costs the card its
+    place in the order and costs the batch nothing.
+    """
+
+
 def die(message: str) -> NoReturn:
     sys.stderr.write(f"queue: {message}\n")
     raise SystemExit(1)
 
 
-def band(value: object, identifier: str) -> int:
-    """The sort band for one card's priority, in either representation.
+def report_skip(identifier: str, reason: str) -> None:
+    """Tell the operator on stderr that one card was left out of the order.
 
-    The tick may hand over the integer or the name Linear shows, depending on
-    which Linear MCP call produced the issue, so both are accepted here rather
-    than normalised by every caller.
+    stdout carries the order alone, so a tick that reads stdout can never
+    mistake a skipped card for a dispatchable one.
+    """
+    sys.stderr.write(f"queue: skipped {identifier}: {reason}\n")
+
+
+def band(value: object) -> int:
+    """The sort band for one card's priority, in any representation Linear uses.
+
+    The tick may hand over the integer, the float or the name, depending on
+    which Linear MCP call produced the issue, so all three are accepted here
+    rather than normalised by every caller.
+
+    Raises Unrankable when the priority cannot be read. Naming the card and
+    reporting the skip belong to the caller, which is the only place that knows
+    the identifier.
     """
     if value is None:
-        # Missing and null are the same failure and refuse together. Reading
-        # either as 0 would hand back a confident order that ignores every
-        # priority on the board, and exit 0 while doing it.
-        die(f"{identifier}: priority is missing or null; {EXPECTED_PRIORITY}")
+        # Missing and null are the same failure. Reading either as 0 would rank
+        # an untriaged card as though someone had triaged it.
+        raise Unrankable(f"priority is missing or null; {EXPECTED_PRIORITY}")
     if isinstance(value, bool):
         # `True` is an int in Python, so a priority of true would otherwise
         # read as 1 -- Urgent. bin/boards.py refuses a boolean priority for
         # this same reason.
-        die(f"{identifier}: priority must not be a boolean; {EXPECTED_PRIORITY}")
+        raise Unrankable(f"priority must not be a boolean; {EXPECTED_PRIORITY}")
+    if isinstance(value, float):
+        # Linear's GraphQL schema types priority as a Float, so a JSON decoder
+        # hands over 1.0 for a priority the operator did set. Refusing that
+        # skipped Urgent cards whose priority was never in doubt.
+        if not value.is_integer():
+            # 2.5, NaN and Infinity all land here: is_integer() is False for
+            # each, and none of them names a band.
+            raise Unrankable(f"priority {value!r} is not a whole number; {EXPECTED_PRIORITY}")
+        value = int(value)
     if isinstance(value, int):
         if value not in PRIORITY_BANDS:
-            die(f"{identifier}: priority {value} is outside Linear's scale; {EXPECTED_PRIORITY}")
+            raise Unrankable(f"priority {value} is outside Linear's scale; {EXPECTED_PRIORITY}")
         return PRIORITY_BANDS[value]
     if isinstance(value, str):
         name = value.strip().lower()
         if name not in NAME_PRIORITIES:
-            die(f"{identifier}: priority {value!r} is not a priority name; {EXPECTED_PRIORITY}")
+            raise Unrankable(f"priority {value!r} is not a priority name; {EXPECTED_PRIORITY}")
         return PRIORITY_BANDS[NAME_PRIORITIES[name]]
-    die(f"{identifier}: priority must be a number or a name; {EXPECTED_PRIORITY}")
+    raise Unrankable(
+        f"priority must be a number or a name, not {type(value).__name__}; {EXPECTED_PRIORITY}"
+    )
 
 
 def identifier_of(item: object) -> str:
@@ -136,11 +184,16 @@ def main(argv: list[str]) -> int:
             # twice while never reaching the other.
             die(f"{identifier}: appears twice; every card must be listed once")
         seen.add(identifier)
+        try:
+            rank = band(item.get("priority"))
+        except Unrankable as exc:
+            report_skip(identifier, str(exc))
+            continue
         # Linear numbers increase with age, so the LOWER number is the older
         # card and wins its band. Without this, a stream of equal-priority
         # newcomers starves a card that has already waited.
         number = int(identifier.rsplit("-", 1)[1])
-        keys.append((band(item.get("priority"), identifier), number, identifier))
+        keys.append((rank, number, identifier))
 
     # The identifier is the final tiebreak, so the order is total: the same
     # input always prints the same lines, whatever order Linear returned.
