@@ -126,9 +126,19 @@ a failed deploy is told the path by the instance; a repository cannot know it.
 
 ## Names in the file, ids at runtime
 
+> **Corrected 2026-09-09.** This section understated the columns and labels the
+> resolver pins, and named none of them. `Plan` and `Needs Human` joined the
+> loop after this spec was written, and the `needs-plan` label with them. The
+> counts below now match `STATE_ROLES` and `LABEL_ROLES` in
+> `bin/resolve-ids.py`, and the states are named, because an agent editing that
+> list reads this spec first and has to see which columns are already there.
+> Everything else is the design as written.
+
 The contract names the Linear team and project. `init` resolves them — and the
-five states and four labels — to ids, creates any label that does not exist, and
-writes the ids into instance state.
+seven states and five labels — to ids, creates any label that does not exist,
+and writes the ids into instance state. The states are `Backlog`, `Todo`,
+`Plan`, `In Progress`, `In Review`, `Done` and `Needs Human`, in the order
+`STATE_ROLES` declares them.
 
 This keeps both properties that matter. The file is forkable, because a fork
 does not inherit somebody else's project UUID. And the running loop still moves
