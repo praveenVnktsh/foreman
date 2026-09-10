@@ -29,8 +29,8 @@ from pathlib import Path
 # went unmeasured, and a single 200-character token is one word and clears any
 # word budget while filling the screen.
 #
-# The character budget is set by what a plan here has to be able to SAY, not by
-# what plans have said so far. A node names the file it builds, in the form
+# The character budget is set by what a plan has to be able to SAY, not by what
+# plans have said so far. A node names the file it builds, in the form
 # skills/graphplan/SKILL.md prescribes: `c1 · <path> · CHANGE`, which is the
 # path plus fourteen characters. The longest path this repository tracks is 57
 # characters, so that label is 71. A budget of 64, calibrated on the widest
@@ -39,6 +39,15 @@ from pathlib import Path
 # before it ever cost a card a plan attempt. 80 is the column this repository
 # wraps its prose at, and it leaves nine characters over the longest name a
 # plan must be able to write.
+#
+# 80 is a legibility rule and not a fact about this tree, so a target with a
+# deeper one does not raise it. A path that will not fit gets a label line of
+# its own, and a path too wide even for that gets its identifying tail, with
+# the whole path in the prompt -- the wording is in SKILL.md, beside the
+# budget, because a gate that refuses correct work without naming the compliant
+# form costs a card an attempt. tests/test-plan-graphs-are-terse.sh measures
+# the longest path THIS repository tracks; that guards this repository's own
+# plans, and the wording is what covers every other target.
 MAX_NODE_LINES = 4
 MAX_WORDS_PER_LINE = 6
 MAX_LABEL_WORDS = 4
@@ -85,15 +94,33 @@ USAGE = "usage: check-plan-graph.py <plan.md>... | --limits"
 
 
 class LabelSyntax(Exception):
-    """A line the checker cannot read as nodes and links."""
+    """A statement the checker cannot read as nodes and links."""
 
 
 @dataclass(frozen=True)
-class Drawn:
-    """What one line of a graph draws: its labels, and its links between nodes."""
+class Read:
+    """What reading a part of the graph found: problems, links, and doubt.
 
-    labels: list[tuple[str, str, str]]
-    links: int
+    One shape for a statement and for a line, so a caller merges what its parts
+    read instead of carrying two counters beside a list of problems.
+
+    `unread` is what keeps the no-link check honest. A statement nothing could
+    parse might draw a link or might not, and counting it as zero tells the
+    author to add a dependency the graph already states.
+    """
+
+    problems: tuple[str, ...] = ()
+    links: int = 0
+    unread: bool = False
+
+    @classmethod
+    def merge(cls, readings: list[Read]) -> Read:
+        """One Read for many: problems in order, links summed, doubt kept."""
+        return cls(
+            tuple(problem for reading in readings for problem in reading.problems),
+            sum(reading.links for reading in readings),
+            any(reading.unread for reading in readings),
+        )
 
 
 def words(text: str) -> list[str]:
@@ -138,64 +165,78 @@ def read_node_label(line: str, at: int, ident: str) -> tuple[int, str]:
     return closing.end(), line[at + 1 : close]
 
 
-def scan(line: str) -> Drawn:
-    """Every label on one line, as (kind, node id, label text), and its links.
+def statements(line: str) -> list[str]:
+    """The statements on one line. A `;` separates them, unless it is a label.
 
-    The line is read as mermaid writes it: a node, then a link, then a node,
-    for as long as it runs. Anything that does not fit raises LabelSyntax and
-    is reported. Nothing is skipped -- a label the checker cannot read is a
+    Mermaid reads statements, not lines, and every keyword this file knows is
+    the first word of a statement rather than of a line. Splitting here is what
+    lets `class a hot; c1["..."] --> c2["ok"]` have its keyword skipped and its
+    graph measured, instead of the whole line being skipped for its first word.
+    The split is quote-aware because a `;` inside a label is text.
+    """
+    parts: list[str] = []
+    start = 0
+    quoted = False
+    for at, character in enumerate(line):
+        if character == '"':
+            quoted = not quoted
+        elif character == ";" and not quoted:
+            parts.append(line[start:at])
+            start = at + 1
+    parts.append(line[start:])
+    return [part.strip() for part in parts if part.strip()]
+
+
+def scan(statement: str) -> tuple[list[tuple[str, str, str]], int]:
+    """Every label in one statement, as (kind, node id, text), and its links.
+
+    The statement is read as mermaid writes it: a node, then a link, then a
+    node, for as long as it runs. Anything that does not fit raises LabelSyntax
+    and is reported. Nothing is skipped -- a label the checker cannot read is a
     label nothing has checked, and it reaches the diagram unmeasured.
 
     The links are counted here because here is where they are already parsed. A
     second reader of the same syntax drifts from this one, and a regex over the
-    raw line finds the `-->` inside a quoted label.
-
-    A `;` separates two statements on one line; it does not end the line. This
-    reader used to stop at the first one, so `a["..."] --> b; c --> d` had its
-    second half measured by nothing.
+    raw text finds the `-->` inside a quoted label.
     """
     found: list[tuple[str, str, str]] = []
     links = 0
-    at = skip_space(line, 0)
+    at = skip_space(statement, 0)
     expect_node = True
-    while at < len(line):
-        if line[at] == ";":
-            at = skip_space(line, at + 1)
-            expect_node = True
-            continue
+    while at < len(statement):
         if expect_node:
-            ident = IDENT.match(line, at)
+            ident = IDENT.match(statement, at)
             if not ident:
-                raise LabelSyntax(f'expected a node id at "{line[at:]}"')
+                raise LabelSyntax(f'expected a node id at "{statement[at:]}"')
             at = ident.end()
-            brackets = OPEN_RUN.match(line, at)
+            brackets = OPEN_RUN.match(statement, at)
             if brackets:
-                at, label = read_node_label(line, brackets.end(), ident.group(0))
+                at, label = read_node_label(statement, brackets.end(), ident.group(0))
                 found.append(("node", ident.group(0), label))
             expect_node = False
-        elif line[at] == "&":
+        elif statement[at] == "&":
             at += 1
             expect_node = True
         else:
-            link = LINK.match(line, at)
+            link = LINK.match(statement, at)
             if not link:
-                raise LabelSyntax(f'expected a link or a label at "{line[at:]}"')
+                raise LabelSyntax(f'expected a link or a label at "{statement[at:]}"')
             at = link.end()
             if states_a_relationship(link.group(0)):
                 links += 1
-            if at < len(line) and line[at] == "|":
-                close = line.find("|", at + 1)
+            if at < len(statement) and statement[at] == "|":
+                close = statement.find("|", at + 1)
                 if close < 0:
                     raise LabelSyntax("edge label opened by | never closes on this line")
-                found.append(("edge", "", line[at + 1 : close].strip().strip('"')))
+                found.append(("edge", "", statement[at + 1 : close].strip().strip('"')))
                 at = close + 1
             elif link.group(0) in INLINE_TEXT_LINKS:
                 raise LabelSyntax(
                     f'edge label after "{link.group(0)}" belongs in pipes: -->|"..."|'
                 )
             expect_node = True
-        at = skip_space(line, at)
-    return Drawn(found, links)
+        at = skip_space(statement, at)
+    return found, links
 
 
 def states_a_relationship(link: str) -> bool:
@@ -208,12 +249,16 @@ def states_a_relationship(link: str) -> bool:
     return set(link) != {"~"}
 
 
-def subgraph_title(line: str) -> str:
-    """The title of a subgraph line, from its brackets or from the rest of it."""
-    opened, closed = line.find("["), line.rfind("]")
+def subgraph_title(statement: str) -> str:
+    """The title of one subgraph statement, from its brackets or from the rest.
+
+    A statement, never a line: `subgraph s["a"]; x --> y` read as a line gave a
+    title running to the last `]` on it, which was node syntax and not a title.
+    """
+    opened, closed = statement.find("["), statement.rfind("]")
     if 0 <= opened < closed:
-        return line[opened + 1 : closed].strip().strip('"').strip()
-    return line[len("subgraph") :].strip().strip('"').strip()
+        return statement[opened + 1 : closed].strip().strip('"').strip()
+    return statement[len("subgraph") :].strip().strip('"').strip()
 
 
 def check_label(where: str, subject: str, label: str, max_words: int) -> list[str]:
@@ -233,39 +278,54 @@ def check_label(where: str, subject: str, label: str, max_words: int) -> list[st
     return problems
 
 
-def check_line(path: str, number: int, line: str) -> tuple[list[str], int]:
-    """What is wrong with one line of the graph, and how many links it draws."""
+def check_line(path: str, number: int, line: str) -> Read:
+    """What one line of the graph draws, and what is wrong with it.
+
+    A line is not the unit mermaid reads; a statement is. Skipping a whole line
+    for its first word therefore skipped everything written after the `;` too:
+    `class a hot; c1["<200 characters>"] --> c2["ok"]` had its label measured by
+    nothing and its link counted by nothing, and the file exited 0. Found in
+    review on 2026-09-09, twice -- first for `flowchart` and `graph`, then for
+    the six other keywords that were still skipped a line at a time.
+    """
     where = f"{path}:{number}"
-    first = line.split()[0]
-    if first in GRAPH_HEADERS:
-        # `graph TD; a --> b` is mermaid's one-line form: the header ends at the
-        # first semicolon and the rest of the line draws the graph. Skipping the
-        # whole line, as every other keyword line is skipped, left those labels
-        # measured by nothing and their links counted by nothing -- so a
-        # 200-character label cleared the budget by moving one line up, and a
-        # graph written on one line was refused for having no link in it. Found
-        # in review on 2026-09-09.
-        rest = line.partition(";")[2]
-        if not rest.strip():
-            return [], 0
-        return check_statements(where, rest)
+    return Read.merge(
+        [check_statement(where, statement) for statement in statements(line)]
+    )
+
+
+def check_statement(where: str, statement: str) -> Read:
+    """What one statement draws, and what is wrong with it."""
+    first = statement.split()[0]
     if first in KEYWORDS:
-        return [], 0
+        # A header, a direction, a style rule, a class, the end of a cluster.
+        # None of them carries a label of its own.
+        return Read()
     if first == "subgraph":
-        title = subgraph_title(line)
-        return check_label(where, f'subgraph title "{title}"', title, MAX_LABEL_WORDS), 0
-    return check_statements(where, line)
+        # The title is read from the statement, never from the line. Reading it
+        # from the line made `subgraph s["a"]; x --> y` measure everything up to
+        # the last `]` as a title, and report a five-word title that nobody
+        # wrote (review, 2026-09-09).
+        title = subgraph_title(statement)
+        return Read(
+            tuple(
+                check_label(
+                    where, f'subgraph title "{title}"', title, MAX_LABEL_WORDS
+                )
+            )
+        )
+    return check_drawing(where, statement)
 
 
-def check_statements(where: str, line: str) -> tuple[list[str], int]:
-    """What is wrong with the statements on one line, and how many links they draw."""
+def check_drawing(where: str, statement: str) -> Read:
+    """One statement of nodes and links, against the budget."""
     try:
-        drawn = scan(line)
-    except LabelSyntax as unclosed:
-        return [f"{where}: {unclosed}"], 0
+        labels, links = scan(statement)
+    except LabelSyntax as unreadable:
+        return Read((f"{where}: {unreadable}",), unread=True)
 
     problems: list[str] = []
-    for kind, ident, label in drawn.labels:
+    for kind, ident, label in labels:
         if kind == "edge":
             problems += check_label(
                 where, f'edge label "{label}"', label, MAX_LABEL_WORDS
@@ -281,7 +341,7 @@ def check_statements(where: str, line: str) -> tuple[list[str], int]:
             problems += check_label(
                 where, f"node {ident}, label line {index}", part, MAX_WORDS_PER_LINE
             )
-    return problems, drawn.links
+    return Read(tuple(problems), links)
 
 
 def read_block(path: str, text: str) -> tuple[list[tuple[int, str]] | None, list[str]]:
@@ -380,17 +440,19 @@ def check_block(path: str, block: list[tuple[int, str]]) -> list[str]:
             "a plan is one mermaid graph and nothing else"
         ]
 
-    links = 0
-    for number, line in lines:
-        found, drawn = check_line(path, number, line)
-        problems += found
-        links += drawn
-    if not links:
+    read = Read.merge([check_line(path, number, line) for number, line in lines])
+    problems += list(read.problems)
+    if not read.links and not read.unread:
         # A fence with no link in it is a list with boxes drawn round it. A
         # dotted link counts here: it is a real relationship, and the fact that
         # it orders no build is a separate claim from whether the plan states a
         # dependency at all. An invisible `~~~` does not count -- see
         # states_a_relationship().
+        #
+        # Nothing is claimed when a statement went unread, for the reason the
+        # unclosed directive above gets no empty-block message: a line the
+        # checker could not parse may well draw the edge, and telling the author
+        # to add one they already drew is the advice SKILL.md forbids.
         problems.append(
             f"{path}: no link between any two nodes; "
             "a plan graph states what depends on what"

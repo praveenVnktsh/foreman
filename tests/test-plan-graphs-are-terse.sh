@@ -36,6 +36,13 @@
 # exactly as a gate that admits wrong work costs a review round, so both
 # directions are cases here: what must be refused, and what must be accepted.
 #
+# The fifth, from the round after that: the same escape hatch, one keyword at a
+# time. `flowchart` and `graph` were read past their semicolon; `class`,
+# `classDef`, `style`, `linkStyle`, `direction` and `end` were still skipped a
+# whole line at a time, and real plans in docs/plans/ use four of them. A fix
+# that closes one seventh of a hole looks exactly like a fix, so every keyword
+# is a case below.
+#
 # What is deliberately NOT covered: rendering (another test owns it) and the
 # wording of SKILL.md's prose, only the lines it must reproduce verbatim.
 set -uo pipefail
@@ -372,6 +379,87 @@ else
     *empty*) bad "an unread block was reported as empty: $out" ;;
     *"never closed"*) ok "an unclosed directive is reported once, not as an empty block" ;;
     *) bad "refused, but not for the unclosed directive: $out" ;;
+  esac
+fi
+
+# A label written after a keyword on the same line: measured, not skipped. A
+# `;` separates statements, so a keyword is the first word of a STATEMENT and
+# never of the line. Skipping the line let `class a hot; c1["<200 characters>"]`
+# out of the budget entirely, and the file exited 0 with no output at all --
+# found in review on 2026-09-09, after the same hole was closed for `flowchart`
+# and `graph` alone. Every keyword the checker knows is tried here, because the
+# first fix closed one seventh of the hole and looked complete.
+for keyword in "class a hot" "classDef hot fill:#f00" "style a fill:#f00" \
+               "linkStyle 0 stroke:#f00" "direction LR"; do
+  {
+    printf '```mermaid\nflowchart TD\n  a["one"] --> b["two"]\n'
+    printf '  %s; c1["%s"] --> c2["ok"]\n' "$keyword" "$(printf 'x%.0s' {1..200})"
+    printf '```\n'
+  } >"$work_dir/keyword-line.md"
+  if out="$(python3 "$checker" "$work_dir/keyword-line.md" 2>&1)"; then
+    bad "a 200-character label after \`$keyword;\` was accepted"
+  else
+    case "$out" in
+      *"node c1"*"characters"*) ok "a label after \`$keyword;\` is measured, not skipped" ;;
+      *) bad "refused, but not for the character count: $out" ;;
+    esac
+  fi
+done
+
+# A subgraph sharing its line with a graph statement: accepted. The title is
+# read from the statement, not from the line. Read from the line, it ran to the
+# last `]` on it, so this graph was refused for a five-word title nobody wrote
+# and for having no link, while drawing one (review, 2026-09-09).
+cat >"$work_dir/subgraph-line.md" <<'MD'
+```mermaid
+flowchart TD
+  subgraph s["the board"]; a["one"] --> b["two"]
+  end
+```
+MD
+if out="$(python3 "$checker" "$work_dir/subgraph-line.md" 2>&1)"; then
+  [[ -z "$out" ]] && ok "a subgraph sharing its line with an edge is accepted silently" \
+    || bad "accepted, but printed something: $out"
+else
+  bad "a subgraph sharing its line with an edge was refused: $out"
+fi
+
+# A `;` inside a label is text, not a separator. The statement split is what
+# makes every case above work, and a split that ignored quotes would cut this
+# label in half and report syntax nobody wrote.
+cat >"$work_dir/semicolon-label.md" <<'MD'
+```mermaid
+flowchart TD
+  a["one; two"] --> b["three"]
+```
+MD
+if out="$(python3 "$checker" "$work_dir/semicolon-label.md" 2>&1)"; then
+  [[ -z "$out" ]] && ok "a semicolon inside a label is text, not a statement break" \
+    || bad "accepted, but printed something: $out"
+else
+  bad "a label holding a semicolon was refused: $out"
+fi
+
+# A line the checker cannot read is never also reported as a missing edge. The
+# statement draws one; nothing could read it, so nothing is claimed about it.
+# Reporting "no link between any two nodes" told the plan agent -- which
+# brief.py tells to fix what the checker refuses -- to add a dependency the
+# graph already stated, which is the one edge SKILL.md forbids (review,
+# 2026-09-09).
+cat >"$work_dir/unreadable-edge.md" <<'MD'
+```mermaid
+flowchart TD
+  c1[builds the thing] --> c2["done"]
+```
+MD
+if out="$(python3 "$checker" "$work_dir/unreadable-edge.md" 2>&1)"; then
+  bad "an unquoted label on the only edge line was accepted"
+else
+  case "$out" in
+    *"no link between any two nodes"*)
+      bad "a graph that draws an edge was told it draws none: $out" ;;
+    *"not quoted"*) ok "an unreadable line is not also reported as a missing edge" ;;
+    *) bad "refused, but not for the missing quotes: $out" ;;
   esac
 fi
 
