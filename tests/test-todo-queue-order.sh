@@ -156,6 +156,17 @@ else
   bad "a whole board of unrankable cards: stdout=[$out] stderr=[$err] exit=$out_status"
 fi
 
+# Exit 2 is a number. The line below it is the only thing that tells the
+# operator what the number means and what to do about it, so a status with no
+# statement is half the signal -- and deleting the statement leaves every other
+# case here green.
+case "$err" in
+  *"nothing was ranked"*"priority in Linear"*)
+    ok "exit 2 says on stderr what it means and where the operator fixes it" ;;
+  *)
+    bad "exit 2 never states that nothing ranked, or never sends the operator to Linear: $err" ;;
+esac
+
 refuses "a malformed identifier is refused" \
   "ABC 7" \
   '[{"identifier":"ABC 7","priority":1}]'

@@ -1698,8 +1698,9 @@ to different places:
 ~/.foreman/install/skills/board/queue.py < /tmp/todo.json > /tmp/queue.out 2> /tmp/queue.err
 ```
 
-Read them together and a skipped card's identifier, printed on stderr, becomes
-a card to dispatch.
+**Never read the two as one list.** A skip line names a card too, so a tick
+that concatenates them takes an identifier off stderr and dispatches the
+untriaged card `queue.py` refused.
 
 **Never order by Linear's raw `priority` number.** `0` there means "no
 priority", not "most urgent", so an ascending sort queues every untriaged card
