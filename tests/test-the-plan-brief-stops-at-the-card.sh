@@ -233,6 +233,18 @@ else
 $replan_prompt"
 fi
 
+# The revision is judged by the same gate the first draft was, and the graph
+# this prompt produces is the one a build agent executes. Review of PR #31 on
+# 2026-09-10 found the budget in the plan prompt and nowhere in this one, so a
+# target declaring 40 had its revised plan written against the 80 the installed
+# skills/graphplan/SKILL.md states.
+if [[ "$replan_prompt" == *"$checker --max-label-chars $FIXTURE_MAX_LABEL_CHARS"* ]]; then
+  ok "the replan prompt carries the same max-label-chars the plan prompt did"
+else
+  bad "the replan prompt does not put --max-label-chars $FIXTURE_MAX_LABEL_CHARS beside the checker path:
+$replan_prompt"
+fi
+
 # ============================================================================
 # Both refuse rather than rendering a prompt with a hole in it.
 # ============================================================================

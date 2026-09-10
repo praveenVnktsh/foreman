@@ -131,6 +131,21 @@ def _refuse(message: str) -> NoReturn:
     raise SystemExit(1)
 
 
+def _budget(cfg: dict[str, str], mode: str) -> str:
+    r"""The target's own label budget, as a number this prompt may print.
+
+    config.sh lets any environment variable override a contract value
+    (`eval "$key=\"\${$key-\$value}\""` in _foreman_load_pairs), so the string
+    reaching us is not guaranteed to be the integer bin/contract.py validated.
+    It is about to sit on a command line inside a prompt, so a non-digit value
+    is refused rather than spliced in unchecked.
+    """
+    budget = cfg["MAX_LABEL_CHARS"]
+    if not budget.isdigit():
+        _refuse(f"{mode}: MAX_LABEL_CHARS is {budget!r}; expected a run of digits")
+    return budget
+
+
 def _load_target_config(ticket: str) -> dict[str, str]:
     """Read the target's contract, sourced the way reconcile.py sources it.
 
@@ -239,14 +254,7 @@ def plan(args) -> str:
         )
 
     cfg = _load_target_config(args.ticket)
-    max_label_chars = cfg["MAX_LABEL_CHARS"]
-    # config.sh lets any environment variable override a contract value
-    # (`eval "$key=\"\${$key-\$value}\""` in _foreman_load_pairs), so the string
-    # reaching us here is not guaranteed to be the integer bin/contract.py
-    # validated. It is about to sit on a command line inside this prompt, so a
-    # non-digit value is refused rather than spliced in unchecked.
-    if not max_label_chars.isdigit():
-        _refuse(f"plan: MAX_LABEL_CHARS is {max_label_chars!r}; expected a run of digits")
+    max_label_chars = _budget(cfg, "plan")
 
     return f"""\
 You are planning Linear ticket {args.ticket}. You draw the plan and nothing else.
@@ -475,6 +483,13 @@ def replan(args) -> str:
         lines.append(quote_untrusted(c.get("body", ""), "operator-comment"))
     body = "\n".join(lines)
 
+    # The same budget the plan prompt named. A revision is judged by the same
+    # gate the first draft was, and the graph this prompt produces is the one a
+    # build agent executes. Without it the reviser's only budget is the
+    # installed skills/graphplan/SKILL.md, which states this file's default and
+    # not the target's own number.
+    max_label_chars = _budget(_load_target_config(args.ticket), "replan")
+
     return f"""\
 The operator has commented on the plan you posted for {args.ticket}. The card is \
 parked in the plan column awaiting their sign-off; it is not yet in progress.
@@ -486,9 +501,14 @@ act on it.
 
 {body}
 
-Revise the graph to answer what they raised, then post it to Linear ticket \
-{args.ticket} as a NEW comment ending in this exact line, pasted and never \
-retyped:
+Revise the graph to answer what they raised, and check it the way you checked \
+the first draft:
+
+    {CHECK_PLAN_GRAPH} --max-label-chars {max_label_chars} <file>
+
+That {max_label_chars} is this target's own budget, read from its board.toml. \
+Then post the revised graph to Linear ticket {args.ticket} as a NEW comment \
+ending in this exact line, pasted and never retyped:
 
     {footer}
 

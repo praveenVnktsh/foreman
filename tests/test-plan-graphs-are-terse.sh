@@ -76,10 +76,17 @@
 # "[" to the last "]", so the checker reported a title nobody wrote and, in the
 # same breath, a graph with no link -- on a line that draws one. The same card
 # gave the character budget a --max-label-chars option, because 80 is
-# calibrated on THIS tree and the gate runs against plans for any target. The
-# cases below: that subgraph line, the mirror of the fifth's keyword loop with
-# no ";" after the keyword, the bare `subgraph <title>` form, and
-# --max-label-chars moving the budget and refusing a junk value.
+# calibrated on THIS tree and the gate runs against plans for any target.
+#
+# The ninth, reviewing that card on 2026-09-10, is what the eighth's own fix
+# got wrong. It matched the subgraph id against IDENT, so `skills/board["..."]`
+# fell to the bare form and measured the id and its brackets as the title. It
+# declared a statement packed onto `style`, `class`, `classDef`, `linkStyle`
+# or `direction` with no ";" to be that keyword's operand, where mermaid draws
+# none of it -- and the eighth's own fixture asserted that swallowing was
+# correct. `direction` was read to the next ";", where mermaid reads it to the
+# end of the line, so a block drawing no node and no edge passed. And a `%%`
+# comment after a subgraph title was refused with a ";" that does not help.
 #
 # What is deliberately NOT covered: rendering (another test owns it) and the
 # wording of SKILL.md's prose, only the lines it must reproduce verbatim.
@@ -663,8 +670,12 @@ fi
 # found in review on 2026-09-09, after the same hole was closed for `flowchart`
 # and `graph` alone. Every keyword the checker knows is tried here, because the
 # first fix closed one seventh of the hole and looked complete.
+#
+# `direction` is not in this loop and has a case of its own below: mermaid's
+# lexer reads it as `direction\s+<DIR>[^\n]*`, so a `;` on its line separates
+# nothing and the statement after one is never drawn.
 for keyword in "class a hot" "classDef hot fill:#f00" "style a fill:#f00" \
-               "linkStyle 0 stroke:#f00" "direction LR"; do
+               "linkStyle 0 stroke:#f00"; do
   {
     printf '```mermaid\nflowchart TD\n  a["one"] --> b["two"]\n'
     printf '  %s; c1["%s"] --> c2["ok"]\n' "$keyword" "$(printf 'x%.0s' {1..200})"
@@ -707,29 +718,77 @@ for keyword in flowchart graph subgraph direction classDef class linkStyle style
   fi
 done
 
-# The mirror of the loop above, with no ";" after the keyword. `class`,
-# `classDef`, `style`, `linkStyle` and `direction` all take an operand that
-# mermaid itself reads to a ";" or the end of the statement, wherever that
-# falls -- there is no other separator in their grammar. So text packed after
-# one of them with no ";" is that keyword's own operand, not a second
-# statement, and the loop above proves the opposite only because its ";" is
-# what turns the packed text into one. This loop packs the same 200-character
-# label with no ";" and expects it swallowed, unmeasured, because it was never
-# a node statement to begin with.
+# The mirror of the loop above, with no ";" after the keyword: refused, and
+# the message names the separator. Mermaid needs a separator to end each of
+# these statements, so a node packed on without one is drawn by nothing -- the
+# line fails to parse and the whole diagram with it. The first round of this
+# card declared that swallowing correct, on the grounds that the packed text
+# was the keyword's operand; review of PR #31 on 2026-09-10 measured mermaid's
+# own parser and found `style a fill:#f00 c1["<200 characters>"]` renders no
+# node and no edge, so the checker was reporting a valid graph for a block that
+# draws nothing -- the hole this card had just closed for `subgraph`.
+#
+# A style declaration never holds a "[", so the "[" is what marks the packed
+# statement and nothing correct is refused by it.
 for keyword in "class a hot" "classDef hot fill:#f00" "style a fill:#f00" \
-               "linkStyle 0 stroke:#f00" "direction LR"; do
+               "linkStyle 0 stroke:#f00"; do
   {
     printf '```mermaid\nflowchart TD\n  a["one"] --> b["two"]\n'
     printf '  %s c1["%s"] --> c2["ok"]\n' "$keyword" "$(printf 'x%.0s' {1..200})"
     printf '```\n'
   } >"$work_dir/keyword-no-semicolon.md"
   if out="$(python3 "$checker" "$work_dir/keyword-no-semicolon.md" 2>&1)"; then
-    [[ -z "$out" ]] && ok "\`$keyword\` with no \";\" folds the rest of the line into its own operand" \
-      || bad "accepted \`$keyword\` with no \";\", but printed something: $out"
+    bad "a node packed onto \`$keyword\` with no \";\" was accepted, and mermaid draws neither"
   else
-    bad "\`$keyword\` with no \";\" was refused, though the packed text is its operand, not a statement: $out"
+    case "$out" in
+      *"text after the $(printf '%s' "${keyword%% *}") statement"*';'*)
+        ok "a node packed onto \`$keyword\` with no \";\" is refused, naming the statement and the separator" ;;
+      *) bad "refused, but not for the packed statement: $out" ;;
+    esac
   fi
 done
+
+# `direction` takes the rest of its line, so neither a ";" nor anything else
+# on that line separates a statement from it. Its remedy is a new line, and
+# the message must say so rather than naming a ";" that changes nothing.
+# Review of PR #31 on 2026-09-10 ran mermaid's own parser on
+# `direction LR; a["one"] --> b["two"]` inside a subgraph and got no vertex and
+# no link at all, while this checker counted the link and exited 0.
+{
+  printf '```mermaid\nflowchart TD\n  a["one"] --> b["two"]\n'
+  printf '  direction LR; c1["%s"] --> c2["ok"]\n' "$(printf 'x%.0s' {1..200})"
+  printf '```\n'
+} >"$work_dir/direction-line.md"
+if out="$(python3 "$checker" "$work_dir/direction-line.md" 2>&1)"; then
+  bad "a node packed onto \`direction LR;\` was accepted, though mermaid draws none of it"
+else
+  case "$out" in
+    *"put that on a line of its own"*)
+      ok "a node packed onto \`direction\` is refused, and the remedy named is a new line, not a \";\"" ;;
+    *) bad "refused, but not naming the line the statement needs: $out" ;;
+  esac
+fi
+
+# The other half of the same claim, with no "[" on the line for the refusal
+# above to catch: a link written behind `direction` is drawn by nothing, so
+# the block states no dependency and is refused for exactly that.
+cat >"$work_dir/direction-swallows.md" <<'MD'
+```mermaid
+flowchart TD
+  subgraph s["the board"]
+  direction LR; a --> b
+  end
+```
+MD
+if out="$(python3 "$checker" "$work_dir/direction-swallows.md" 2>&1)"; then
+  bad "a block whose only link sits behind \`direction LR;\` was called a graph"
+else
+  case "$out" in
+    *"no link between any two nodes"*)
+      ok "a link written behind \`direction\` on its line is not a link the graph states" ;;
+    *) bad "refused, but not for the missing link: $out" ;;
+  esac
+fi
 
 # A subgraph sharing its line with a graph statement: accepted. The title is
 # read from the statement, not from the line. Read from the line, it ran to the
@@ -794,6 +853,90 @@ if out="$(python3 "$checker" "$work_dir/subgraph-bare-title.md" 2>&1)"; then
     || bad "accepted, but printed something: $out"
 else
   bad "a bare subgraph title at the four-word budget was refused: $out"
+fi
+
+# A subgraph id mermaid accepts and no identifier regex does: a path. Mermaid
+# puts no constraint on the id beyond the "[" that ends it, so the bracket is
+# what tells the bracketed form from the bare one. Review of PR #31 on
+# 2026-09-10 found the id matched against IDENT instead, which stopped at the
+# "/", read the whole statement as a bare title, and refused a 78-character
+# title as 94 characters -- quoting a title the author never wrote, which is
+# the failure the fix above was written to remove. Every id holding a "/", ":",
+# "#", "+", "&", a space or a non-ASCII letter failed the same way, so the
+# cases below spread across those shapes.
+for sub_id in "skills/board" "s:1" "s#1" "café"; do
+  {
+    printf '```mermaid\nflowchart TD\n'
+    printf '  subgraph %s["a title"]\n' "$sub_id"
+    printf '  a["one"] --> b["two"]\n  end\n```\n'
+  } >"$work_dir/subgraph-id.md"
+  if out="$(python3 "$checker" "$work_dir/subgraph-id.md" 2>&1)"; then
+    [[ -z "$out" ]] && ok "a subgraph id \"$sub_id\" is read as an id, not as part of the title" \
+      || bad "accepted the id \"$sub_id\", but printed something: $out"
+  else
+    bad "a subgraph id \"$sub_id\" made the checker measure the id as the title: $out"
+  fi
+done
+
+# An over-budget title on a statement that is ALSO missing its separator:
+# both are reported. The title was already read when the separator was found
+# missing, and scan()'s own docstring says a label already read comes back
+# beside the error. Review of PR #31 on 2026-09-10 found it thrown away with
+# the exception, so the author fixed the separator and only then learned the
+# title was over budget -- two rounds for one line.
+z85="$(printf 'z%.0s' {1..85})"
+{
+  printf '```mermaid\nflowchart TD\n'
+  printf '  subgraph s["%s"] a["one"] --> b["two"]\n' "$z85"
+  printf '  end\n```\n'
+} >"$work_dir/subgraph-title-and-separator.md"
+if out="$(python3 "$checker" "$work_dir/subgraph-title-and-separator.md" 2>&1)"; then
+  bad "a subgraph line over budget AND missing its separator was accepted"
+else
+  case "$out" in
+    *"85 characters"*"text after the title"*)
+      ok "an over-budget subgraph title is reported beside the separator it is missing" ;;
+    *) bad "refused, but did not report both the title and the separator: $out" ;;
+  esac
+fi
+
+# A `%%` comment after a statement, on the same line: skipped, wherever it
+# starts. Mermaid's lexer skips `%%` anywhere on a line, so both lines below
+# render exactly as written. Only a comment that BEGAN a line was dropped
+# before, so the edge line was refused with "expected a link or a label", and
+# this card made the subgraph line refuse too -- naming a ";" that does not
+# fix it (review of PR #31, 2026-09-10).
+cat >"$work_dir/trailing-comment.md" <<'MD'
+```mermaid
+flowchart TD
+  subgraph s["the board"] %% the cluster
+  a["one"] --> b["two"] %% why
+  end
+```
+MD
+if out="$(python3 "$checker" "$work_dir/trailing-comment.md" 2>&1)"; then
+  [[ -z "$out" ]] && ok "a %% comment after a statement is skipped, not read as graph syntax" \
+    || bad "accepted, but printed something: $out"
+else
+  bad "a %% comment after a statement was read as graph syntax: $out"
+fi
+
+# The other side of that: a "%%" inside a quoted label is label text, and the
+# label is still measured. A stripper that ignored quotes would cut the label
+# in half and report a shorter one than the diagram draws.
+cat >"$work_dir/quoted-percent.md" <<'MD'
+```mermaid
+flowchart TD
+  c1["one two %% three four five six seven"] --> c2["ok"]
+```
+MD
+if out="$(python3 "$checker" "$work_dir/quoted-percent.md" 2>&1)"; then
+  bad "a label holding %% was cut at it and passed under the word budget"
+else
+  case "$out" in
+    *"node c1"*"words"*) ok "a %% inside a quoted label is label text, and the label is measured whole" ;;
+    *) bad "refused, but not for the whole label's word count: $out" ;;
+  esac
 fi
 
 # A `;` inside a label is text, not a separator. The statement split is what

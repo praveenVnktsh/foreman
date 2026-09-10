@@ -144,10 +144,17 @@ HEADER_LIST = " or ".join(sorted(GRAPH_HEADERS))
 # `subgraph` carries a label; the rest are graph syntax, styling and cluster
 # ends, and carry none.
 SUBGRAPH = "subgraph"
+# The one keyword whose statement runs to the end of the LINE and not to the
+# next `;`. Mermaid's lexer matches it as `direction\s+<DIR>[^\n]*`, so a `;`
+# on that line separates nothing. Review of PR #31 on 2026-09-10 found
+# `direction LR; a["one"] --> b["two"]` read as a second statement and counted
+# as one link, so a block mermaid draws as an empty cluster -- no node, no edge
+# -- passed this gate as a plan graph.
+DIRECTION = "direction"
 KEYWORDS = GRAPH_HEADERS | frozenset(
     [
         SUBGRAPH,
-        "direction",
+        DIRECTION,
         "classDef",
         "class",
         "linkStyle",
@@ -162,13 +169,25 @@ SHORT_LABELS = {"edge": "edge label", "cluster": "subgraph title"}
 USAGE = "check-plan-graph.py [--max-label-chars N] <plan.md>... | --limits"
 
 
-class LabelSyntax(Exception):
-    """A line the checker cannot read as nodes and links."""
-
-
 # One label found on a line: its kind ("node" or "edge"), the node id it belongs
 # to, and its text. An edge label belongs to no node, so its id is empty.
 Label = tuple[str, str, str]
+
+
+class LabelSyntax(Exception):
+    """A line the checker cannot read as nodes and links.
+
+    `labels` carries what the failing statement had already read. A subgraph
+    title is measured even when the statement after it is missing its `;`:
+    review of PR #31 on 2026-09-10 found an over-budget title reported nowhere,
+    so the author fixed the separator and only then learned about the title.
+    scan() returns these beside the error, which is the policy its own
+    docstring states for every other label on the line.
+    """
+
+    def __init__(self, message: str, labels: list[Label] | None = None):
+        super().__init__(message)
+        self.labels: list[Label] = labels or []
 
 
 class Scanned(NamedTuple):
@@ -407,15 +426,34 @@ def read_keyword_statement(line: str, at: int, keyword: str) -> tuple[int, list[
     line whose first word was a keyword was skipped whole, so review of PR #18
     found `classDef chg fill:#eee; c1["<eight words>"]` passing with exit 0.
 
-    Skipped to the `;` is also all that is asked of them. This file does not
-    model their grammar, and mermaid reads each one's operand to that same
-    separator, so text after a `style` or a `classDef` is that statement's
-    operand and not a second statement.
+    `direction` is skipped to the end of the LINE instead -- see DIRECTION.
+
+    A `[` in what is skipped is a node statement written without the separator
+    that would end the keyword's own operand. Mermaid draws nothing of it --
+    `style`, `class`, `classDef` and `linkStyle` fail to parse, and `direction`
+    swallows it in silence -- so the line is refused rather than skipped:
+    review of PR #31 on 2026-09-10 found `style a fill:#f00 c1["<200
+    characters>"]` passing with exit 0, the same hole this card had just closed
+    for `subgraph`. Style declarations carry no `[`, so nothing correct is
+    refused, and the message names the separator that keyword actually takes.
     """
+    if keyword == DIRECTION:
+        if "[" in line[at:]:
+            # Not the `;` the others name: a `;` separates nothing here.
+            raise LabelSyntax(
+                f"{DIRECTION}: text after the {DIRECTION} statement; it takes "
+                "the rest of the line, so put that on a line of its own"
+            )
+        return len(line), []
     end = statement_end(line, at)
-    if keyword != SUBGRAPH:
-        return end, []
-    return end, [("cluster", "", subgraph_title(line[at:end]))]
+    if keyword == SUBGRAPH:
+        return end, [("cluster", "", subgraph_title(line[at:end]))]
+    if "[" in line[at:end]:
+        raise LabelSyntax(
+            f"{keyword}: text after the {keyword} statement; "
+            'separate statements with ";"'
+        )
+    return end, []
 
 
 def scan(line: str) -> Scanned:
@@ -461,7 +499,7 @@ def scan(line: str) -> Scanned:
             found += labels
             at = skip_space(line, at)
     except LabelSyntax as unreadable:
-        return Scanned(found, links, str(unreadable))
+        return Scanned(found + unreadable.labels, links, str(unreadable))
     return Scanned(found, links, None)
 
 
@@ -503,18 +541,26 @@ def subgraph_title(statement: str) -> str:
 
     A statement with no bracket at all keeps mermaid's bare form, where the
     title is the rest of it: `subgraph the whole board`.
+
+    The bracket is what tells the two forms apart, not the shape of the id.
+    Mermaid puts no constraint on a subgraph id beyond the `[` that ends it, so
+    matching one here refused correct plans: review of PR #31 on 2026-09-10
+    found `subgraph skills/board["<78 characters>"]` read as the bare form,
+    which measured the id and the brackets as part of the title and reported
+    94 characters against a budget of 80. Every id holding a `/`, `:`, `#`, a
+    space or a non-ASCII letter failed the same way.
     """
-    at = skip_space(statement, len(SUBGRAPH))
-    ident = IDENT.match(statement, at)
-    if ident:
-        at = skip_space(statement, ident.end())
-    if at >= len(statement) or statement[at] != "[":
-        return statement[len(SUBGRAPH) :].strip().strip('"').strip()
-    where = f"{SUBGRAPH} {ident.group(0)}" if ident else SUBGRAPH
-    ends, title = read_bracketed_title(statement, at, where)
-    if statement[ends:].strip():
+    rest = statement[len(SUBGRAPH) :]
+    opened = rest.find("[")
+    if opened < 0:
+        return rest.strip().strip('"').strip()
+    ident = rest[:opened].strip()
+    where = f"{SUBGRAPH} {ident}" if ident else SUBGRAPH
+    ends, title = read_bracketed_title(rest, opened, where)
+    if rest[ends:].strip():
         raise LabelSyntax(
-            f'{where}: text after the title; separate statements with ";"'
+            f'{where}: text after the title; separate statements with ";"',
+            [("cluster", "", title.strip())],
         )
     return title.strip()
 
@@ -625,6 +671,31 @@ def read_block(path: str, text: str) -> tuple[list[tuple[int, str]] | None, list
     return block, problems
 
 
+def without_comment(line: str) -> str:
+    r"""The line up to its `%%` comment, which mermaid skips wherever it starts.
+
+    Quotes are respected, so a `%%` inside a label is label text. `%%{` opens
+    the init directive rather than a comment, which is mermaid's own rule
+    (`%%(?!\{)`), and graph_lines() is what reads those.
+
+    A comment was only ever dropped when it began the line. Anywhere else it
+    was read as graph syntax, so `a["one"] --> b["two"] %% why` was refused
+    with "expected a link or a label", and this card made
+    `subgraph s["board"] %% the cluster` refuse too -- naming a `;` as the
+    remedy, which does not work, when the line renders exactly as written
+    (review of PR #31, 2026-09-10).
+    """
+    quoted = False
+    at = 0
+    while at < len(line):
+        if line[at] == '"':
+            quoted = not quoted
+        elif not quoted and line.startswith("%%", at) and not line.startswith("%%{", at):
+            return line[:at].rstrip()
+        at += 1
+    return line
+
+
 def graph_lines(
     path: str, block: list[tuple[int, str]]
 ) -> tuple[list[tuple[int, str]], list[str]]:
@@ -642,7 +713,8 @@ def graph_lines(
             if "}%%" not in line:
                 directive_at = number
             continue
-        if line.startswith("%%") or not line:
+        line = without_comment(line)
+        if not line:
             continue
         lines.append((number, line))
     if directive_at:

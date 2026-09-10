@@ -78,10 +78,12 @@ put the path there by itself. If the path alone is still too wide, write the
 tail that identifies it, `.../service/BoardStatusTest.java`, and let the prompt
 carry the whole path. The prompt has no budget; the picture does.
 
-**When the whole tree runs deep, raise the budget instead of trimming every
-label.** A target whose paths are long throughout is not solved node by node;
-its `board.toml` declares a wider `limits.max_label_chars` once, and every
-label in every plan gets the room the target actually needs.
+**When the whole tree runs deep, ask the operator to raise the budget.** A
+target whose paths are long throughout is not solved node by node: one wider
+`limits.max_label_chars` in its `board.toml` gives every label in every plan
+the room the target needs. That edit is the operator's, not yours — a plan
+agent commits nothing and its worktree is thrown away — so say so in your
+report and write the plan within the budget you were given.
 
 **Quote every label the brackets hold:** `c1["..."]`. Brackets nest and mermaid
 has a dozen node shapes, so an unquoted label has no unambiguous end. The check
@@ -155,9 +157,13 @@ The graph is an artifact, not a checkpoint. Write it, commit it, and carry on.
 Nobody has to approve it.
 
 ```bash
-bin/check-plan-graph.py docs/plans/<file>.md
+bin/check-plan-graph.py --max-label-chars <N> docs/plans/<file>.md
 bin/render-diagram.sh docs/plans/<file>.md && open docs/plans/<file>.html
 ```
+
+`<N>` is the budget your prompt gave you. Leave the option off and the checker
+uses the default printed above, which is the wrong number for any target that
+declares one of its own.
 
 It is kept because the agents that execute it hold no memory of writing it,
 and because nothing else says why the work was cut up this way.
