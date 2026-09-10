@@ -64,18 +64,19 @@ Any label line: at most 80 characters, counted as it renders.
 c4["<b>c4 · config.sh</b> · CHANGE<br/>loads one board's environment<br/><i>opus · high</i>"]
 ```
 
-80 is `bin/check-plan-graph.py`'s default, not a ceiling every target shares. A
-target raises it by setting `limits.max_label_chars` in its own `board.toml`;
-the board reads that value and passes it to the checker as `--max-label-chars
-N` on the command line in the plan agent's prompt. A plan is judged by the
-number on that command line, not by the number printed above.
+The character budget above is `bin/check-plan-graph.py`'s default, not a
+ceiling every target shares. A target raises it by setting
+`limits.max_label_chars` in its own `board.toml`; the board reads that value
+and passes it to the checker as `--max-label-chars N` on the command line in
+the plan agent's prompt. A plan is judged by the number on that command line,
+not by the one printed above.
 
 **A path that will not fit goes on a line of its own.** A node names the file
-it builds, and in a deep tree `c1 · ` plus the path plus ` · CHANGE` passes the
-budget. A node label has four lines: put the path on one of them by itself.
-If the path alone is still too wide, write the tail that identifies it,
-`.../service/BoardStatusTest.java`, and let the prompt carry the whole path. The
-prompt has no budget; the picture does.
+it builds, and in a deep tree `c1 · ` plus the path plus ` · CHANGE` runs past
+the character budget. The label budget above leaves room for a line of its own:
+put the path there by itself. If the path alone is still too wide, write the
+tail that identifies it, `.../service/BoardStatusTest.java`, and let the prompt
+carry the whole path. The prompt has no budget; the picture does.
 
 **When the whole tree runs deep, raise the budget instead of trimming every
 label.** A target whose paths are long throughout is not solved node by node;
@@ -86,7 +87,7 @@ label in every plan gets the room the target actually needs.
 has a dozen node shapes, so an unquoted label has no unambiguous end. The check
 refuses one rather than guessing where it stops. Write an edge label between
 pipes, `-->|"..."|`; that is house style here. The check measures all three of
-mermaid's forms against the four-word budget, so an inline label like
+mermaid's forms against the edge-label budget above, so an inline label like
 `-- text -->` is measured, not refused.
 
 **Untouched components belong in the graph.** They are how a fresh agent
@@ -99,12 +100,12 @@ later write wins and the earlier work vanishes with no error.
 ### What an edge is
 
 A real relationship in the built system: reads, writes, spawns, depends on.
-Label it with the verb, in four words or fewer.
+Label it with the verb, inside the edge-label budget above.
 
 **Where build order differs from the runtime relationship, draw the edge
 dotted:** `-.->`. B reads A at runtime, but only A's interface is needed to
 start B, so a dotted edge orders nothing and its head can start first. The
-label stays inside four words.
+label stays inside the edge-label budget above.
 
 **Do not draw an edge for tidiness.** An edge is a claim about how the system
 works, and a false one is a false claim before it is a scheduling mistake.

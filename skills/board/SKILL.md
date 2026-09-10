@@ -922,7 +922,8 @@ team. For anything in `Todo` you might dispatch, read it again with
 `includeRelations: true`; step 6 gates on `blockedBy` and `list_issues` cannot
 return it. Ask Linear for each card's `priority` as well — step 6 orders `Todo`
 by it. A card whose priority `queue.py` cannot read is skipped and reported, and
-the rest of the board is still ordered. Then:
+the rest of the board is still ordered. A board where no card ranks is
+reported too, never passed over in silence. Then:
 
 ```bash
 ~/.foreman/install/skills/board/reconcile.py <TICKET> <TICKET> ...
@@ -1690,11 +1691,16 @@ merged but failed to deploy is building on something that is not there.
 `blocks` needs no handling: the gating always happens on the dependent's side.
 
 Order what is left with `queue.py`. Write this board's `Todo` cards to a file,
-as the JSON Linear returned, and pipe them in:
+as the JSON Linear returned, and pipe them in, sending the order and the skips
+to different places:
 
 ```bash
-~/.foreman/install/skills/board/queue.py < /tmp/todo.json
+~/.foreman/install/skills/board/queue.py < /tmp/todo.json > /tmp/queue.out 2> /tmp/queue.err
 ```
+
+**Never read the two as one list.** A skip line names a card too, so a tick
+that concatenates them takes an identifier off stderr and dispatches the
+untriaged card `queue.py` refused.
 
 **Never order by Linear's raw `priority` number.** `0` there means "no
 priority", not "most urgent", so an ascending sort queues every untriaged card
@@ -1703,15 +1709,23 @@ one priority on the lower card number, so a card that has waited is not starved
 by newer cards that share its priority.
 
 **A card `queue.py` cannot rank is skipped, not the batch.** It writes one
-`queue: skipped <T>: <reason>` line on stderr, ranks every other `Todo` card and
-exits 0. Read stderr, dispatch from the order on stdout, and name every skipped
-card in the report. The operator sets the priority in Linear and the card queues
-on the next tick.
+`queue: skipped <T>: <reason>` line on stderr and ranks every other `Todo` card.
+Read `/tmp/queue.err`, dispatch from the order in `/tmp/queue.out`, and name
+every skipped card in the report. The operator sets the priority in Linear and
+the card queues on the next tick.
+
+Three exit codes, one meaning each: 0 is an order or an empty board, 2 is
+cards in and none ranked, 1 is the tick's own read being wrong.
 
 - **A skipped card is not a failed card.** Do not move it, do not label it, do
   not count a build attempt against it. Nothing about the card's work failed.
-- **Empty stdout with cards skipped on stderr is not a quiet board.** Say so in
-  the report, or a stalled board and an idle one read the same from outside.
+- **Exit 2 means cards came in and not one of them ranked.** stdout is empty
+  and every skipped card is named on stderr. Dispatch nothing on this board's
+  slice, and name every skipped card in the report so the operator sets the
+  priority in Linear. Say it plainly: a stalled board and an idle one read the
+  same from outside, and only one of them needs the operator. Nothing about the
+  work failed, so count no build attempt against those cards and move none of
+  them to `Needs Human`.
 - **Exit 1 means there is no order at all**, and it means the tick's own read is
   wrong: malformed JSON, an item that is not an object, an identifier the queue
   cannot read, or one card listed twice. Dispatch nothing on this board's slice,
@@ -1719,8 +1733,8 @@ on the next tick.
   Never fall back to picking a card by eye — that is the failure `queue.py`
   exists to prevent.
 
-Take **one** card: the first identifier `queue.py` prints that is dispatchable.
-Walk down the list, because the dependency gate above may have made the first
+Take **one** card: the first identifier `queue.py` prints on stdout that is
+dispatchable. stderr is never a source of cards. Walk down the list, because the dependency gate above may have made the first
 one unavailable. That dispatch is this board's card moved forward, so the slice
 ends and the next board takes its turn. A board with six free slots fills them
 over six passes rather than six spawns in a row, and every other board is served
