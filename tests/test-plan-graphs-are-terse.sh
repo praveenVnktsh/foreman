@@ -69,7 +69,7 @@
 # with no output -- where the checker measured it before that regression.
 #
 # SKILL.md carried a fourth hole of the same kind: "a four-word budget" typed
-# MAX_LABEL_WORDS a second time, in prose no test compared to the constant.
+# the label-word budget a second time, in prose no test compared to it.
 #
 # The eighth, PRA-346 on 2026-09-09: a `subgraph` statement sharing its line
 # with a graph statement and no ";" between them. The title ran from the first
@@ -87,6 +87,18 @@
 # correct. `direction` was read to the next ";", where mermaid reads it to the
 # end of the line, so a block drawing no node and no edge passed. And a `%%`
 # comment after a subgraph title was refused with a ";" that does not help.
+#
+# The tenth, reviewing the ninth on 2026-09-10, is what the ninth got wrong,
+# and it was settled by running mermaid 11.17.2's own flow parser rather than
+# by reading its lexer. A `%%` is a comment only where it BEGINS a line:
+# mermaid's cleanupComments is `/^\s*%%(?!{)[^\n]+\n?/gm`, so
+# `a["one"] --> b["two"] %% why` is a parse error and the diagram draws
+# nothing, while the ninth dropped that comment and called the block a graph.
+# The same run showed `subgraph theboard %% one two three four five` keeping
+# all seven words as its title. And the marker for a statement packed onto a
+# keyword was a "[", which every other node shape walked through: mermaid
+# refuses `style a fill:#f00 c1(("<200 characters>"))` and the {} and pipe
+# forms alike, and this file passed all of them.
 #
 # What is deliberately NOT covered: rendering (another test owns it) and the
 # wording of SKILL.md's prose, only the lines it must reproduce verbatim.
@@ -748,6 +760,73 @@ for keyword in "class a hot" "classDef hot fill:#f00" "style a fill:#f00" \
   fi
 done
 
+# The same packed statement in the node shapes that carry no "[" at all, and
+# as an edge whose label sits in pipes. The round before this one marked a
+# packed statement by looking for a "[", so mermaid's round, diamond and
+# pipe-label forms all walked through the gate: review of PR #31 on 2026-09-10
+# ran mermaid 11.17.2 over each and got `Parse error on line 3`, with this
+# file exiting 0 and the 200-character label never measured.
+for shape in '(("|"))' '{"|"}'; do
+  open="${shape%%|*}"
+  close="${shape#*|}"
+  {
+    printf '```mermaid\nflowchart TD\n  a["one"] --> b["two"]\n'
+    printf '  style a fill:#f00 c1%s%s%s --> c2%sok%s\n' \
+      "$open" "$(printf 'x%.0s' {1..200})" "$close" "$open" "$close"
+    printf '```\n'
+  } >"$work_dir/keyword-packed-shape.md"
+  if out="$(python3 "$checker" "$work_dir/keyword-packed-shape.md" 2>&1)"; then
+    bad "a node packed onto \`style\` in the shape ${open}...${close} was accepted, and mermaid draws neither"
+  else
+    case "$out" in
+      *"text after the style statement"*)
+        ok "a node packed onto \`style\` in the shape ${open}...${close} is refused" ;;
+      *) bad "refused, but not for the packed statement: $out" ;;
+    esac
+  fi
+done
+
+# The packed statement with no bracket of any kind: an edge whose label sits
+# between pipes. Nothing on this line holds a "[", so the marker had to become
+# something else entirely.
+cat >"$work_dir/keyword-packed-pipe.md" <<'MD'
+```mermaid
+flowchart TD
+  a["one"] --> b["two"]
+  style a fill:#f00 c -->|"one two three four five"| d
+```
+MD
+if out="$(python3 "$checker" "$work_dir/keyword-packed-pipe.md" 2>&1)"; then
+  bad "an edge packed onto \`style\` with its label in pipes was accepted, and mermaid draws neither"
+else
+  case "$out" in
+    *"text after the style statement"*)
+      ok "an edge packed onto \`style\` with its label in pipes is refused" ;;
+    *) bad "refused, but not for the packed statement: $out" ;;
+  esac
+fi
+
+# And a real styling statement is still accepted. Every declaration here parses
+# in mermaid 11.17.2, so a marker that refused one of them would cost a card a
+# plan attempt for a line that renders.
+cat >"$work_dir/real-styling.md" <<'MD'
+```mermaid
+flowchart TD
+  a["one"] --> b["two"]
+  classDef chg fill:#e8f4ff,stroke:#4a90d9,stroke-width:2px
+  class a,b chg
+  style a fill:#f00,stroke:#333,stroke-width:2px
+  linkStyle 0 stroke:#f00,stroke-width:2px
+  linkStyle default stroke-dasharray: 3 5
+```
+MD
+if out="$(python3 "$checker" "$work_dir/real-styling.md" 2>&1)"; then
+  [[ -z "$out" ]] && ok "a real styling declaration is accepted, marker and all" \
+    || bad "accepted, but printed something: $out"
+else
+  bad "a styling declaration mermaid parses was refused as a packed statement: $out"
+fi
+
 # `direction` takes the rest of its line, so neither a ";" nor anything else
 # on that line separates a statement from it. Its remedy is a new line, and
 # the message must say so rather than naming a ";" that changes nothing.
@@ -769,9 +848,31 @@ else
   esac
 fi
 
-# The other half of the same claim, with no "[" on the line for the refusal
-# above to catch: a link written behind `direction` is drawn by nothing, so
-# the block states no dependency and is refused for exactly that.
+# `direction` in a node shape that carries no "[" either. Mermaid parses this
+# line and then draws none of it -- the run on 2026-09-10 came back with only
+# a and b as vertices and only a->b as an edge -- so the label is never
+# measured and never rendered.
+{
+  printf '```mermaid\nflowchart TD\n  a["one"] --> b["two"]\n'
+  printf '  direction LR; c1(("%s")) --> c2(("ok"))\n' "$(printf 'x%.0s' {1..200})"
+  printf '```\n'
+} >"$work_dir/direction-round.md"
+if out="$(python3 "$checker" "$work_dir/direction-round.md" 2>&1)"; then
+  bad "a round node packed onto \`direction LR;\` was accepted, though mermaid draws none of it"
+else
+  case "$out" in
+    *"put that on a line of its own"*)
+      ok "a round node packed onto \`direction\` is refused, and the remedy named is a new line" ;;
+    *) bad "refused, but not naming the line the statement needs: $out" ;;
+  esac
+fi
+
+# The other half of the same claim, with no label on the line at all: a link
+# written behind `direction` is drawn by nothing, so a block whose only link
+# sits there is not a graph and does not pass. The link itself is what marks
+# the packed statement now, so the message names that rather than the missing
+# link -- it says what to change, where "no link between any two nodes" asked
+# the author to add an edge they had already drawn.
 cat >"$work_dir/direction-swallows.md" <<'MD'
 ```mermaid
 flowchart TD
@@ -784,9 +885,9 @@ if out="$(python3 "$checker" "$work_dir/direction-swallows.md" 2>&1)"; then
   bad "a block whose only link sits behind \`direction LR;\` was called a graph"
 else
   case "$out" in
-    *"no link between any two nodes"*)
-      ok "a link written behind \`direction\` on its line is not a link the graph states" ;;
-    *) bad "refused, but not for the missing link: $out" ;;
+    *"put that on a line of its own"*)
+      ok "a link written behind \`direction\` on its line does not pass, and the message names the line it needs" ;;
+    *) bad "refused, but not for the statement packed onto direction: $out" ;;
   esac
 fi
 
@@ -900,25 +1001,109 @@ else
   esac
 fi
 
-# A `%%` comment after a statement, on the same line: skipped, wherever it
-# starts. Mermaid's lexer skips `%%` anywhere on a line, so both lines below
-# render exactly as written. Only a comment that BEGAN a line was dropped
-# before, so the edge line was refused with "expected a link or a label", and
-# this card made the subgraph line refuse too -- naming a ";" that does not
-# fix it (review of PR #31, 2026-09-10).
-cat >"$work_dir/trailing-comment.md" <<'MD'
+# A `%%` comment written after a statement: refused, and the message says the
+# comment must begin its own line. Mermaid strips a comment ONLY where it
+# begins one -- cleanupComments is `/^\s*%%(?!{)[^\n]+\n?/gm` -- so the line
+# below is a parse error and the whole diagram draws nothing. The round before
+# this one read mermaid's lexer instead of running it, dropped the comment
+# wherever it fell, and called the block a graph; review of PR #31 on
+# 2026-09-10 ran mermaid 11.17.2 over both lines and got `Parse error on line
+# 2` for each.
+cat >"$work_dir/trailing-comment-edge.md" <<'MD'
+```mermaid
+flowchart TD
+  a["one"] --> b["two"] %% why
+```
+MD
+if out="$(python3 "$checker" "$work_dir/trailing-comment-edge.md" 2>&1)"; then
+  bad "a %% comment after an edge statement was accepted, though mermaid cannot parse the line"
+else
+  case "$out" in
+    *"must begin its own line"*)
+      ok "a %% comment after an edge statement is refused, naming the line a comment needs" ;;
+    *) bad "refused, but not for the comment: $out" ;;
+  esac
+fi
+
+# The same on a subgraph line, where the remedy the checker names is what the
+# round before got wrong twice: first a ";", which does not put a comment on a
+# line of its own, then dropping the comment entirely.
+cat >"$work_dir/trailing-comment-subgraph.md" <<'MD'
 ```mermaid
 flowchart TD
   subgraph s["the board"] %% the cluster
-  a["one"] --> b["two"] %% why
+  a["one"] --> b["two"]
   end
 ```
 MD
-if out="$(python3 "$checker" "$work_dir/trailing-comment.md" 2>&1)"; then
-  [[ -z "$out" ]] && ok "a %% comment after a statement is skipped, not read as graph syntax" \
+if out="$(python3 "$checker" "$work_dir/trailing-comment-subgraph.md" 2>&1)"; then
+  bad "a %% comment after a subgraph title was accepted, though mermaid cannot parse the line"
+else
+  case "$out" in
+    *'separate statements with ";"'*)
+      bad "refused a trailing comment by naming a \";\", which does not put it on a line of its own: $out" ;;
+    *"must begin its own line"*)
+      ok "a %% comment after a subgraph title is refused, naming the line a comment needs" ;;
+    *) bad "refused, but not for the comment: $out" ;;
+  esac
+fi
+
+# A comment that DOES begin its line is dropped, as mermaid drops it. This is
+# the half of the rule the fix above must not take with it.
+cat >"$work_dir/own-line-comment.md" <<'MD'
+```mermaid
+flowchart TD
+  %% why this graph is shaped like this
+  a["one"] --> b["two"]
+```
+MD
+if out="$(python3 "$checker" "$work_dir/own-line-comment.md" 2>&1)"; then
+  [[ -z "$out" ]] && ok "a %% comment on a line of its own is dropped, as mermaid drops it" \
     || bad "accepted, but printed something: $out"
 else
-  bad "a %% comment after a statement was read as graph syntax: $out"
+  bad "a %% comment on its own line was read as graph syntax: $out"
+fi
+
+# A "%%" inside an edge label is label text, and the label is measured whole.
+# Mermaid parses this line and draws the edge, so refusing it would turn a
+# valid line into a rewrite the author has to guess at; the round before this
+# one truncated the line at the "%%" and reported an edge label that never
+# closes, naming a cause that is not there.
+cat >"$work_dir/percent-in-edge-label.md" <<'MD'
+```mermaid
+flowchart TD
+  a["one"] -->|100%% done here in this label| b["two"]
+```
+MD
+if out="$(python3 "$checker" "$work_dir/percent-in-edge-label.md" 2>&1)"; then
+  bad "an edge label holding %% was cut at it and passed under the word budget"
+else
+  case "$out" in
+    *"never closes"*)
+      bad "an edge label holding %% was reported as never closing, which is not what is wrong with it: $out" ;;
+    *"edge label"*"6 words"*)
+      ok "a %% inside an edge label is label text, and the label is measured whole" ;;
+    *) bad "refused, but not for the whole edge label's word count: $out" ;;
+  esac
+fi
+
+# And a "%%" written after a STYLING statement is accepted, because mermaid
+# accepts it: its style lexer skips a comment where the graph lexer does not.
+# Measured, not assumed -- `style a fill:#f00 %% why` and `direction LR %% turn`
+# both parse in mermaid 11.17.2.
+cat >"$work_dir/styling-comment.md" <<'MD'
+```mermaid
+flowchart TD
+  a["one"] --> b["two"]
+  style a fill:#f00 %% why
+  linkStyle 0 stroke:#f00 %% and this
+```
+MD
+if out="$(python3 "$checker" "$work_dir/styling-comment.md" 2>&1)"; then
+  [[ -z "$out" ]] && ok "a %% comment after a styling statement is accepted, as mermaid accepts it" \
+    || bad "accepted, but printed something: $out"
+else
+  bad "a %% comment after a styling statement was refused, though mermaid parses the line: $out"
 fi
 
 # The other side of that: a "%%" inside a quoted label is label text, and the
@@ -1002,8 +1187,8 @@ fi
 # --- 2b. --max-label-chars: the budget a deeper target raises -------------
 #
 # limits.max_label_chars in a target's board.toml reaches this file as this
-# flag -- see the comment above DEFAULT_MAX_LABEL_CHARS for why 80 is a
-# default calibrated on this tree and not a ceiling on every tree.
+# flag -- see the comment above Budget for why 80 is a default calibrated on
+# this tree and not a ceiling on every tree.
 ninety_chars="$(printf 'x%.0s' {1..90})"
 printf '%s\n' \
   '```mermaid' \
@@ -1078,7 +1263,7 @@ esac
 # SKILL.md is allowed exactly one copy of the budget numbers: the fenced block
 # just compared above, verbatim, against --limits. Every other line that types
 # "four", "six", "eighty" or a digit against words/lines/characters is a
-# second copy quietly drifting out of step with MAX_LABEL_WORDS and friends --
+# second copy quietly drifting out of step with Budget's own numbers --
 # what "a four-word budget" was, in prose nothing compared to the constant,
 # until round-2 review of PR #25 caught it on 2026-09-09.
 budget_marker="$(grep -n '\*\*The budget\*\*' "$skill" | head -1 | cut -d: -f1)"

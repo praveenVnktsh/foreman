@@ -454,7 +454,7 @@ check "max_label_chars = 0 still loads (starves planning, disarms nothing)" \
   "0" "$(read_key "$work/zero_labelchars.toml" MAX_LABEL_CHARS)"
 
 # The default of 80 is written twice on purpose -- bin/contract.py's LIMITS
-# and bin/check-plan-graph.py's DEFAULT_MAX_LABEL_CHARS cannot import each
+# and bin/check-plan-graph.py's Budget.label_chars cannot import each
 # other -- so this pins the two together instead of retyping either number.
 # If they drift, a target that declares no [limits] gets a plan judged
 # against one number by check-plan-graph.py while the prompt that told it to
