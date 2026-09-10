@@ -91,16 +91,19 @@ PRIORITY_BANDS = {0: 5, 1: 1, 2: 2, 3: 3, 4: 4}
 # not 1: stdin was read and every card was reported, so this is a stalled board
 # and not a refused input.
 #
-# It is 3 and not 2 because 2 means "you called this tool wrong" everywhere else
-# on this board -- see the "WHY 3 AND NOT 2" paragraph at the top of waitfor.py,
-# which draws the same line. A stalled board and a mistyped invocation both
-# print nothing on stdout, so one code for both lets an empty shell variable
-# that got word-split away read to the tick as a stalled board, reported to the
-# operator as cards nobody triaged.
+# It is 3 and not 2 because 2 already means "you called this tool wrong" across
+# this board -- see the "WHY 3 AND NOT 2" paragraph at the top of waitfor.py,
+# which draws the same line for the same reason. This file used to exit 2 for a
+# stalled board while waitfor.py exited 2 for a usage error, so SKILL.md taught
+# the tick both readings of one number, and a reader of an exit 2 from a board
+# tool had to know which tool produced it before knowing what it meant. 3 is
+# waitfor.py's code for settled and unsatisfied, which is what a stalled board
+# is.
 NOTHING_RANKED = 3
 
-# Exit status for a wrong argv. It is argparse's own code for a usage error, and
-# every other board tool already means that by 2.
+# Exit status for a wrong argv. It is what a usage error exits with across this
+# board and it is argparse's default, though nothing here parses arguments:
+# there are none to parse, and the only wrong call is one that passes any.
 CALLED_WRONG = 2
 
 # A Linear identifier: a team key, a hyphen, a number. The team key admits no

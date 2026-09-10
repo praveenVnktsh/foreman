@@ -1690,18 +1690,30 @@ merged but failed to deploy is building on something that is not there.
 
 `blocks` needs no handling: the gating always happens on the dependent's side.
 
-Order what is left with `queue.py`. Make a scratch directory with `mktemp -d`
-first — a fixed name under `/tmp` is shared with every other instance on the
-machine and with anyone who can create the file first, so a name made fresh
-per tick is the only one nothing else can race or pre-create. Write this
-board's `Todo` cards to a file in it, as the JSON Linear returned, and pipe
+Order what is left with `queue.py`. Its three files live under `$BOARD_HOME`,
+the directory `config.sh` exports for this slice. Write this board's `Todo`
+cards, as the JSON Linear returned, to `$BOARD_HOME/queue/todo.json` and pipe
 them in, sending the order and the skips to different places:
 
 ```bash
-Q="$(mktemp -d)"
-# write this board's Todo cards, as the JSON Linear returned, to "$Q/todo.json"
-~/.foreman/install/skills/board/queue.py < "$Q/todo.json" > "$Q/queue.out" 2> "$Q/queue.err"
+mkdir -p "$BOARD_HOME/queue"
+# write this board's Todo cards, as the JSON Linear returned,
+# to $BOARD_HOME/queue/todo.json
+~/.foreman/install/skills/board/queue.py \
+  < "$BOARD_HOME/queue/todo.json" \
+  > "$BOARD_HOME/queue/queue.out" \
+  2> "$BOARD_HOME/queue/queue.err"
 ```
+
+**Not `/tmp`, and not a directory this block invents.** A fixed name under
+`/tmp` is shared with every other instance on the machine, and the truncating
+`>` follows a symlink someone created there first. A directory from `mktemp -d`
+closes both of those and loses the path instead: the name exists only in that
+block's shell, cannot be derived a second time, and the step below is then left
+with no file to read. `$BOARD_HOME` is this board's own directory. Every block
+that sources `config.sh` derives the same path, one tick runs at a time on the
+machine, and each tick overwrites the three files rather than leaving a new
+directory behind.
 
 **Never read the two as one list.** A skip line names a card too, so a tick
 that concatenates them takes an identifier off stderr and dispatches the
@@ -1715,9 +1727,9 @@ by newer cards that share its priority.
 
 **A card `queue.py` cannot rank is skipped, not the batch.** It writes one
 `queue: skipped <T>: <reason>` line on stderr and ranks every other `Todo` card.
-Read `$Q/queue.err`, dispatch from the order in `$Q/queue.out`, and name
-every skipped card in the report. The operator sets the priority in Linear and
-the card queues on the next tick.
+Read `$BOARD_HOME/queue/queue.err`, dispatch from the order in
+`$BOARD_HOME/queue/queue.out`, and name every skipped card in the report. The
+operator sets the priority in Linear and the card queues on the next tick.
 
 Four exit codes, one meaning each: 0 is an order or an empty board, 3 is
 cards in and none ranked, 1 is the tick's own read being wrong, 2 is the tick's
@@ -1739,11 +1751,17 @@ own invocation being wrong.
   Never fall back to picking a card by eye — that is the failure `queue.py`
   exists to prevent.
 - **Exit 2 means the tick called `queue.py` wrong**, so nothing about the board
-  is known. Dispatch nothing on this board's slice, and report the invocation
-  the same way exit 1 is reported. Exit 2 never means a stalled board. Reading
-  it as one reports a mistyped command to the operator as "every card on this
-  board is untriaged", and an empty shell variable that got word-split away is
-  enough to produce it.
+  is known. Dispatch nothing on this board's slice, end the slice, and report
+  the command you ran. Exit 2 is a bug in the tick and never a fact about the
+  cards: report it as a foreman defect, not as a card the operator must triage
+  and not as the refused batch exit 1 describes.
+
+**A failure before `queue.py` runs is the machine, not the board.** A `mkdir`
+that fails or a redirect that cannot be opened — a full disk, a directory that
+is not writable — makes the shell print its own error and never start
+`queue.py`, so no `queue.out` is written at all. Report that as an environment
+failure and name the command. None of the four codes above applies, because
+nothing read the cards.
 
 Take **one** card: the first identifier `queue.py` prints on stdout that is
 dispatchable. stderr is never a source of cards. Walk down the list, because the dependency gate above may have made the first
