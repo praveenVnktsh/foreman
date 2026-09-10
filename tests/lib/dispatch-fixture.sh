@@ -27,13 +27,18 @@ dispatch_fixture_setup() {
   local work_dir="$1" repo_root="$2"
   local board_dir="$repo_root/skills/board"
 
-  # An operator with PLAN_MODEL exported in their shell saw the plan and
-  # build/review model tests go red on a correctly configured machine: config.sh's
-  # `${PLAN_MODEL-fable}` fallback never fired, because the ambient export had
-  # already answered it. Clear the three here, once, before any dispatch can
-  # source config.sh. test-the-plan-stage-dispatches-on-fable.sh exports
-  # PLAN_MODEL again after this call, so its deliberate override still reaches
-  # `claude --bg`.
+  # Clear the operator's model overrides, so that a model variable being SET
+  # when dispatch_fixture_run reads it means a test set it on purpose.
+  #
+  # dispatch_fixture_run passes these three through and blocks everything else
+  # (see the allowlist there). They are passed through because a test asserts
+  # on them: test-the-plan-stage-dispatches-on-fable.sh exports PLAN_MODEL
+  # after this call and requires it to reach `claude --bg --model`. That hole
+  # is only safe if the operator's own value is already gone, which is what
+  # this line does. An operator with PLAN_MODEL exported in their shell saw
+  # both model tests go red on a correctly configured machine: config.sh's
+  # `${PLAN_MODEL-fable}` never fired, because the ambient export had already
+  # answered it.
   unset PLAN_MODEL BUILD_MODEL REVIEW_MODEL
 
   # A shim skill dir, identical to the real one except preflight.py. Same
@@ -108,11 +113,33 @@ STUB
 # Failure is swallowed on purpose: the stubbed `claude agents` reports no
 # agents, so every dispatch dies at "never registered" AFTER the spawn this
 # fixture exists to capture.
+#
+# The dispatch is given an ALLOWLIST of an environment -- `env -i` plus the
+# names below -- and not the caller's. Nearly every value in config.sh is
+# `${NAME:-default}`, so the operator's shell can answer any of them before
+# config.sh asks, and the test then fails on a correctly configured machine
+# with nothing in the diff under review to blame. Named per incident, that is
+# one fix per variable someone happens to export: PLAN_MODEL was the first
+# (PRA-276), and CLAUDE_CODE_SUBAGENT_MODEL, REPO, FOREMAN_HOME,
+# BOARD_DRY_RUN, FOREMAN_TMP_ROOT and BOARD_HOME each reproduce it. An
+# allowlist closes the class, and makes each remaining hole a decision.
 dispatch_fixture_run() {
   : >"$DISPATCH_ARGV_LOG"
   : >"$DISPATCH_SUBAGENT_MODEL_LOG"
-  env HOME="$DISPATCH_HOME" FOREMAN_INSTANCE=demo \
+  # The one hole: a model a test set deliberately after dispatch_fixture_setup
+  # cleared the operator's. `+` and not `:-`, because `PLAN_MODEL=` empty is
+  # itself a value under test and must reach the CLI as an empty `--model`.
+  local models=()
+  if [[ -n "${PLAN_MODEL+set}" ]];   then models+=("PLAN_MODEL=$PLAN_MODEL");     fi
+  if [[ -n "${BUILD_MODEL+set}" ]];  then models+=("BUILD_MODEL=$BUILD_MODEL");   fi
+  if [[ -n "${REVIEW_MODEL+set}" ]]; then models+=("REVIEW_MODEL=$REVIEW_MODEL"); fi
+  # bash 3.2 + `set -u`: "${arr[@]}" on an EMPTY array is an unbound-variable
+  # error, not an empty expansion.
+  env -i \
+    HOME="$DISPATCH_HOME" \
+    FOREMAN_INSTANCE=demo \
     PATH="$_DISPATCH_STUB_BIN:$PATH" \
+    ${models[@]+"${models[@]}"} \
     "$DISPATCH" "$@" --prompt-file "$DISPATCH_PROMPT" >/dev/null 2>&1 || true
 }
 
