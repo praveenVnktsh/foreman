@@ -921,8 +921,8 @@ project** from Linear — filter by that board's project ID, not by scanning the
 team. For anything in `Todo` you might dispatch, read it again with
 `includeRelations: true`; step 6 gates on `blockedBy` and `list_issues` cannot
 return it. Ask Linear for each card's `priority` as well — step 6 orders `Todo`
-by it, and `queue.py` refuses a card whose priority is missing rather than
-reading it as a value the operator never set. Then:
+by it. A card whose priority `queue.py` cannot read is skipped and reported, and
+the rest of the board is still ordered. Then:
 
 ```bash
 ~/.foreman/install/skills/board/reconcile.py <TICKET> <TICKET> ...
@@ -1701,6 +1701,23 @@ priority", not "most urgent", so an ascending sort queues every untriaged card
 ahead of every `Urgent` one. `queue.py` sorts `0` last, and breaks a tie inside
 one priority on the lower card number, so a card that has waited is not starved
 by newer cards that share its priority.
+
+**A card `queue.py` cannot rank is skipped, not the batch.** It writes one
+`queue: skipped <T>: <reason>` line on stderr, ranks every other `Todo` card and
+exits 0. Read stderr, dispatch from the order on stdout, and name every skipped
+card in the report. The operator sets the priority in Linear and the card queues
+on the next tick.
+
+- **A skipped card is not a failed card.** Do not move it, do not label it, do
+  not count a build attempt against it. Nothing about the card's work failed.
+- **Empty stdout with cards skipped on stderr is not a quiet board.** Say so in
+  the report, or a stalled board and an idle one read the same from outside.
+- **Exit 1 means there is no order at all**, and it means the tick's own read is
+  wrong: malformed JSON, an item that is not an object, an identifier the queue
+  cannot read, or one card listed twice. Dispatch nothing on this board's slice,
+  report the refusal with its message, end the slice and take the next board.
+  Never fall back to picking a card by eye — that is the failure `queue.py`
+  exists to prevent.
 
 Take **one** card: the first identifier `queue.py` prints that is dispatchable.
 Walk down the list, because the dependency gate above may have made the first

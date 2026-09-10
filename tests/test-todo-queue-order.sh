@@ -1,14 +1,18 @@
 #!/usr/bin/env bash
 # Claim: skills/board/queue.py orders a board's Todo cards by Linear's priority,
-# oldest first inside a priority, and refuses anything it cannot rank.
+# oldest first inside a priority, skips a card whose priority it cannot read,
+# and refuses the whole batch only when a card cannot even be named.
 #
 # The failure it prevents: a tick that picks the next card by eye. Linear's
 # scale is 0 = No priority, 1 = Urgent, 2 = High, 3 = Medium, 4 = Low, so a
 # plain ascending sort puts every UNTRIAGED card ahead of every urgent one --
-# the board would then dispatch its least understood work first. A missing
-# priority is refused for the same reason: a tick that forgot to ask Linear for
-# the field would otherwise get a confident order that ignores every priority on
-# the board, with exit code 0 and nothing to say so.
+# the board would then dispatch its least understood work first.
+#
+# PRA-197: refusing the whole batch over one card's bad priority used to stall
+# every dispatch on the board, Urgent cards included, in silence -- a board
+# that never dispatches looks exactly like a board with no work. A missing or
+# unreadable priority now costs only its own card; the card is still refused,
+# but out loud on stderr, and every other card still dispatches.
 #
 # It drives the real script over a pipe. No fixture instance, no git repository.
 set -uo pipefail
@@ -36,6 +40,35 @@ refuses() {
   case "$got" in
     *"$want"*) ok "$name" ;;
     *) bad "$name: refused, but the message never says '$want': $got" ;;
+  esac
+}
+
+# $1 name, $2 expected stdout (newline separated, "" for none), $3 identifier
+# the stderr skip line must name, $4 substring the skip reason must carry,
+# $5 JSON on stdin
+#
+# orders() and refuses() fold stderr into stdout with 2>&1, which cannot judge
+# a skip: a skip writes to BOTH streams and exits 0, so neither "wanted one
+# stream" helper can tell it apart from an order or a refusal. queue.py is a
+# pure filter -- same input, same output, no side effect -- so running it
+# twice, once with stderr discarded and once with stdout discarded, reads each
+# stream on its own with no scratch file.
+skips() {
+  local name="$1" want_out="$2" want_id="$3" want_word="$4" json="$5"
+  local out out_status err
+  out="$(printf '%s' "$json" | "$queue" 2>/dev/null)"; out_status=$?
+  err="$(printf '%s' "$json" | "$queue" 2>&1 >/dev/null)"
+  if [[ $out_status -ne 0 ]]; then
+    bad "$name: exited $out_status, wanted 0"
+    return
+  fi
+  if [[ "$out" != "$want_out" ]]; then
+    bad "$name: stdout wanted [$want_out], got [$out]"
+    return
+  fi
+  case "$err" in
+    *"skipped $want_id"*"$want_word"*) ok "$name" ;;
+    *) bad "$name: stderr never reports $want_id with '$want_word': $err" ;;
   esac
 }
 
@@ -69,29 +102,61 @@ orders "an issue's other Linear fields are ignored" \
   "ABC-7" \
   '[{"identifier":"ABC-7","priority":1,"title":"t","state":{"name":"Todo"}}]'
 
-refuses "a missing priority is refused, and the message names the card" \
-  "ABC-8" \
+orders "a float priority ranks as its integer value: 1.0 sorts as Urgent" \
+  "$(printf 'ABC-1\nABC-2')" \
+  '[{"identifier":"ABC-1","priority":1.0},
+    {"identifier":"ABC-2","priority":4}]'
+
+skips "a missing priority skips its own card, and the message names it" \
+  "ABC-7" "ABC-8" "missing" \
   '[{"identifier":"ABC-7","priority":1},{"identifier":"ABC-8"}]'
 
-refuses "a null priority is refused rather than read as untriaged" \
-  "ABC-7" \
+skips "a null priority skips its own card rather than read as untriaged" \
+  "" "ABC-7" "null" \
   '[{"identifier":"ABC-7","priority":null}]'
 
-refuses "a boolean priority is refused rather than read as urgent" \
-  "boolean" \
+skips "a boolean priority skips its own card rather than read as urgent" \
+  "" "ABC-7" "boolean" \
   '[{"identifier":"ABC-7","priority":true}]'
 
-refuses "a priority outside the scale is refused by value" \
-  "9" \
+skips "a priority outside the scale skips its own card, named by value" \
+  "" "ABC-7" "9" \
   '[{"identifier":"ABC-7","priority":9}]'
 
-refuses "a priority name Linear does not use is refused" \
-  "critical" \
+skips "a priority name Linear does not use skips its own card" \
+  "" "ABC-7" "critical" \
   '[{"identifier":"ABC-7","priority":"critical"}]'
+
+skips "a float that is not a whole number skips only its own card" \
+  "ABC-2" "ABC-1" "whole number" \
+  '[{"identifier":"ABC-1","priority":2.5},{"identifier":"ABC-2","priority":1}]'
+
+skips "one unrankable card is skipped and every other card is still ordered" \
+  "$(printf 'ABC-1\nABC-3')" "ABC-2" "missing" \
+  '[{"identifier":"ABC-1","priority":1},
+    {"identifier":"ABC-2"},
+    {"identifier":"ABC-3","priority":4}]'
+
+board='[{"identifier":"ABC-1","priority":null},
+        {"identifier":"ABC-2","priority":true},
+        {"identifier":"ABC-3","priority":9}]'
+out="$(printf '%s' "$board" | "$queue" 2>/dev/null)"; out_status=$?
+err="$(printf '%s' "$board" | "$queue" 2>&1 >/dev/null)"
+if [[ $out_status -eq 0 && -z "$out" \
+      && "$err" == *"skipped ABC-1"* && "$err" == *"skipped ABC-2"* \
+      && "$err" == *"skipped ABC-3"* ]]; then
+  ok "a whole board of unrankable cards prints nothing on stdout, reports every one on stderr, and exits 0"
+else
+  bad "a whole board of unrankable cards: stdout=[$out] stderr=[$err] exit=$out_status"
+fi
 
 refuses "a malformed identifier is refused" \
   "ABC 7" \
   '[{"identifier":"ABC 7","priority":1}]'
+
+refuses "an item that is not a JSON object is refused" \
+  "object" \
+  '[{"identifier":"ABC-7","priority":1},"ABC-8"]'
 
 refuses "the same card listed twice is refused" \
   "twice" \
