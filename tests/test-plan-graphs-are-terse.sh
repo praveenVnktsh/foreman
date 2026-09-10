@@ -100,6 +100,33 @@
 # refuses `style a fill:#f00 c1(("<200 characters>"))` and the {} and pipe
 # forms alike, and this file passed all of them.
 #
+# The eighth, in review of PR #30 on 2026-09-10: a keyword-spelled node id at
+# the head of a node list. `continues_a_node()` counted brackets, a `:::`
+# suffix and a link as node syntax, but not the `&` that joins one id to the
+# next, so `end & other["<seven words>"] --> x` read as the keyword statement
+# `end` and exited 0 with no output at all. Every keyword is a case below, for
+# the reason the two keyword loops already give.
+#
+# The ninth, same review, in this file: the drift guard that reads SKILL.md.
+# It grepped line by line, so "80 characters" split by the prose wrap went
+# unreported for as long as the guard existed. It typed four, six and eighty,
+# so those three words were the whole of what it knew. And it found the exempt
+# copy by the fence around it, so a language tag on that fence reported the
+# exempt copy itself. The guard is now tests/lib/budget-drift-guard.py, which
+# reads the file whole and takes the copy of --limits as its exemption.
+#
+# The tenth, reviewing PR #34 on 2026-09-10: the first fix for the ninth took
+# the numbers to search for from --limits, so it searched for the limits of the
+# day and nothing else. A limit changing is exactly when the prose goes stale,
+# and the stale number is the old one, which that guard had just stopped
+# looking for. It also refused any number it could not spell in English, so
+# raising the character budget to 100 failed the suite over the guard's own
+# word list while SKILL.md was correct. Any number beside a budget word is
+# drift now, spelled or typed, and no number is refused. The fixtures below
+# drive the guard over a superseded limit, a copy the wrap splits, and a file
+# with no copy to exempt: a guard proved only against a file that passes
+# reports coverage it has not got.
+#
 # What is deliberately NOT covered: rendering (another test owns it) and the
 # wording of SKILL.md's prose, only the lines it must reproduce verbatim.
 set -uo pipefail
@@ -730,13 +757,37 @@ for keyword in flowchart graph subgraph direction classDef class linkStyle style
   fi
 done
 
-# The mirror of the loop above, with no ";" after the keyword: refused, and
-# the message names the separator. Mermaid needs a separator to end each of
-# these statements, so a node packed on without one is drawn by nothing -- the
-# line fails to parse and the whole diagram with it. The first round of this
-# card declared that swallowing correct, on the grounds that the packed text
-# was the keyword's operand; review of PR #31 on 2026-09-10 measured mermaid's
-# own parser and found `style a fill:#f00 c1["<200 characters>"]` renders no
+# A keyword-spelled node id at the head of a node list: the label on the node
+# after the "&" is measured, and the message names the node the label belongs
+# to. Before the fix reviewed in PR #30 on 2026-09-10, `continues_a_node()` did
+# not count "&" as node syntax, so `end & other["<seven words>"] --> x` read as
+# the keyword statement `end` and exited 0 with no output at all. Every keyword
+# the checker knows is tried here, for the reason the two loops above try every
+# one of them: a fix that covers one keyword looks exactly like a fix for all.
+for keyword in flowchart graph subgraph direction classDef class linkStyle style end; do
+  {
+    printf '```mermaid\nflowchart TD\n  a["one"] --> b["two"]\n'
+    printf '  %s & other["one two three four five six seven"] --> x["ok"]\n' "$keyword"
+    printf '```\n'
+  } >"$work_dir/keyword-node-list-head.md"
+  if out="$(python3 "$checker" "$work_dir/keyword-node-list-head.md" 2>&1)"; then
+    bad "the keyword \"$keyword\" heading a node list hid an over-budget label, exit 0"
+  else
+    case "$out" in
+      *"node other"*"7 words"*)
+        ok "the keyword \"$keyword\" heading a node list still measures the node after the \"&\"" ;;
+      *) bad "keyword \"$keyword\" heading a node list refused, but not naming node other: $out" ;;
+    esac
+  fi
+done
+
+# The mirror of the `$keyword;` loop above, with no ";" after the keyword:
+# refused, and the message names the separator. Mermaid needs a separator to
+# end each of these statements, so a node packed on without one is drawn by
+# nothing: the line fails to parse and the whole diagram with it. The first
+# round of this card declared that swallowing correct, on the grounds that the
+# packed text was the keyword's operand; review of PR #31 on 2026-09-10 measured
+# mermaid's own parser and found `style a fill:#f00 c1["<200 characters>"]` renders no
 # node and no edge, so the checker was reporting a valid graph for a block that
 # draws nothing -- the hole this card had just closed for `subgraph`.
 #
@@ -1243,7 +1294,8 @@ done
 # SKILL.md wraps its prose at eighty columns; the checker's --limits prints
 # two unwrapped lines. Whitespace is collapsed on both sides before comparing
 # so the wrap point is not mistaken for a real difference.
-checker_limits="$(python3 "$checker" --limits | tr -s '[:space:]' ' ' | sed -e 's/^ //' -e 's/ $//')"
+limits="$(python3 "$checker" --limits)"
+checker_limits="$(printf '%s\n' "$limits" | tr -s '[:space:]' ' ' | sed -e 's/^ //' -e 's/ $//')"
 skill_words="$(tr -s '[:space:]' ' ' <"$skill")"
 case "$skill_words" in
   *"$checker_limits"*)
@@ -1252,7 +1304,7 @@ case "$skill_words" in
   *)
     bad "SKILL.md and bin/check-plan-graph.py --limits disagree.
 --limits says:
-$(python3 "$checker" --limits)
+$limits
 
 If bin/check-plan-graph.py was changed, SKILL.md's budget sentence was not
 updated to match. If SKILL.md was changed, its budget sentence no longer
@@ -1260,32 +1312,97 @@ reads as the checker's LIMITS constant, word for word."
     ;;
 esac
 
-# SKILL.md is allowed exactly one copy of the budget numbers: the fenced block
-# just compared above, verbatim, against --limits. Every other line that types
-# "four", "six", "eighty" or a digit against words/lines/characters is a
-# second copy quietly drifting out of step with Budget's own numbers --
-# what "a four-word budget" was, in prose nothing compared to the constant,
-# until round-2 review of PR #25 caught it on 2026-09-09.
-budget_marker="$(grep -n '\*\*The budget\*\*' "$skill" | head -1 | cut -d: -f1)"
-if [[ -z "$budget_marker" ]]; then
-  bad "SKILL.md has no \"**The budget**\" marker; the drift guard cannot find the one fenced copy to exempt"
+# SKILL.md is allowed exactly one copy of the budget numbers: the copy of
+# --limits matched above. Every other number it names beside "words", "lines"
+# or "characters" is a second copy, drifting out of step with MAX_LABEL_WORDS
+# and friends -- what "a four-word budget" was, in prose nothing compared to
+# the constant, until round-2 review of PR #25 caught it on 2026-09-09.
+#
+# The guard is a tracked file, not a heredoc, so bin/check-syntax.sh parses it
+# as Python like every other source here. It takes the file it reads as an
+# argument, so SKILL.md and the fixtures below go through the same code: a
+# guard whose only input is a file that passes reports coverage it has not got.
+guard="$repo_root/tests/lib/budget-drift-guard.py"
+
+# Its three answers are reported apart. A guard that crashes, or one that finds
+# no copy of --limits to exempt, says nothing about drift, and reporting either
+# as drift sends the reader to edit a file that is already right.
+drift() {
+  guard_out="$(python3 "$guard" "$1" "$limits" 2>&1)"
+  guard_exit=$?
+}
+
+drift "$skill"
+case "$guard_exit" in
+  0) ok "SKILL.md states no budget number outside its one copy of --limits" ;;
+  1) bad "SKILL.md states a budget number outside its one copy of --limits:
+$guard_out
+The budget is stated once, in the block that reproduces --limits. Point each of
+these at that block, or reword it to name no number. A second copy drifts when
+a limit changes, and a stale one still reads as the rule." ;;
+  *) bad "the drift guard could not read SKILL.md, so nothing was checked:
+$guard_out" ;;
+esac
+
+# A number the checker no longer enforces: reported. This is the drift the
+# guard exists to catch -- a limit changed, and the prose kept the old number
+# -- and a guard that searches only for today's limits is the one thing that
+# cannot see it. Review of PR #34 on 2026-09-10 found exactly that version
+# here, where the grep it replaced had caught this case.
+{
+  printf '**The budget**, enforced by the checker:\n\n```text\n%s\n```\n\n' "$limits"
+  printf 'A label line holds seven words and fits in 72 characters.\n'
+} >"$work_dir/stale-budget.md"
+drift "$work_dir/stale-budget.md"
+if [[ "$guard_exit" -ne 1 ]]; then
+  bad "the drift guard read a superseded limit as no offender at all (exit $guard_exit):
+$guard_out"
 else
-  fence_bounds="$(grep -n '^```$' "$skill" | cut -d: -f1 | awk -v m="$budget_marker" '$1 >= m' | sed -n '1p;2p')"
-  fence_start="$(printf '%s\n' "$fence_bounds" | sed -n '1p')"
-  fence_end="$(printf '%s\n' "$fence_bounds" | sed -n '2p')"
-  if [[ -z "$fence_start" || -z "$fence_end" ]]; then
-    bad "\"**The budget**\" in SKILL.md is not followed by a fenced block; the drift guard cannot find the one copy to exempt"
-  else
-    offenders="$(grep -n -E '(\b[0-9]+|four|six|eighty)[ -](words?|lines?|characters?)' "$skill" |
-      awk -F: -v s="$fence_start" -v e="$fence_end" '$1 < s || $1 > e')"
-    if [[ -z "$offenders" ]]; then
-      ok "no line of SKILL.md outside the fenced budget block types a budget number"
-    else
-      bad "SKILL.md types a budget number outside its one fenced copy (lines $fence_start-$fence_end):
-$offenders
-Point this line at the fenced block instead of restating the number."
-    fi
-  fi
+  case "$guard_out" in
+    *"seven words"*"72 characters"*)
+      ok "the drift guard reports a number the checker no longer enforces" ;;
+    *) bad "the drift guard refused the fixture, but not for the superseded numbers:
+$guard_out" ;;
+  esac
+fi
+
+# A copy the prose wrap splits in two: reported, with the line it starts on.
+# Invisibility to the wrap is the fault that let "80 characters" live in the
+# file this guards. The fence carries a language tag, because the guard this
+# replaced found the exempt copy by the fence and a tag moved the range.
+#
+# The line is computed from --limits, not typed: a line added to LIMITS moves
+# the copy down the fixture, and a fixture that pins the number reports the
+# guard broken when only the fixture moved.
+wrapped_line=$(( $(printf '%s\n' "$limits" | wc -l) + 6 ))
+{
+  printf '**The budget**, enforced by the checker:\n\n```text\n%s\n```\n\n' "$limits"
+  printf 'Every label line renders inside eighty\ncharacters, so this copy drifts.\n'
+} >"$work_dir/wrapped-budget.md"
+drift "$work_dir/wrapped-budget.md"
+if [[ "$guard_exit" -ne 1 ]]; then
+  bad "the drift guard read a budget number split by a newline as no offender (exit $guard_exit):
+$guard_out"
+else
+  case "$guard_out" in
+    *"wrapped-budget.md:$wrapped_line: eighty characters"*)
+      ok "the drift guard reports a budget number the wrap splits, with its line number" ;;
+    *) bad "the drift guard refused the fixture, but not for the wrapped copy on line $wrapped_line:
+$guard_out" ;;
+  esac
+fi
+
+# A file stating no copy of --limits at all: refused as unanswerable, not
+# reported as drift. The guard this replaced gave every failure the same
+# message, so a crash read as "SKILL.md restates the budget" and sent the
+# reader to edit a file that was already right (review, 2026-09-10).
+printf 'A label line holds four words.\n' >"$work_dir/no-budget.md"
+drift "$work_dir/no-budget.md"
+if [[ "$guard_exit" -eq 2 ]]; then
+  ok "a file stating no copy of --limits is refused as unanswerable, not as drift"
+else
+  bad "a file with no copy of --limits to exempt exited $guard_exit, not 2:
+$guard_out"
 fi
 
 exit "$fail"

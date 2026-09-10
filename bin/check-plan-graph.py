@@ -421,14 +421,20 @@ def statement_end(line: str, at: int) -> int:
 def continues_a_node(line: str, at: int) -> bool:
     """Whether node syntax continues at `at`, so the word before it was an id.
 
-    Three things follow a node id and never follow a keyword statement: the
-    brackets round its label, a `:::className` suffix, and a link, which mermaid
-    lets a space precede as in `end --> b`.
+    Four things follow a node id and never follow a keyword statement: the
+    brackets round its label, a `:::className` suffix, a link, which mermaid
+    lets a space precede as in `end --> b`, and an `&` joining it to the next id
+    in a node list, which mermaid lets a space precede too. Review of PR #30 on
+    2026-09-10 found `end & other["<seven words>"] --> x` reaching the diagram
+    unmeasured, with exit 0. `end` read as the keyword statement, not as a node
+    id heading a list, so nothing after the `&` was scanned at all.
     """
+    after_space = skip_space(line, at)
     return bool(
         OPEN_RUN.match(line, at)
         or CLASS_SUFFIX.match(line, at)
-        or LINK.match(line, skip_space(line, at))
+        or LINK.match(line, after_space)
+        or line[after_space : after_space + 1] == "&"
     )
 
 
