@@ -29,6 +29,13 @@
 # that scan() never read, two valid node forms it refused as unreadable, and a
 # failure message that could name a node id no link in the graph produces.
 #
+# The first fix for that third failure had two holes of its own, found in the
+# next review round on 2026-09-09. An inline edge label ended at any run of
+# link characters, so `a -- reads the plan, then... builds --> b` was cut at
+# the "..." and passed at five words against a budget of four. And a line whose
+# first word was a keyword was still skipped whole, so a node packed after a
+# `classDef` on that line was never measured. Both exited 0 with no output.
+#
 # What is deliberately NOT covered: rendering (another test owns it) and the
 # wording of SKILL.md's prose, only the two lines it must reproduce verbatim.
 set -uo pipefail
@@ -272,6 +279,82 @@ else
     *"node ob"*) bad "refused, but naming node ob, which the graph does not contain: $out" ;;
     *"node b"*"words"*) ok "an unspaced o-headed link is refused, naming the node it actually links to" ;;
     *) bad "refused, but not naming node b: $out" ;;
+  esac
+fi
+
+# Link characters inside an inline edge label are label text, not the end of
+# the label. Review of PR #18 on 2026-09-09 found the closer matching any run
+# of link characters, so this line was cut at the "..." and only its first
+# three words were measured -- exit 0, five words against a budget of four.
+cat >"$work_dir/inline-edge-dots.md" <<'MD'
+```mermaid
+flowchart TD
+  a -- reads the plan, then... builds --> b
+```
+MD
+if out="$(python3 "$checker" "$work_dir/inline-edge-dots.md" 2>&1)"; then
+  bad "an inline edge label was cut at the \"...\" inside it and passed at 5 words"
+else
+  case "$out" in
+    *"reads the plan, then... builds"*"5 words"*)
+      ok "an inline edge label is measured whole, past the link characters inside it" ;;
+    *) bad "refused, but not for the whole label at five words: $out" ;;
+  esac
+fi
+
+# A statement packed after a styling statement on the same line: measured. The
+# ";" fix of 2026-09-09 landed inside scan(), but check_line still skipped a
+# whole line whose first word was a keyword, so this one exited 0 with no
+# output. Five plans under docs/plans/ open a line with classDef.
+cat >"$work_dir/after-classdef.md" <<'MD'
+```mermaid
+flowchart TD
+  classDef chg fill:#eee; c1["one two three four five six seven eight"]
+```
+MD
+if out="$(python3 "$checker" "$work_dir/after-classdef.md" 2>&1)"; then
+  bad "a node label packed after classDef on one line was accepted at 8 words"
+else
+  case "$out" in
+    *"node c1"*"words"*) ok "a node label after a styling statement on the same line is measured" ;;
+    *) bad "refused, but not naming node c1: $out" ;;
+  esac
+fi
+
+# An over-budget subgraph title: refused. The title is read as one statement
+# among the others on its line, so this also proves a ";" does not hide it.
+cat >"$work_dir/wordy-cluster.md" <<'MD'
+```mermaid
+flowchart TD
+  subgraph out["a cluster title with far too many words"]
+  end
+```
+MD
+if out="$(python3 "$checker" "$work_dir/wordy-cluster.md" 2>&1)"; then
+  bad "a subgraph title with too many words was accepted"
+else
+  case "$out" in
+    *"subgraph title"*"words"*) ok "a subgraph title with too many words is refused" ;;
+    *) bad "refused, but not for the title word count: $out" ;;
+  esac
+fi
+
+# A label already measured is reported even when a later statement on the same
+# line cannot be read. An author told only about the second one fixes it and
+# only then learns about the first.
+cat >"$work_dir/measured-then-unreadable.md" <<'MD'
+```mermaid
+flowchart TD
+  n1["one two three four five six seven"]; a -- b
+```
+MD
+if out="$(python3 "$checker" "$work_dir/measured-then-unreadable.md" 2>&1)"; then
+  bad "an over-budget label before an unreadable statement was accepted"
+else
+  case "$out" in
+    *"node n1"*"words"*"never closes"*)
+      ok "a label measured before an unreadable statement is reported with it" ;;
+    *) bad "refused, but not naming both the label and the unreadable statement: $out" ;;
   esac
 fi
 
