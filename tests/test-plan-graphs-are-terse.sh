@@ -81,13 +81,22 @@
 # The ninth, same review, in this file: the drift guard that reads SKILL.md.
 # It grepped line by line, so "80 characters" split by the prose wrap went
 # unreported for as long as the guard existed. It typed four, six and eighty,
-# so a limit changing went unsearched in silence. It matched any number beside
-# "words", "lines" or "characters", so a sentence about something else failed
-# the suite with advice that was wrong for that line. And it found the exempt
+# so those three words were the whole of what it knew. And it found the exempt
 # copy by the fence around it, so a language tag on that fence reported the
-# exempt copy itself. The guard now renders what to search for from --limits,
-# and a fixture below drives it over a wrapped copy, because a guard proved
-# only against a file that passes reports coverage it has not got.
+# exempt copy itself. The guard is now tests/lib/budget-drift-guard.py, which
+# reads the file whole and takes the copy of --limits as its exemption.
+#
+# The tenth, reviewing PR #34 on 2026-09-10: the first fix for the ninth took
+# the numbers to search for from --limits, so it searched for the limits of the
+# day and nothing else. A limit changing is exactly when the prose goes stale,
+# and the stale number is the old one, which that guard had just stopped
+# looking for. It also refused any number it could not spell in English, so
+# raising the character budget to 100 failed the suite over the guard's own
+# word list while SKILL.md was correct. Any number beside a budget word is
+# drift now, spelled or typed, and no number is refused. The fixtures below
+# drive the guard over a superseded limit, a copy the wrap splits, and a file
+# with no copy to exempt: a guard proved only against a file that passes
+# reports coverage it has not got.
 #
 # What is deliberately NOT covered: rendering (another test owns it) and the
 # wording of SKILL.md's prose, only the lines it must reproduce verbatim.
@@ -841,141 +850,96 @@ reads as the checker's LIMITS constant, word for word."
 esac
 
 # SKILL.md is allowed exactly one copy of the budget numbers: the copy of
-# --limits matched above. Every other budget number in the file is a second
-# copy quietly drifting out of step with MAX_LABEL_WORDS and friends -- what "a
-# four-word budget" was, in prose nothing compared to the constant, until
-# round-2 review of PR #25 caught it on 2026-09-09.
+# --limits matched above. Every other number it names beside "words", "lines"
+# or "characters" is a second copy, drifting out of step with MAX_LABEL_WORDS
+# and friends -- what "a four-word budget" was, in prose nothing compared to
+# the constant, until round-2 review of PR #25 caught it on 2026-09-09.
 #
-# The guard below takes the file it reads as an argument, so SKILL.md and the
-# fixture that proves the guard sees a wrapped copy go through the same code.
-guard="$work_dir/budget-drift-guard.py"
-cat >"$guard" <<'PY'
-"""Report every budget number argv[1] types outside its one copy of --limits.
+# The guard is a tracked file, not a heredoc, so bin/check-syntax.sh parses it
+# as Python like every other source here. It takes the file it reads as an
+# argument, so SKILL.md and the fixtures below go through the same code: a
+# guard whose only input is a file that passes reports coverage it has not got.
+guard="$repo_root/tests/lib/budget-drift-guard.py"
 
-argv[2] is that --limits text. The numbers searched for and the exempt wording
-both come from the checker, so nothing here goes stale when a limit changes.
+# Its three answers are reported apart. A guard that crashes, or one that finds
+# no copy of --limits to exempt, says nothing about drift, and reporting either
+# as drift sends the reader to edit a file that is already right.
+drift() {
+  guard_out="$(python3 "$guard" "$1" "$limits" 2>&1)"
+  guard_exit=$?
+}
 
-Four faults of the guard this replaced, all found in review on 2026-09-10:
-it read SKILL.md line by line, so "80 characters" split by the prose wrap went
-unreported for as long as the guard existed; it typed today's limits, so it
-went blind in silence the moment one changed; it matched any number beside
-"words", "lines" or "characters" anywhere in the file, so a sentence about
-something else failed the suite with advice that was wrong for that line; and
-it located the exempt copy by the fence around it, so a language tag on that
-fence shifted the range and reported the exempt copy itself.
-"""
+drift "$skill"
+case "$guard_exit" in
+  0) ok "SKILL.md states no budget number outside its one copy of --limits" ;;
+  1) bad "SKILL.md states a budget number outside its one copy of --limits:
+$guard_out
+The budget is stated once, in the block that reproduces --limits. Point each of
+these at that block, or reword it to name no number. A second copy drifts when
+a limit changes, and a stale one still reads as the rule." ;;
+  *) bad "the drift guard could not read SKILL.md, so nothing was checked:
+$guard_out" ;;
+esac
 
-import pathlib
-import re
-import sys
-
-# Nothing in the standard library spells a number in English, so these words
-# are unavoidable. A spelled copy is what review found on 2026-09-10, in "a
-# four-word budget", so searching for the digits alone leaves the found bug
-# uncovered. Every number below one hundred is spelled, rather than the six a
-# first version listed: a guard that fails the suite because somebody raised a
-# limit to a number it was never taught costs a card an attempt, exactly as a
-# blind guard costs a review round. A number it cannot spell still refuses,
-# because going unsearched in silence is the fault this replaced.
-ONES = (
-    "one two three four five six seven eight nine ten eleven twelve thirteen "
-    "fourteen fifteen sixteen seventeen eighteen nineteen"
-).split()
-TENS = "twenty thirty forty fifty sixty seventy eighty ninety".split()
-
-UNITS = r"(?:word|line|character)s?"
-
-
-def spelled(number: int) -> str | None:
-    """`number` in English words, or None where this guard cannot spell it."""
-    if 1 <= number < 20:
-        return ONES[number - 1]
-    if 20 <= number < 100:
-        ten = TENS[number // 10 - 2]
-        return ten if number % 10 == 0 else f"{ten}-{ONES[number % 10 - 1]}"
-    return None
-
-
-def main() -> int:
-    path, limits = pathlib.Path(sys.argv[1]), sys.argv[2]
-    text = path.read_text(encoding="utf-8")
-
-    # Every run of whitespace in --limits matches a run of whitespace in the
-    # file, so the one exempt copy is found wherever the prose wraps it. That
-    # span is the exemption, so no fence has to be found at all.
-    exempt = re.search(r"\s+".join(re.escape(word) for word in limits.split()), text)
-    if exempt is None:
-        print(f"{path} states no copy of --limits, so the guard has nothing to exempt")
-        return 1
-
-    numbers = sorted({int(digits) for digits in re.findall(r"\d+", limits)})
-    unspellable = [number for number in numbers if spelled(number) is None]
-    if unspellable:
-        names = ", ".join(str(number) for number in unspellable)
-        print(
-            f"the guard cannot spell {names} in English, so a spelled copy of "
-            "it would go unsearched; widen ONES and TENS above to reach it"
-        )
-        return 1
-
-    faults = []
-    for number in numbers:
-        # A hyphen in the spelling matches a space too, so "sixty four words"
-        # is not a copy that hides behind English's own punctuation.
-        word = spelled(number).replace("-", r"[\s-]")
-        phrase = rf"\b(?:{number}|{word})[\s-]+{UNITS}\b"
-        for hit in re.finditer(phrase, text, re.IGNORECASE):
-            if exempt.start() <= hit.start() < exempt.end():
-                continue
-            line = text.count("\n", 0, hit.start()) + 1
-            faults.append((line, " ".join(hit.group().split())))
-    for line, said in sorted(faults):
-        print(f"{path}:{line}: {said}")
-    return 1 if faults else 0
-
-
-sys.exit(main())
-PY
-
-if out="$(python3 "$guard" "$skill" "$limits" 2>&1)"; then
-  ok "SKILL.md states no budget number outside its one copy of --limits"
+# A number the checker no longer enforces: reported. This is the drift the
+# guard exists to catch -- a limit changed, and the prose kept the old number
+# -- and a guard that searches only for today's limits is the one thing that
+# cannot see it. Review of PR #34 on 2026-09-10 found exactly that version
+# here, where the grep it replaced had caught this case.
+{
+  printf '**The budget**, enforced by the checker:\n\n```text\n%s\n```\n\n' "$limits"
+  printf 'A label line holds seven words and fits in 72 characters.\n'
+} >"$work_dir/stale-budget.md"
+drift "$work_dir/stale-budget.md"
+if [[ "$guard_exit" -ne 1 ]]; then
+  bad "the drift guard read a superseded limit as no offender at all (exit $guard_exit):
+$guard_out"
 else
-  bad "SKILL.md states a budget number outside its one copy of --limits:
-$out
-Point each of these at the copy of --limits instead of restating the number."
+  case "$guard_out" in
+    *"seven words"*"72 characters"*)
+      ok "the drift guard reports a number the checker no longer enforces" ;;
+    *) bad "the drift guard refused the fixture, but not for the superseded numbers:
+$guard_out" ;;
+  esac
 fi
 
-# The guard, run over a file that holds the exempt copy AND a second copy the
-# wrap splits: it reports the wrapped one. A guard whose only input is a file
-# that passes reports coverage it has not got, and invisibility to the wrap is
-# exactly the fault that let "80 characters" live in the file it guards.
+# A copy the prose wrap splits in two: reported, with the line it starts on.
+# Invisibility to the wrap is the fault that let "80 characters" live in the
+# file this guards. The fence carries a language tag, because the guard this
+# replaced found the exempt copy by the fence and a tag moved the range.
+#
+# The line is computed from --limits, not typed: a line added to LIMITS moves
+# the copy down the fixture, and a fixture that pins the number reports the
+# guard broken when only the fixture moved.
+wrapped_line=$(( $(printf '%s\n' "$limits" | wc -l) + 6 ))
 {
   printf '**The budget**, enforced by the checker:\n\n```text\n%s\n```\n\n' "$limits"
   printf 'Every label line renders inside eighty\ncharacters, so this copy drifts.\n'
 } >"$work_dir/wrapped-budget.md"
-if out="$(python3 "$guard" "$work_dir/wrapped-budget.md" "$limits" 2>&1)"; then
-  bad "the drift guard read a budget number split by a newline as no offender at all"
+drift "$work_dir/wrapped-budget.md"
+if [[ "$guard_exit" -ne 1 ]]; then
+  bad "the drift guard read a budget number split by a newline as no offender (exit $guard_exit):
+$guard_out"
 else
-  case "$out" in
-    *"wrapped-budget.md:9: eighty characters"*)
+  case "$guard_out" in
+    *"wrapped-budget.md:$wrapped_line: eighty characters"*)
       ok "the drift guard reports a budget number the wrap splits, with its line number" ;;
-    *) bad "the drift guard refused the fixture, but not for the wrapped copy on line 9: $out" ;;
+    *) bad "the drift guard refused the fixture, but not for the wrapped copy on line $wrapped_line:
+$guard_out" ;;
   esac
 fi
 
-# A budget number the guard cannot spell fails, and says so. The guard it
-# replaced typed four, six and eighty, so a limit changing to a number nothing
-# had taught it went unsearched with no word to anyone (review, 2026-09-10).
-# The number here is past the words above, which reach ninety-nine.
-unspellable="Any label line: at most 128 characters."
-printf '%s\n' "$unspellable" >"$work_dir/unspellable-budget.md"
-if out="$(python3 "$guard" "$work_dir/unspellable-budget.md" "$unspellable" 2>&1)"; then
-  bad "the drift guard searched for a number it cannot spell in English and reported nothing"
+# A file stating no copy of --limits at all: refused as unanswerable, not
+# reported as drift. The guard this replaced gave every failure the same
+# message, so a crash read as "SKILL.md restates the budget" and sent the
+# reader to edit a file that was already right (review, 2026-09-10).
+printf 'A label line holds four words.\n' >"$work_dir/no-budget.md"
+drift "$work_dir/no-budget.md"
+if [[ "$guard_exit" -eq 2 ]]; then
+  ok "a file stating no copy of --limits is refused as unanswerable, not as drift"
 else
-  case "$out" in
-    *"cannot spell"*) ok "a budget number the drift guard cannot spell fails the guard, naming it" ;;
-    *) bad "the drift guard failed on an unspellable number, but not saying so: $out" ;;
-  esac
+  bad "a file with no copy of --limits to exempt exited $guard_exit, not 2:
+$guard_out"
 fi
 
 exit "$fail"
