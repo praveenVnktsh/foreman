@@ -7,11 +7,26 @@
 # but docs/specs/2026-08-27-autonomous-board-runner-design.md still said "the
 # five states and four labels" and named none of them.
 #
-# This reads the required docs off the contract, never off a hardcoded list --
-# a fourth doc added to board.toml is covered by this test without an edit
-# here -- and it reads STATE_ROLES out of resolve-ids.py rather than retyping
-# the names, because a test that restates what it checks stays green while the
-# source says something else.
+# The check is narrow on purpose. It pins ONE sentence per document -- the one
+# of the shape "<count> states and <count> labels" -- and reads both numbers
+# against len(STATE_ROLES) and len(LABEL_ROLES). No other number in any doc is
+# looked at. An earlier version flagged every number standing before the word
+# "states", anywhere. Correct prose counting a subset of the columns -- "the
+# two states a card can be dispatched from" -- then reddened the whole suite,
+# and a red suite blocks every merge on the board. That is a worse failure
+# than the one this test prevents.
+#
+# Three properties this file is built on:
+#   - It reads the required docs off the contract, never off a list retyped
+#     here. A fourth doc added to board.toml is covered without an edit here.
+#   - It reads both tables out of bin/resolve-ids.py rather than retyping the
+#     names, because a test that restates what it checks stays green while the
+#     source says something else.
+#   - It matches each document on its own, with whitespace normalised first.
+#     Searching the docs concatenated let an ordinary English word in one doc
+#     -- `Done`, `Todo`, `Backlog` -- stand in for a column name a different
+#     doc was supposed to carry. Scanning line by line let a paragraph reflow
+#     hide a stale count across a line break.
 set -uo pipefail
 
 here="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
@@ -69,10 +84,10 @@ case "$docs_result" in
     ;;
 esac
 
-# --- Parse STATE_ROLES out of resolve-ids.py, and check both claims --------
+# --- Read both tables out of resolve-ids.py, and check the pinned sentence --
 #
-# One python pass does both checks (names present, no stale count) so the
-# STATE_ROLES parse -- and the refusal if it comes back empty -- happens once.
+# One python pass does every check, so the two parses -- and the refusal if
+# either comes back empty -- happen once.
 check_output="$(python3 - "$root/bin/resolve-ids.py" "$root" "${required_docs[@]}" <<'PY'
 import os
 import re
@@ -85,51 +100,105 @@ import sys
 resolver_path, root, doc_paths = sys.argv[1], sys.argv[2], sys.argv[3:]
 resolver = open(resolver_path, encoding="utf-8").read()
 
-m = re.search(r"STATE_ROLES = \[(.*?)\]", resolver, re.DOTALL)
-roles = re.findall(r'\("STATE_[A-Z_]+",\s*"([^"]+)"\)', m.group(1)) if m else []
-if not roles:
-    print("REFUSE STATE_ROLES in bin/resolve-ids.py parsed to nothing; "
-          "this test would check nothing")
+
+def parse_roles(table, role_prefix):
+    """Pull the display names out of one `("ROLE", "Name")` table."""
+    block = re.search(re.escape(table) + r" = \[(.*?)\]", resolver, re.DOTALL)
+    if not block:
+        return []
+    row = r'\("' + role_prefix + r'_[A-Z_]+",\s*"([^"]+)"\)'
+    return re.findall(row, block.group(1))
+
+
+states = parse_roles("STATE_ROLES", "STATE")
+labels = parse_roles("LABEL_ROLES", "LABEL")
+
+empty = [name for name, roles in (("STATE_ROLES", states), ("LABEL_ROLES", labels))
+         if not roles]
+if empty:
+    print("REFUSE " + " and ".join(empty) + " in bin/resolve-ids.py parsed to "
+          "nothing; this test would check nothing")
     sys.exit(0)
 
-docs = {p: open(os.path.join(root, p), encoding="utf-8").read() for p in doc_paths}
-lines = {p: text.split("\n") for p, text in docs.items()}
-all_text = "\n".join(docs.values())
-
-problems = []
-
-# Claim 1: every STATE_ROLES display name appears somewhere in the required
-# docs, taken together, case-sensitively and on word boundaries -- so `Plan`
-# does not match `plans`.
-for name in roles:
-    if not re.search(r"\b" + re.escape(name) + r"\b", all_text):
-        problems.append(f"no required doc names the state `{name}` "
-                         f"(bin/resolve-ids.py's STATE_ROLES pins it)")
-
-# Claim 2: no required doc quotes a stale state count. A number word or a
-# digit run immediately before "states" (case-insensitive) must spell
-# len(STATE_ROLES) -- today's count -- or it is describing a board that no
-# longer exists.
+# Both directions off one list: the index is the value, the list is the word.
 WORDS = ["zero", "one", "two", "three", "four", "five", "six", "seven",
          "eight", "nine", "ten", "eleven", "twelve"]
-word_to_n = {w: i for i, w in enumerate(WORDS)}
-count_re = re.compile(r"\b(" + "|".join(WORDS) + r"|\d+)\s+states\b", re.IGNORECASE)
-expected = len(roles)
+WORD_TO_N = {word: n for n, word in enumerate(WORDS)}
+NUMBER = r"(?:" + "|".join(WORDS) + r"|\d+)"
 
-for path, text in lines.items():
-    for lineno, line in enumerate(text, start=1):
-        for match in count_re.finditer(line):
-            token = match.group(1).lower()
-            found = word_to_n[token] if token in word_to_n else int(token)
-            if found != expected:
-                problems.append(
-                    f"{path}:{lineno} says {found} states, but bin/resolve-ids.py's "
-                    f"STATE_ROLES now has {expected}: {line.strip()!r}")
+# The one sentence shape this test reads a count from, in any required doc.
+# docs/specs/2026-08-27-autonomous-board-runner-design.md carries it today:
+# "and the seven states and five labels -- to ids".
+PINNED = re.compile(r"\b(" + NUMBER + r")\s+states\s+and\s+(" + NUMBER + r")\s+labels\b",
+                    re.IGNORECASE)
+
+# How far either side of a match to look for a sentence boundary. A heading
+# carries no full stop, so an unbounded search would quote half a document.
+QUOTE_WINDOW = 200
+
+
+def number_of(token):
+    token = token.lower()
+    return WORD_TO_N[token] if token in WORD_TO_N else int(token)
+
+
+def sentence_around(text, start, end):
+    """Quote the sentence holding a match.
+
+    A line number is gone once the document is normalised, so the quote is
+    what tells the reader where to go.
+    """
+    left = text.rfind(". ", max(0, start - QUOTE_WINDOW), start)
+    begin = left + 2 if left >= 0 else max(0, start - QUOTE_WINDOW)
+    right = text.find(". ", end, end + QUOTE_WINDOW)
+    stop = right + 1 if right >= 0 else min(len(text), end + QUOTE_WINDOW)
+    return text[begin:stop]
+
+
+problems = []
+carriers = []
+
+for path in doc_paths:
+    raw = open(os.path.join(root, path), encoding="utf-8").read()
+    # Every run of whitespace becomes one space, so a paragraph reflow cannot
+    # split a count away from the noun it counts.
+    text = re.sub(r"\s+", " ", raw)
+
+    matches = list(PINNED.finditer(text))
+    if not matches:
+        continue
+    carriers.append(path)
+
+    for match in matches:
+        found_states = number_of(match.group(1))
+        found_labels = number_of(match.group(2))
+        if (found_states, found_labels) == (len(states), len(labels)):
+            continue
+        problems.append(
+            f"{path} says {found_states} states and {found_labels} labels, but "
+            f"bin/resolve-ids.py has {len(states)} states and {len(labels)} "
+            f"labels: {sentence_around(text, match.start(), match.end())!r}")
+
+    # A doc that pins the counts has to name the columns too -- checked in
+    # this doc alone, because `Done`, `Todo` and `Backlog` are ordinary
+    # English words that another required doc will contain by accident.
+    # Case-sensitive, on word boundaries, so `Plan` does not match `plans`.
+    for name in states:
+        if not re.search(r"\b" + re.escape(name) + r"\b", text):
+            problems.append(
+                f"{path} pins the counts but never names the state `{name}` "
+                f"(bin/resolve-ids.py's STATE_ROLES pins it)")
+
+if not carriers:
+    problems.append(
+        "no required doc says \"<count> states and <count> labels\", so this "
+        "check reads nothing; looked in: " + ", ".join(doc_paths))
 
 if problems:
     print("FAIL " + "\n     ".join(problems))
 else:
-    print(f"OK {expected} states, all named, no stale count")
+    print(f"OK {len(states)} states and {len(labels)} labels, pinned and named in "
+          + ", ".join(carriers))
 PY
 )"
 
@@ -144,7 +213,7 @@ case "$check_output" in
     bad "${check_output#FAIL }"
     ;;
   *)
-    bad "unexpected output parsing STATE_ROLES against the required docs: $check_output"
+    bad "unexpected output checking the required docs against bin/resolve-ids.py: $check_output"
     ;;
 esac
 

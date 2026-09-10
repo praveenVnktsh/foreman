@@ -1148,7 +1148,7 @@ This task writes no code. It is the only evidence that Layer 1 works, and it is 
 
 - [ ] **Step 1: Create the Linear project and register the instance**
 
-Create project `foreman` in team PRA with the five states the contract expects. Then:
+Create project `foreman` in team PRA with the seven states the contract expects. Then:
 
 ```bash
 ~/.foreman/install/bin/boardctl add foreman --repo ~/.foreman/install \

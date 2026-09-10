@@ -54,7 +54,7 @@ import urllib.request
 
 DEFAULT_API_URL = "https://api.linear.app/graphql"
 
-# The six workflow states the board moves cards through (skills/board/
+# The workflow states the board moves cards through (skills/board/
 # SKILL.md), and the Linear state name each one resolves from. The role name
 # on the left is the board's own vocabulary and never changes; the name on the
 # right is what an operator sees in Linear and is free to rename -- which is
@@ -262,7 +262,7 @@ def resolve_project(api_url: str, key: str, team_id: str, name: str) -> str:
 
 
 def resolve_states(api_url: str, key: str, team_id: str) -> dict:
-    """Resolve the seven workflow states, and verify the to-pick-up one.
+    """Resolve the states listed in STATE_ROLES, and verify the to-pick-up one.
 
     Returns {role: id} for every role in STATE_ROLES.
     """
