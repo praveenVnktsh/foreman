@@ -24,10 +24,17 @@
 #
 # The third failure, found in review on 2026-09-09: a gate that reads the
 # labels inside the fence without ever asking whether the fence holds a graph.
-# A prose plan wrapped in a ```mermaid fence passed, an empty fence passed, and
-# a single 200-character token passed a budget counted in words. Each of the
-# three is a case below, because each one was accepted by the version of the
-# checker that this file already called green.
+# An empty fence passed, one-word-per-line text passed, and a single
+# 200-character token passed a budget counted in words. Each is a case below,
+# because each was accepted by the version of the checker that this file
+# already called green.
+#
+# The fourth, found in the review of the fix for the third: a budget calibrated
+# on what plans had already said rather than on what a plan must be able to
+# say, and a keyword line skipped whole, which let a label escape the budget by
+# moving one line up. A gate that refuses correct work costs a card an attempt
+# exactly as a gate that admits wrong work costs a review round, so both
+# directions are cases here: what must be refused, and what must be accepted.
 #
 # What is deliberately NOT covered: rendering (another test owns it) and the
 # wording of SKILL.md's prose, only the lines it must reproduce verbatim.
@@ -270,6 +277,101 @@ else
   case "$out" in
     *"node c1"*"characters"*) ok "a node label that is one 200-character token is refused" ;;
     *) bad "refused, but not for the character count: $out" ;;
+  esac
+fi
+
+# The label a plan MUST be able to write: a node naming the longest path this
+# repository tracks, in the form SKILL.md prescribes. The character budget was
+# first set from the widest label already in docs/plans/, which refused a
+# correct plan for six tracked files and offered no wording that would pass
+# (found in review on 2026-09-09). The longest path is read from git rather
+# than typed, so adding a longer one fails here -- where it is a budget to
+# raise -- instead of on a card, where it costs a plan attempt.
+longest_path="$(git -C "$repo_root" ls-files |
+  awk '{ if (length($0) > n) { n = length($0); p = $0 } } END { print p }')"
+if [[ -z "$longest_path" ]]; then
+  bad "git ls-files named no path; the budget cannot be checked against what a plan must say"
+else
+  {
+    printf '```mermaid\nflowchart TD\n'
+    printf '  c1["<b>c1 · %s</b> · CHANGE<br/>does the work<br/><i>opus · high</i>"] --> c2["<b>c2 · done</b>"]\n' \
+      "$longest_path"
+    printf '```\n'
+  } >"$work_dir/longest-path.md"
+  if out="$(python3 "$checker" "$work_dir/longest-path.md" 2>&1)"; then
+    ok "a node naming the longest tracked path is inside the budget"
+  else
+    bad "the budget refuses a plan node naming $longest_path, and SKILL.md offers no shorter form:
+$out"
+  fi
+fi
+
+# A label written on the header line: measured, not skipped. `flowchart TD;` is
+# a keyword line, and skipping the whole line let the 200-character label above
+# clear the budget by moving one line up (found in review on 2026-09-09).
+{
+  printf '```mermaid\n'
+  printf 'flowchart TD; a["%s"] --> b["ok"]\n' "$(printf 'x%.0s' {1..200})"
+  printf '```\n'
+} >"$work_dir/header-line-label.md"
+if out="$(python3 "$checker" "$work_dir/header-line-label.md" 2>&1)"; then
+  bad "a 200-character label on the header line was accepted"
+else
+  case "$out" in
+    *"node a"*"characters"*) ok "a label on the header line is measured, not skipped" ;;
+    *) bad "refused, but not for the character count: $out" ;;
+  esac
+fi
+
+# Mermaid's one-line form: accepted. The header line carries the only edge, so
+# a checker that skips that line reports a graph with one edge as having none.
+cat >"$work_dir/one-line.md" <<'MD'
+```mermaid
+graph TD; a["one"] --> b["two"]
+```
+MD
+if out="$(python3 "$checker" "$work_dir/one-line.md" 2>&1)"; then
+  [[ -z "$out" ]] && ok "a graph written on one line is accepted silently" \
+    || bad "accepted, but printed something: $out"
+else
+  bad "a graph whose only edge is on the header line was refused: $out"
+fi
+
+# A graph whose only link is invisible: refused. Mermaid draws `~~~` as
+# nothing, so the boxes state no relationship and the fence is a list again.
+cat >"$work_dir/invisible-link.md" <<'MD'
+```mermaid
+flowchart TD
+  a["one"] ~~~ b["two"]
+```
+MD
+if out="$(python3 "$checker" "$work_dir/invisible-link.md" 2>&1)"; then
+  bad "a graph whose only link is invisible was accepted"
+else
+  case "$out" in
+    *"no link between any two nodes"*) ok "a graph whose only link is invisible is refused" ;;
+    *) bad "refused, but not for the missing link: $out" ;;
+  esac
+fi
+
+# An unclosed %%{init directive: reported once, and never as an empty block.
+# The directive swallows every line after it, so the lines are unread, not
+# absent, and saying the block is empty would be false.
+cat >"$work_dir/unclosed-directive.md" <<'MD'
+```mermaid
+%%{init: {
+"theme": "base"
+flowchart TD
+  a["one"] --> b["two"]
+```
+MD
+if out="$(python3 "$checker" "$work_dir/unclosed-directive.md" 2>&1)"; then
+  bad "a block whose directive never closes was accepted"
+else
+  case "$out" in
+    *empty*) bad "an unread block was reported as empty: $out" ;;
+    *"never closed"*) ok "an unclosed directive is reported once, not as an empty block" ;;
+    *) bad "refused, but not for the unclosed directive: $out" ;;
   esac
 fi
 

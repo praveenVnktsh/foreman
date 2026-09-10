@@ -27,13 +27,22 @@ from pathlib import Path
 # Words catch prose. Characters catch width. A label must pass both, because
 # either budget alone has a hole: on 2026-09-03 an unquoted seventeen-word label
 # went unmeasured, and a single 200-character token is one word and clears any
-# word budget while filling the screen. 64 sits just above what a real plan
-# needs -- the widest label line in docs/plans/ on 2026-09-09 is 61 characters,
-# the test path in 2026-09-05-unselectable-renders.md.
+# word budget while filling the screen.
+#
+# The character budget is set by what a plan here has to be able to SAY, not by
+# what plans have said so far. A node names the file it builds, in the form
+# skills/graphplan/SKILL.md prescribes: `c1 · <path> · CHANGE`, which is the
+# path plus fourteen characters. The longest path this repository tracks is 57
+# characters, so that label is 71. A budget of 64, calibrated on the widest
+# label already in docs/plans/, refused a correct plan for six tracked files
+# and had no compliant wording to offer -- caught in review on 2026-09-09,
+# before it ever cost a card a plan attempt. 80 is the column this repository
+# wraps its prose at, and it leaves nine characters over the longest name a
+# plan must be able to write.
 MAX_NODE_LINES = 4
 MAX_WORDS_PER_LINE = 6
 MAX_LABEL_WORDS = 4
-MAX_LABEL_CHARS = 64
+MAX_LABEL_CHARS = 80
 
 LIMITS = (
     f"A node label: at most {MAX_NODE_LINES} lines, "
@@ -140,12 +149,20 @@ def scan(line: str) -> Drawn:
     The links are counted here because here is where they are already parsed. A
     second reader of the same syntax drifts from this one, and a regex over the
     raw line finds the `-->` inside a quoted label.
+
+    A `;` separates two statements on one line; it does not end the line. This
+    reader used to stop at the first one, so `a["..."] --> b; c --> d` had its
+    second half measured by nothing.
     """
     found: list[tuple[str, str, str]] = []
     links = 0
     at = skip_space(line, 0)
     expect_node = True
-    while at < len(line) and line[at] != ";":
+    while at < len(line):
+        if line[at] == ";":
+            at = skip_space(line, at + 1)
+            expect_node = True
+            continue
         if expect_node:
             ident = IDENT.match(line, at)
             if not ident:
@@ -164,7 +181,8 @@ def scan(line: str) -> Drawn:
             if not link:
                 raise LabelSyntax(f'expected a link or a label at "{line[at:]}"')
             at = link.end()
-            links += 1
+            if states_a_relationship(link.group(0)):
+                links += 1
             if at < len(line) and line[at] == "|":
                 close = line.find("|", at + 1)
                 if close < 0:
@@ -178,6 +196,16 @@ def scan(line: str) -> Drawn:
             expect_node = True
         at = skip_space(line, at)
     return Drawn(found, links)
+
+
+def states_a_relationship(link: str) -> bool:
+    """Whether a link says anything about the two nodes it joins.
+
+    `~~~` is mermaid's invisible link. It places one node below another and
+    draws nothing between them, so a graph whose only links are invisible has
+    stated no relationship at all -- which is what the no-link check refuses.
+    """
+    return set(link) != {"~"}
 
 
 def subgraph_title(line: str) -> str:
@@ -209,11 +237,28 @@ def check_line(path: str, number: int, line: str) -> tuple[list[str], int]:
     """What is wrong with one line of the graph, and how many links it draws."""
     where = f"{path}:{number}"
     first = line.split()[0]
+    if first in GRAPH_HEADERS:
+        # `graph TD; a --> b` is mermaid's one-line form: the header ends at the
+        # first semicolon and the rest of the line draws the graph. Skipping the
+        # whole line, as every other keyword line is skipped, left those labels
+        # measured by nothing and their links counted by nothing -- so a
+        # 200-character label cleared the budget by moving one line up, and a
+        # graph written on one line was refused for having no link in it. Found
+        # in review on 2026-09-09.
+        rest = line.partition(";")[2]
+        if not rest.strip():
+            return [], 0
+        return check_statements(where, rest)
     if first in KEYWORDS:
         return [], 0
     if first == "subgraph":
         title = subgraph_title(line)
         return check_label(where, f'subgraph title "{title}"', title, MAX_LABEL_WORDS), 0
+    return check_statements(where, line)
+
+
+def check_statements(where: str, line: str) -> tuple[list[str], int]:
+    """What is wrong with the statements on one line, and how many links they draw."""
     try:
         drawn = scan(line)
     except LabelSyntax as unclosed:
@@ -309,6 +354,11 @@ def graph_lines(
 
 def check_block(path: str, block: list[tuple[int, str]]) -> list[str]:
     lines, problems = graph_lines(path, block)
+    if problems:
+        # An unclosed %%{init directive swallows every line after it, so what
+        # is left says nothing about whether the block holds a graph. Reporting
+        # it as empty as well would be false: the lines are there, unread.
+        return problems
     if not lines:
         # One message, for the same reason the missing fence gets one: the
         # reader needs the file name and the one fact, not a line number
@@ -318,9 +368,13 @@ def check_block(path: str, block: list[tuple[int, str]]) -> list[str]:
         ]
     opened_at, opener = lines[0][0], lines[0][1].split()[0]
     if opener not in GRAPH_HEADERS:
-        # Prose inside the fence. read_block() refuses prose outside it, and
-        # until 2026-09-09 nothing read what was in it, so a paragraph wrapped
-        # in ```mermaid passed the gate as a plan graph.
+        # Prose inside the fence. A paragraph was already refused, but by
+        # LabelSyntax rather than by anything asking whether the block held a
+        # graph: `we then update the checker` is not a node followed by a link.
+        # What reached this line unrefused was text that parses as bare node
+        # ids -- one word to a line -- and any diagram type that is not a
+        # flowchart. This gate is why a fence has to open as a graph; it is not
+        # the whole of what refuses prose.
         return problems + [
             f'{path}:{opened_at}: block opens with "{opener}", not {HEADER_LIST}; '
             "a plan is one mermaid graph and nothing else"
@@ -332,9 +386,11 @@ def check_block(path: str, block: list[tuple[int, str]]) -> list[str]:
         problems += found
         links += drawn
     if not links:
-        # A graph states what depends on what. A fence with no edge in it is a
-        # list with boxes drawn round it, and the build order it was drawn for
-        # is not in it.
+        # A fence with no link in it is a list with boxes drawn round it. A
+        # dotted link counts here: it is a real relationship, and the fact that
+        # it orders no build is a separate claim from whether the plan states a
+        # dependency at all. An invisible `~~~` does not count -- see
+        # states_a_relationship().
         problems.append(
             f"{path}: no link between any two nodes; "
             "a plan graph states what depends on what"

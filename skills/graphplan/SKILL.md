@@ -59,7 +59,7 @@ Every node label carries four things and nothing else:
 ```
 A node label: at most 4 lines, at most 6 words a line.
 An edge or cluster label: at most 4 words.
-Any label line: at most 64 characters, counted as it renders.
+Any label line: at most 80 characters, counted as it renders.
 
 c4["<b>c4 · config.sh</b> · CHANGE<br/>loads one board's environment<br/><i>opus · high</i>"]
 ```
@@ -151,8 +151,8 @@ was drawn for. The mapping is mechanical:
 - a `NEW` or `CHANGE` node → `agent(prompt, {label, model, effort})`
 - an untouched node → context in the prompt, never an agent
 - a solid path between two changed nodes → a `pipeline()` stage boundary
-- a dotted path between two changed nodes → no stage boundary; a dotted edge
-  orders nothing, so both ends belong in the same stage
+- a dotted path and no solid one between two changed nodes → no stage
+  boundary; a dotted edge orders nothing, so both ends start together
 - changed nodes with no path between them → the same `parallel()` call
 - nodes that write files concurrently → `isolation: 'worktree'`
 
