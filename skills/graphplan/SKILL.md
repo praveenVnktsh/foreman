@@ -66,16 +66,16 @@ c4["<b>c4 · config.sh</b> · CHANGE<br/>loads one board's environment<br/><i>op
 
 **A path that will not fit goes on a line of its own.** A node names the file
 it builds, and in a deep tree `c1 · ` plus the path plus ` · CHANGE` passes 80
-characters. A node label has four lines: put the path on one of them by itself.
-If the path alone is still too wide, write the tail that identifies it,
-`.../service/BoardStatusTest.java`, and let the prompt carry the whole path. The
-prompt has no budget; the picture does.
+characters. The label budget above leaves room for a line of its own: put the
+path there by itself. If the path alone is still too wide, write the tail that
+identifies it, `.../service/BoardStatusTest.java`, and let the prompt carry the
+whole path. The prompt has no budget; the picture does.
 
 **Quote every label the brackets hold:** `c1["..."]`. Brackets nest and mermaid
 has a dozen node shapes, so an unquoted label has no unambiguous end. The check
 refuses one rather than guessing where it stops. Write an edge label between
 pipes, `-->|"..."|`; that is house style here. The check measures all three of
-mermaid's forms against the four-word budget, so an inline label like
+mermaid's forms against the edge-label budget above, so an inline label like
 `-- text -->` is measured, not refused.
 
 **Untouched components belong in the graph.** They are how a fresh agent
@@ -88,12 +88,12 @@ later write wins and the earlier work vanishes with no error.
 ### What an edge is
 
 A real relationship in the built system: reads, writes, spawns, depends on.
-Label it with the verb, in four words or fewer.
+Label it with the verb, inside the edge-label budget above.
 
 **Where build order differs from the runtime relationship, draw the edge
 dotted:** `-.->`. B reads A at runtime, but only A's interface is needed to
 start B, so a dotted edge orders nothing and its head can start first. The
-label stays inside four words.
+label stays inside the edge-label budget above.
 
 **Do not draw an edge for tidiness.** An edge is a claim about how the system
 works, and a false one is a false claim before it is a scheduling mistake.
