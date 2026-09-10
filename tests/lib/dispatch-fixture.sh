@@ -27,6 +27,15 @@ dispatch_fixture_setup() {
   local work_dir="$1" repo_root="$2"
   local board_dir="$repo_root/skills/board"
 
+  # An operator with PLAN_MODEL exported in their shell saw the plan and
+  # build/review model tests go red on a correctly configured machine: config.sh's
+  # `${PLAN_MODEL-fable}` fallback never fired, because the ambient export had
+  # already answered it. Clear the three here, once, before any dispatch can
+  # source config.sh. test-the-plan-stage-dispatches-on-fable.sh exports
+  # PLAN_MODEL again after this call, so its deliberate override still reaches
+  # `claude --bg`.
+  unset PLAN_MODEL BUILD_MODEL REVIEW_MODEL
+
   # A shim skill dir, identical to the real one except preflight.py. Same
   # two-level shape config.sh's contract loader depends on (skills/board/ next
   # to bin/), the same technique test-agent-skip-permissions-toggle.sh and
