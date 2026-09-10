@@ -33,11 +33,22 @@
 # way it reaches the shim is _dispatch_derive_toolchain finding it by running
 # git and watching git refuse, not by anyone having typed the name in advance.
 #
+# The git shim answers `--version` WHATEVER its variable says, and refuses
+# every other argv without it. That is the second thing this test proves, and
+# it is the shape of every real toolchain program that keeps a launcher: `env
+# PYTHONHOME=/nonexistent python3 --version` prints a version and exits 0
+# while `python3 -c 'import json'` dies at `init_fs_encoding`, and a git whose
+# subcommands live under a moved GIT_EXEC_PATH still reports its version. A
+# derivation that asks `--version` records such a program as needing nothing,
+# strips the name it needed, and hands the dispatch a toolchain that dies at
+# its first real call -- the failure this whole card is about, rebuilt by the
+# thing meant to remove it. So the probe has to do a dispatch's own work, and
+# this shim is what holds it to that.
+#
 # Both shims below are the smallest form that reproduces a toolchain program
-# refusing to start: each refuses unless its variable is set, and is
-# otherwise the real program. No real broken library or git build is
-# involved, so the test does not need a broken CI runner to prove CI's
-# failure.
+# that cannot work: each refuses unless its variable is set, and is otherwise
+# the real program. No real broken library or git build is involved, so the
+# test does not need a broken CI runner to prove CI's failure.
 set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -72,6 +83,11 @@ chmod +x "$shim_bin/python3"
 # maintainer having copied a real git variable into an allowlist somewhere.
 cat > "$shim_bin/git" <<SH
 #!/usr/bin/env bash
+# --version first, and unconditionally: this shim reports a version on an
+# environment it cannot do any other work under.
+if [[ "\$1" == "--version" ]]; then
+  exec "$real_git" --version
+fi
 if [[ -z "\${DISPATCH_FIXTURE_GIT_CANARY:-}" ]]; then
   echo "git: DISPATCH_FIXTURE_GIT_CANARY is not set" >&2
   exit 1
@@ -80,11 +96,10 @@ exec "$real_git" "\$@"
 SH
 chmod +x "$shim_bin/git"
 
-# Set before the fixture reads either. dispatch_fixture_setup runs git itself
-# (to seed the origin) and probes the whole toolchain once at the end, so a
-# variable a shim needs has to be exported before that call, not after it --
-# the same requirement LD_LIBRARY_PATH already had, now shared by a second
-# name for a second program.
+# Set before dispatch_fixture_setup, because setup runs git itself to seed the
+# origin and the target. The derivation has no such requirement -- it runs
+# before each dispatch and re-runs when its answer stops holding -- but a shim
+# that refuses during setup takes the fixture down before any of that.
 export LD_LIBRARY_PATH="${LD_LIBRARY_PATH:-$work_dir/lib}"
 export DISPATCH_FIXTURE_GIT_CANARY=1
 export PATH="$shim_bin:$PATH"

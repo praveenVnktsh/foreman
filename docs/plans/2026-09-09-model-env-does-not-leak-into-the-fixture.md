@@ -12,7 +12,7 @@ flowchart TD
     t2["<b>t2 · test-build-and-review-run-on-opus.sh</b> · CHANGE<br/>prints run log when spawn missed<br/><i>sonnet</i>"]
     t3["<b>t3 · test-the-fixture-keeps-the-toolchain-a-dispatch-needs.sh</b> · CHANGE<br/>second shim needs unlisted name<br/><i>sonnet</i>"]
     t4["<b>t4 · test-the-operators-environment-does-not-reach-a-dispatch.sh</b> · CHANGE<br/>asserts setup names cleared knobs<br/>prints run log when spawn missed<br/><i>sonnet</i>"]
-    t5["<b>t5 · test-plan-worktree-is-detached-at-origin-main.sh</b><br/>drives the fixture unchanged"]
+    t5["<b>t5 · test-plan-worktree-is-detached-at-origin-main.sh</b> · CHANGE<br/>prints run log when spawn missed<br/><i>opus</i>"]
     terse["<b>terse · test-plan-graphs-are-terse.sh</b><br/>checks every plan graph"]
   end
 

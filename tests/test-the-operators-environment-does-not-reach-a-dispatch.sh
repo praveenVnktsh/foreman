@@ -68,10 +68,21 @@ dispatch_fixture_setup "$work_dir" "$repo_root"
 # didn't say so, an operator who exported PLAN_MODEL and watched it vanish
 # would have nothing but a passing test to explain why. This is what lets
 # them read the reason instead of guessing at it.
-if [[ "$DISPATCH_CLEARED_KNOBS" == "PLAN_MODEL BUILD_MODEL REVIEW_MODEL" ]]; then
+#
+# Each name looked for on its own, never the whole string compared to a
+# literal: the order the fixture happens to list them in is not the claim, and
+# a test bound to it goes red on a reordering that changes nothing.
+missing=""
+for knob in PLAN_MODEL BUILD_MODEL REVIEW_MODEL; do
+  case " $DISPATCH_CLEARED_KNOBS " in
+    *" $knob "*) ;;
+    *) missing="${missing:+$missing }$knob" ;;
+  esac
+done
+if [[ -z "$missing" ]]; then
   ok "dispatch_fixture_setup names the knobs it cleared"
 else
-  bad "dispatch_fixture_setup names the knobs it cleared: got '$DISPATCH_CLEARED_KNOBS'"
+  bad "dispatch_fixture_setup names the knobs it cleared: '$DISPATCH_CLEARED_KNOBS' does not name $missing"
 fi
 
 check_model() { # description expected-repr

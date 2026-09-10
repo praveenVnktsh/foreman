@@ -36,9 +36,11 @@ _DISPATCH_MODEL_KNOBS="PLAN_MODEL BUILD_MODEL REVIEW_MODEL"
 #              withlock.py, the two inline `python3 -c` slot readers,
 #              lookup_session, and config.sh's bin/boards.py and
 #              bin/contract.py.
-#   claude  -- `claude agents` in lookup_session, and the `claude --bg` spawn
-#              this whole fixture exists to capture.
-_DISPATCH_PROGRAMS="bash git python3 claude"
+#
+# `claude` is deliberately absent. Every `claude` a dispatch runs under this
+# fixture is the stub written below, a bash script that exits 0 on any argv --
+# so probing it measures bash a second time, and the real binary never.
+_DISPATCH_PROGRAMS="bash git python3"
 
 # dispatch_fixture_setup <work_dir> <repo_root>
 #
@@ -113,6 +115,9 @@ PY
   _dispatch_git -C "$target" remote add origin "$origin"
   _dispatch_git -C "$target" push -q origin main
   DISPATCH_SEED_SHA="$(_dispatch_git -C "$target" rev-parse HEAD)"
+  # The repository the git probe reads. A dispatch's git work happens inside a
+  # repository, and a probe that opens none proves nothing about it.
+  _DISPATCH_TARGET="$target"
 
   DISPATCH_HOME="$work_dir/home"
   fixture_add_instance "$DISPATCH_HOME" demo "$target"
@@ -149,9 +154,10 @@ STUB
   DISPATCH_PROMPT="$work_dir/prompt.md"
   echo "do the thing" > "$DISPATCH_PROMPT"
 
-  # Last, because the probe runs the stub `claude` on the stub PATH and under
-  # $DISPATCH_HOME -- the environment the dispatches are about to get.
-  _dispatch_derive_toolchain
+  # Nothing is probed here. dispatch_fixture_run derives the toolchain when it
+  # is about to need it, so a toolchain variable exported AFTER this call is
+  # honoured exactly like one exported before it.
+  _DISPATCH_TOOLCHAIN=""
 }
 
 # dispatch_fixture_show_run_log
@@ -206,9 +212,10 @@ dispatch_fixture_run() {
   for knob in $_DISPATCH_MODEL_KNOBS; do
     if [[ -n "${!knob+set}" ]]; then models+=("$knob=${!knob}"); fi
   done
-  # What the toolchain needed, measured by _dispatch_derive_toolchain during
-  # setup rather than listed here by hand. `+` and not `:-`, to add no name
-  # the caller has unset since.
+  # What the toolchain needs, measured rather than listed here by hand, and
+  # re-measured when the answer no longer holds. `+` and not `:-`, to add no
+  # name the caller has unset since.
+  _dispatch_ensure_toolchain
   local toolchain=() name
   for name in $_DISPATCH_TOOLCHAIN; do
     if [[ -n "${!name+set}" ]]; then toolchain+=("$name=${!name}"); fi
@@ -241,7 +248,7 @@ if i + 1 < len(argv):
 PY
 }
 
-# Which of the caller's exported names the toolchain cannot start without.
+# Which of the caller's exported names the toolchain cannot work without.
 #
 # Derived by RUNNING each program dispatch.sh runs, because the toolchain is a
 # class and not a list. CI's `actions/setup-python` puts a `python3` on PATH
@@ -252,15 +259,22 @@ PY
 # allowlisted by name, which covers that one runner and not the next one, whose
 # interpreter reads a different name.
 #
-# Cost on a healthy machine: four `--version` calls, and nothing else. The
-# name-by-name search runs only for a program that refuses to start.
-#
-# This runs ONCE, at the end of setup, and every dispatch reuses the answer. A
-# toolchain variable therefore has to be exported BEFORE dispatch_fixture_setup
-# -- which is the shape a runner exports it in anyway, beside the PATH it
-# belongs to.
+# Checked before every dispatch and re-derived when the answer stops holding.
+# That is what makes a name exported after dispatch_fixture_setup work: the
+# check costs one process per program, and the search below runs only when a
+# program fails it.
+_dispatch_ensure_toolchain() {
+  local program
+  for program in $_DISPATCH_PROGRAMS; do
+    if ! _dispatch_program_starts "$program" "$_DISPATCH_TOOLCHAIN"; then
+      _dispatch_derive_toolchain
+      return
+    fi
+  done
+}
+
 _dispatch_derive_toolchain() {
-  local candidates="" name program kept trial
+  local candidates="" name program kept head tail trial
 
   # Every exported name of the caller's shell, except the three this fixture
   # sets itself and the model knobs. Excluding the knobs is what stops one
@@ -276,31 +290,47 @@ _dispatch_derive_toolchain() {
 
   _DISPATCH_TOOLCHAIN=""
   for program in $_DISPATCH_PROGRAMS; do
-    # It starts on the base environment alone, so it needs nothing from the
-    # caller's shell.
+    # It does its work on the base environment alone, so it needs nothing from
+    # the caller's shell.
     if _dispatch_program_starts "$program" ""; then continue; fi
 
     if ! _dispatch_program_starts "$program" "$candidates"; then
-      # Refuse rather than degrade. Handing the dispatch an interpreter that
-      # cannot start buys five tests reporting "never reached `claude --bg`"
+      # Refuse rather than degrade. Handing the dispatch a toolchain that
+      # cannot work buys five tests reporting "never reached `claude --bg`"
       # and naming neither the program nor the reason.
-      printf 'dispatch-fixture: %s does not start under the environment this fixture hands a dispatch.\n' \
+      _dispatch_set_probe_argv "$program"
+      printf 'dispatch-fixture: %s does not work under the environment this fixture hands a dispatch.\n' \
         "$program" >&2
-      printf '  probe: env -i HOME=%s FOREMAN_INSTANCE=demo PATH=%s <every exported name> %s --version\n' \
-        "$DISPATCH_HOME" "$_DISPATCH_STUB_BIN:$PATH" "$program" >&2
+      printf '  probe: env -i HOME=%s FOREMAN_INSTANCE=demo PATH=%s <every exported name> %s\n' \
+        "$DISPATCH_HOME" "$_DISPATCH_STUB_BIN:$PATH" "${_DISPATCH_PROBE_ARGV[*]}" >&2
       printf '  %s said:\n' "$program" >&2
       sed 's/^/    /' "$_DISPATCH_PROBE_ERR" >&2
       exit 1
     fi
 
-    # It started with the caller's names added, so one of them is load-bearing.
-    # Take them away one at a time and keep only the ones whose removal breaks
-    # the start again.
+    # It worked once the caller's names were added, so some of them are
+    # load-bearing. Halve to find which, then prove it by removal.
+    #
+    # Halving is what keeps this affordable on the runner it exists for. There,
+    # setup-python's python3 fails the base probe in every test, and a GitHub
+    # runner exports around ninety names -- one process each, five times over,
+    # for the removal pass alone. Halving reaches a single load-bearing name in
+    # about seven probes. It stops when neither half is enough by itself, which
+    # means two names in different halves, and the removal pass then finishes
+    # the job: what reaches a dispatch is minimal either way.
     kept="$candidates"
-    for name in $candidates; do
+    while [[ "$(_dispatch_name_count "$kept")" -gt 1 ]]; do
+      head="$(_dispatch_names_half head "$kept")"
+      tail="$(_dispatch_names_half tail "$kept")"
+      if _dispatch_program_starts "$program" "$head"; then kept="$head"; continue; fi
+      if _dispatch_program_starts "$program" "$tail"; then kept="$tail"; continue; fi
+      break
+    done
+    for name in $kept; do
       trial="$(_dispatch_names_without "$name" "$kept")"
       if _dispatch_program_starts "$program" "$trial"; then kept="$trial"; fi
     done
+
     for name in $kept; do
       case " $_DISPATCH_TOOLCHAIN " in *" $name "*) continue ;; esac
       _DISPATCH_TOOLCHAIN="${_DISPATCH_TOOLCHAIN:+$_DISPATCH_TOOLCHAIN }$name"
@@ -308,21 +338,70 @@ _dispatch_derive_toolchain() {
   done
 }
 
-# Does <program> start under `env -i` plus this fixture's three base names and
-# the extras named in <names>? `--version` is enough: a program that answers it
-# has already loaded its interpreter and every library it links.
+# Does <program> do a dispatch's work under `env -i` plus this fixture's three
+# base names and the extras named in <names>?
+#
+# REAL WORK, never `--version`. CPython answers `--version` from its launcher
+# before it imports anything: measured 2026-09-10, `env -i PATH=/usr/bin:/bin
+# PYTHONHOME=/nonexistent python3 --version` prints a version and exits 0 while
+# the same environment running `python3 -c 'import json'` dies at
+# `init_fs_encoding`. A version-only probe records the interpreter dispatch.sh
+# leans on hardest as needing nothing at all, strips the name it needed, and
+# the dispatch dies at the contract load -- which is the silent failure this
+# derivation exists to remove, reintroduced by the thing that removes it.
 _dispatch_program_starts() { # <program> <names, space separated>
   local program="$1" names="$2"
   local extra=() name
   for name in $names; do
     if [[ -n "${!name+set}" ]]; then extra+=("$name=${!name}"); fi
   done
+  _dispatch_set_probe_argv "$program"
   env -i \
     HOME="$DISPATCH_HOME" \
     FOREMAN_INSTANCE=demo \
     PATH="$_DISPATCH_STUB_BIN:$PATH" \
     ${extra[@]+"${extra[@]}"} \
-    "$program" --version >/dev/null 2>"$_DISPATCH_PROBE_ERR"
+    "${_DISPATCH_PROBE_ARGV[@]}" >/dev/null 2>"$_DISPATCH_PROBE_ERR"
+}
+
+# What each probed program is asked to do: the smallest piece of a dispatch's
+# own work that an environment variable can break. A table, so a program added
+# to _DISPATCH_PROGRAMS without one refuses here instead of being measured by
+# something that proves nothing about it.
+_dispatch_set_probe_argv() { # <program>
+  case "$1" in
+    # The `bash -c` block withlock.py wraps around the worktree commands.
+    bash) _DISPATCH_PROBE_ARGV=(bash -c :) ;;
+    # Reading a repository, which is the whole of what a dispatch's git does.
+    # `git --version` opens none, and answers on a git that cannot.
+    git) _DISPATCH_PROBE_ARGV=(git -C "$_DISPATCH_TARGET" worktree list) ;;
+    # The imports config.sh's loaders and dispatch.sh's slot readers make.
+    # tomllib is bin/contract.py's, and the 3.11 floor this repository builds on.
+    python3) _DISPATCH_PROBE_ARGV=(python3 -c 'import json, pathlib, sys, tomllib') ;;
+    *)
+      printf 'dispatch-fixture: no probe for %s; give it one beside the others\n' "$1" >&2
+      exit 1
+      ;;
+  esac
+}
+
+_dispatch_name_count() { # <names, space separated>
+  local name count=0
+  for name in $1; do count=$((count + 1)); done
+  printf '%s' "$count"
+}
+
+_dispatch_names_half() { # <head|tail> <names, space separated>
+  local which="$1" names="$2" half i=0 out="" name
+  half=$(( $(_dispatch_name_count "$names") / 2 ))
+  for name in $names; do
+    i=$((i + 1))
+    if [[ "$which" == head && "$i" -le "$half" ]] ||
+       [[ "$which" == tail && "$i" -gt "$half" ]]; then
+      out="${out:+$out }$name"
+    fi
+  done
+  printf '%s' "$out"
 }
 
 _dispatch_names_without() { # <name to drop> <names, space separated>
