@@ -31,6 +31,7 @@ check_model() { # description expected-repr
   got="$(dispatch_fixture_model)"
   if [[ -z "$got" ]]; then
     bad "$desc: the dispatch never reached \`claude --bg --model\`"
+    dispatch_fixture_show_run_log
   elif [[ "$got" == "$want" ]]; then
     ok "$desc"
   else

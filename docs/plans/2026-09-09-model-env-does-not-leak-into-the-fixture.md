@@ -1,31 +1,44 @@
 ```mermaid
 flowchart TD
-  subgraph host["operator machine"]
-    env["<b>env · operator shell</b><br/>exports PLAN_MODEL, BUILD_MODEL, REVIEW_MODEL"]
+  subgraph outside["outside the repository"]
+    ci["<b>ci · GitHub Actions runner</b><br/>setup-python exports LD_LIBRARY_PATH"]
+    sh["<b>sh · operator shell</b><br/>exports PLAN_MODEL and siblings"]
   end
 
   subgraph tests["tests/"]
-    t3["<b>t3 · test-an-exported-model-override-does-not-leak-into-the-fixture.sh</b> · NEW<br/>exports *_MODEL=haiku, runs both<br/>expects t1 and t2 green<br/><i>sonnet</i>"]
-    t1["<b>t1 · test-the-plan-stage-dispatches-on-fable.sh</b><br/>exports PLAN_MODEL after setup"]
-    t2["<b>t2 · test-build-and-review-run-on-opus.sh</b>"]
-    f["<b>f · tests/lib/dispatch-fixture.sh</b> · CHANGE<br/>setup unsets PLAN, BUILD, REVIEW_MODEL<br/>before any dispatch sources config.sh<br/><i>sonnet</i>"]
-    run["<b>run · tests/run-all.sh</b><br/>runs every test-*.sh"]
+    run["<b>run · run-all.sh</b><br/>runs every test-*.sh"]
+    f["<b>f · lib/dispatch-fixture.sh</b> · CHANGE<br/>probes each program dispatch.sh runs<br/>derives pass-through, names cleared knobs<br/><i>opus · high</i>"]
+    t1["<b>t1 · test-the-plan-stage-dispatches-on-fable.sh</b> · CHANGE<br/>prints run log when spawn missed<br/><i>sonnet</i>"]
+    t2["<b>t2 · test-build-and-review-run-on-opus.sh</b> · CHANGE<br/>prints run log when spawn missed<br/><i>sonnet</i>"]
+    t3["<b>t3 · test-the-fixture-keeps-the-toolchain-a-dispatch-needs.sh</b> · CHANGE<br/>second shim needs unlisted name<br/><i>sonnet</i>"]
+    t4["<b>t4 · test-the-operators-environment-does-not-reach-a-dispatch.sh</b> · CHANGE<br/>asserts setup names cleared knobs<br/>prints run log when spawn missed<br/><i>sonnet</i>"]
+    t5["<b>t5 · test-plan-worktree-is-detached-at-origin-main.sh</b><br/>drives the fixture unchanged"]
+    terse["<b>terse · test-plan-graphs-are-terse.sh</b><br/>checks every plan graph"]
   end
 
   subgraph board["skills/board/"]
-    d["<b>d · dispatch.sh</b><br/>spawns claude --bg --model"]
-    c["<b>c · config.sh</b><br/>PLAN_MODEL-fable, BUILD_MODEL:-opus, REVIEW_MODEL:-opus"]
+    d["<b>d · dispatch.sh</b><br/>runs python3, git, bash, claude"]
+    c["<b>c · config.sh</b><br/>reads every operator knob"]
   end
 
-  env -->|"leaks into"| run
-  run -->|"runs"| t3
-  run -->|"runs"| t1
-  run -->|"runs"| t2
-  t3 -->|"runs, *_MODEL exported"| t1
-  t3 -->|"runs, *_MODEL exported"| t2
+  p["<b>p · this plan</b> · CHANGE<br/>docs/plans/2026-09-09-model-env-does-not-leak-into-the-fixture.md<br/>redrawn to the built design<br/><i>sonnet</i>"]
+
+  ci -->|"runs"| run
+  sh -->|"runs"| run
+  run --> t1
+  run --> t2
+  run --> t3
+  run --> t4
+  run --> t5
+  run --> terse
   t1 -->|"sources"| f
   t2 -->|"sources"| f
-  f -->|"runs, stub PATH"| d
+  t3 -->|"sources"| f
+  t4 -->|"sources"| f
+  t5 -->|"sources"| f
+  f -->|"runs under env -i"| d
   d -->|"sources"| c
-  d -.->|"argv log"| f
+  d -.->|"argv and run log"| f
+  terse -->|"reads"| p
+  p -.->|"describes"| f
 ```

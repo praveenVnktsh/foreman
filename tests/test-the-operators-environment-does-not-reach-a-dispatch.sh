@@ -63,6 +63,17 @@ export PLAN_MODEL=haiku BUILD_MODEL=haiku REVIEW_MODEL=haiku \
 
 dispatch_fixture_setup "$work_dir" "$repo_root"
 
+# Named, not just cleared. The setup call above erases PLAN_MODEL, BUILD_MODEL
+# and REVIEW_MODEL from this shell before it does anything else -- if it
+# didn't say so, an operator who exported PLAN_MODEL and watched it vanish
+# would have nothing but a passing test to explain why. This is what lets
+# them read the reason instead of guessing at it.
+if [[ "$DISPATCH_CLEARED_KNOBS" == "PLAN_MODEL BUILD_MODEL REVIEW_MODEL" ]]; then
+  ok "dispatch_fixture_setup names the knobs it cleared"
+else
+  bad "dispatch_fixture_setup names the knobs it cleared: got '$DISPATCH_CLEARED_KNOBS'"
+fi
+
 check_model() { # description expected-repr
   local desc="$1" want="$2" got
   got="$(dispatch_fixture_model)"
@@ -71,6 +82,9 @@ check_model() { # description expected-repr
     # model: a dry run prints and exits before the spawn, and a FOREMAN_HOME
     # pointing elsewhere makes config.sh refuse the fixture's board outright.
     bad "$desc: the dispatch never reached \`claude --bg --model\`"
+    # The reason is in $DISPATCH_RUN_LOG, not in the line above -- print it
+    # now, before the EXIT trap removes $work_dir and takes the log with it.
+    dispatch_fixture_show_run_log
   elif [[ "$got" == "$want" ]]; then
     ok "$desc"
   else
