@@ -65,11 +65,12 @@ c4["<b>c4 · config.sh</b> · CHANGE<br/>loads one board's environment<br/><i>op
 ```
 
 **A path that will not fit goes on a line of its own.** A node names the file
-it builds, and in a deep tree `c1 · ` plus the path plus ` · CHANGE` passes 80
-characters. The label budget above leaves room for a line of its own: put the
-path there by itself. If the path alone is still too wide, write the tail that
-identifies it, `.../service/BoardStatusTest.java`, and let the prompt carry the
-whole path. The prompt has no budget; the picture does.
+it builds, and in a deep tree `c1 · ` plus the path plus ` · CHANGE` is wider
+than the budget above allows one label line to be. That budget leaves room for
+a line of its own: put the path there by itself. If the path alone is still too
+wide, write the tail that identifies it, `.../service/BoardStatusTest.java`,
+and let the prompt carry the whole path. The prompt has no budget; the picture
+does.
 
 **Quote every label the brackets hold:** `c1["..."]`. Brackets nest and mermaid
 has a dozen node shapes, so an unquoted label has no unambiguous end. The check
