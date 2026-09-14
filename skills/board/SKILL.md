@@ -248,6 +248,7 @@ A number carried from one slice into the next is the previous board's answer.
 | `MAX_REVIEW_ROUNDS` | blocking rounds before the card moves to `Needs Human` |
 | `REVIEWERS_PER_ROUND` | adversarial reviewers per round |
 | `STALL_MINUTES` | transcript silence before an agent is judged stalled |
+| `AGENT_STOP_TIMEOUT_SECONDS` | how long a ticket-mode sweep waits for a terminal card's idle agents to stop before leaving them |
 | `MAX_FOLLOWUPS` | follow-up cards per merged card |
 | `MIN_FREE_*`, `PROBE_*`, `QUICK_PROBE_MB` | environment thresholds enforced by `preflight.py` — declared per-target in `board.toml`'s `[limits]`, not here. **foreman's own defaults are sized for foreman's own cheap suite**; a target with a heavy build (a real test suite, a large `node_modules`, …) that declares no `[limits]` silently inherits them and can pass this preflight while still dying mid-build the way two consecutive attempts on one card did on 2026-08-02 — see `bin/contract.py`. |
 | `HOST_MAX_CONCURRENT` | cards holding a slot, summed across **every** board on this machine |
@@ -1870,6 +1871,22 @@ and "I could not tell" must never look the same. Deleting a live agent's working
 directory destroys unpushed work and kills it with no diagnosable error, while
 leaving a dead tree costs disk until the next tick. Those are not comparable
 costs, so the tie goes to leaving it.
+
+**Ticket mode also stops and forgets the card's sessions.** A background agent
+idles at `done` when its turn ends, and nothing else ever stops it. So a sweep
+for a terminal card first asks `claude stop` of every agent named
+`foreman/<instance>/<T>/…` that is `done` or `blocked` and waits up to
+`AGENT_STOP_TIMEOUT_SECONDS` for the registry to agree. Then it removes every
+stopped session's record under `~/.claude/jobs/` — what `claude agents --all`
+and the operator's session list keep showing a stopped agent from — and the
+transcript directory of each one that ran in the card's own worktree. A
+`working` agent is never stopped, and its session is left and named on stderr
+the same way its worktree is: the judgment that the card is terminal may be
+stale. `--orphans` never stops or forgets a session, because a card that is
+not terminal may still be diagnosed from its transcript (`reconcile.py` →
+`death`) or resumed into it. The card's history records `forgot` with the
+count, before `released`. A stop that does not land in time leaves the session
+in place and makes the sweep exit non-zero, so report it on the tick.
 
 Either form also reaps `refs/board/evidence/<pid>` refs left by an `evidence.sh`
 that was killed between its fetch and its cleanup — a stopped tick, or one whose
