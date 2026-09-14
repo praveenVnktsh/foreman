@@ -345,8 +345,25 @@ check, because that is the one reader that already walks every sibling:
   `foreman-codex-*` and deletes branches under `foreman/codex/*`, which is
   exactly where the scoped installation `codex` cuts its worktrees and pushes
   its branches. The legacy sibling's boards are read through
-  `boards.py --file <home>/boards.toml --list`, never a second parse; a
-  sibling with no `boards.toml` yet declares no boards.
+  `boards.py --file <home>/boards.toml --names`, never a second parse.
+  `--names` checks names only, so a board whose repo is on an unmounted disk
+  does not stop every installation under the root from loading. A sibling
+  with no `boards.toml` yet declares no boards.
+
+Three more guards keep those rules from being stepped around:
+
+- **A home with no `installation.toml` is legacy only when nothing beside it
+  is declared.** Otherwise `installation.py` refuses it and names
+  `install.sh`. A clone whose install was refused would otherwise take
+  `foreman/tick` and the live installation's branches. The un-migrated
+  `~/.foreman` still reads as legacy: its parent is `$HOME`.
+- **`boardctl add` re-reads the installation after writing `boards.toml`**,
+  and restores the previous file when `installation.py` refuses, so adding a
+  legacy board named like a sibling cannot break the root.
+- **`boardctl migrate` checks the declaration before it moves anything**,
+  through `installation.py --write --dry-run`, and completes a half-migrated
+  root (`<root>/claude/install` with no `installation.toml`) by declaring it
+  instead of moving it again into `claude/claude`.
 
 ## The host ceiling
 

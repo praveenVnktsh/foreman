@@ -2,6 +2,7 @@
 """Read this machine's board declarations and print them for shell consumers.
 
     boards.py --list                 every board name
+    boards.py --names                every board name, checking names only
     boards.py <name>                 one board's REPO and KEY_FILE
     boards.py [--file <path>] ...    read <path> instead of $FOREMAN_HOME/boards.toml
 
@@ -110,8 +111,9 @@ def absolute(path: str, what: str, board: str) -> str:
     return os.path.normpath(expanded)
 
 
-def board_record(path: str, home: str, name: str, table: object) -> tuple[str, str]:
-    """Validate one board and return its (REPO, KEY_FILE)."""
+def check_board_shape(path: str, name: str, table: object) -> None:
+    """The checks on one board that depend on the file alone: its name, that
+    it is a table, and that it says nothing unknown."""
     if not BOARD_NAME.match(name):
         die(f"{path}: board name {name!r} is invalid; "
             "only letters, digits and underscore are allowed (no hyphen, no slash)")
@@ -120,6 +122,11 @@ def board_record(path: str, home: str, name: str, table: object) -> tuple[str, s
     unknown = sorted(set(table) - BOARD_KEYS)
     if unknown:
         die(f"{path}: unknown key(s) in board {name}: {', '.join(unknown)}")
+
+
+def board_record(path: str, home: str, name: str, table: object) -> tuple[str, str]:
+    """Validate one board and return its (REPO, KEY_FILE)."""
+    check_board_shape(path, name, table)
 
     repo = table.get("repo")
     if repo is None:
@@ -162,6 +169,30 @@ def board_record(path: str, home: str, name: str, table: object) -> tuple[str, s
 
 def load(path: str, home: str) -> list[tuple[str, str, str, int]]:
     """(name, REPO, KEY_FILE, PRIORITY) for every declared board, sorted by name."""
+    boards = boards_table(path)
+    out = []
+    for name in sorted(boards):
+        repo, key_file, priority = board_record(path, home, name, boards[name])
+        out.append((name, repo, key_file, priority))
+    return out
+
+
+def names_only(path: str) -> list[str]:
+    """Every declared board name, sorted, with no repo or key check.
+
+    For bin/installation.py's collision check, which compares names with
+    sibling installation names. A repo on an unmounted disk does not change a
+    board's name, and refusing it there made every installation under the
+    root refuse to load.
+    """
+    boards = boards_table(path)
+    for name in sorted(boards):
+        check_board_shape(path, name, boards[name])
+    return sorted(boards)
+
+
+def boards_table(path: str) -> dict:
+    """The [boards] table of the file at <path>, refusing a file that is not one."""
     try:
         with open(path, "rb") as fh:
             doc = tomllib.load(fh)
@@ -182,12 +213,7 @@ def load(path: str, home: str) -> list[tuple[str, str, str, int]]:
     boards = doc.get(BOARDS_TABLE, {})
     if not isinstance(boards, dict):
         die(f"{path}: {BOARDS_TABLE} must be a table")
-
-    out = []
-    for name in sorted(boards):
-        repo, key_file, priority = board_record(path, home, name, boards[name])
-        out.append((name, repo, key_file, priority))
-    return out
+    return boards
 
 
 def emit(fields: list[str]) -> None:
@@ -210,7 +236,11 @@ def main(argv: list[str]) -> int:
             continue
         args.append(arg)
     if len(args) != 1:
-        die("usage: boards.py [--file <path>] --list | <board-name>")
+        die("usage: boards.py [--file <path>] --list | --names | <board-name>")
+
+    if args[0] == "--names":
+        emit(names_only(path))
+        return 0
 
     boards = load(path, home)
     if args[0] == "--list":

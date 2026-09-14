@@ -320,8 +320,9 @@ def refuse_unless_one_default(root: str, entries: list[tuple[str, str, bool, boo
             f"{INSTALLATION_FILE} by hand")
 
 
-def declared_boards(home: str) -> list[str]:
-    """Every board <home>'s boards.toml declares, read through bin/boards.py.
+def declared_boards(home: str, path: str) -> list[str]:
+    """Every board name the boards.toml at <path> declares for <home>, read
+    through bin/boards.py.
 
     Through boards.py and never a second TOML parse here. boards.py decides
     what a boards.toml declares, and a second reader would agree with it only
@@ -330,13 +331,18 @@ def declared_boards(home: str) -> list[str]:
     unreadable one. Anything boards.py refuses is refused here too, with its
     reason on stderr, because a legacy sibling whose boards cannot be read is
     a root whose names cannot be proven apart.
+
+    `--names`, not `--list`. `--list` also refuses a board whose repo is not a
+    directory. Found in review on 2026-09-14: a legacy board on an unmounted
+    disk made every installation under the root refuse to load, so a running
+    tick failed every command, for a check that is only about names. Names do
+    not depend on mounts.
     """
-    path = os.path.join(home, "boards.toml")
     if not os.path.exists(path):
         return []
     boards_py = os.path.join(os.path.dirname(os.path.abspath(__file__)), "boards.py")
     result = subprocess.run(
-        [sys.executable, boards_py, "--file", path, "--list"],
+        [sys.executable, boards_py, "--file", path, "--names"],
         capture_output=True, env={**os.environ, "FOREMAN_HOME": home},
     )
     if result.returncode != 0:
@@ -346,7 +352,8 @@ def declared_boards(home: str) -> list[str]:
     return [name.decode() for name in result.stdout.split(b"\0") if name]
 
 
-def refuse_colliding_names(root: str, entries: list[tuple[str, str, bool, bool]]) -> None:
+def refuse_colliding_names(root: str, entries: list[tuple[str, str, bool, bool]],
+                           boards_files: dict[str, str]) -> None:
     """Legacy names must stay apart from every sibling's. Checked on EVERY read.
 
     Checked HERE, beside the one-default check, because this is the one
@@ -367,6 +374,10 @@ def refuse_colliding_names(root: str, entries: list[tuple[str, str, bool, bool]]
     On a repository both serve, the legacy sweep reaps the sibling's live
     worktrees. Board names and installation names follow one character rule,
     so nothing but this refusal keeps them apart.
+
+    <boards_files> maps a home to the boards.toml to read for it, for a home
+    whose boards are not in place yet -- see write()'s dry run. Every other
+    home is read at <home>/boards.toml.
     """
     legacy = [(name, home) for name, home, _, is_legacy in entries if is_legacy]
     if len(legacy) > 1:
@@ -378,7 +389,8 @@ def refuse_colliding_names(root: str, entries: list[tuple[str, str, bool, bool]]
         return
     legacy_name, legacy_home = legacy[0]
     scoped = {name for name, _, _, is_legacy in entries if not is_legacy}
-    for board in declared_boards(legacy_home):
+    boards_path = boards_files.get(legacy_home, os.path.join(legacy_home, "boards.toml"))
+    for board in declared_boards(legacy_home, boards_path):
         if board in scoped:
             die(f"{root}: board {board} of the legacy installation {legacy_name} "
                 f"has the same name as the installation {board}; its worktree "
@@ -387,12 +399,50 @@ def refuse_colliding_names(root: str, entries: list[tuple[str, str, bool, bool]]
                 "installation")
 
 
-def siblings_checked(root: str) -> list[tuple[str, str, bool, bool]]:
-    """Every installation under <root>, after every rule that spans siblings."""
+def siblings_checked(root: str,
+                     pending: tuple[str, str, bool, bool] | None = None,
+                     boards_files: dict[str, str] | None = None,
+                     ) -> list[tuple[str, str, bool, bool]]:
+    """Every installation under <root>, after every rule that spans siblings.
+
+    <pending> is a declaration not yet on disk, checked as if it were: write()'s
+    dry run passes the one it would write, so the check it runs is this one and
+    not a second copy of it.
+    """
     entries = installations(root)
+    if pending is not None:
+        entries = sorted([e for e in entries if e[1] != pending[1]] + [pending])
     refuse_unless_one_default(root, entries)
-    refuse_colliding_names(root, entries)
+    refuse_colliding_names(root, entries, boards_files or {})
     return entries
+
+
+def refuse_undeclared_beside_siblings(home: str) -> None:
+    """A home with no installation.toml is the un-migrated Claude home only
+    when nothing beside it is a declared installation.
+
+    Found in review on 2026-09-14. `installation.py --home ~/.foreman/codex2`,
+    beside a declared `claude`, printed INSTALLATION claude, IS_DEFAULT 1,
+    LEGACY_NAMES 1. A clone whose install.sh was refused, run anyway, would
+    take `foreman/tick` and the live installation's branch names, and adopt
+    its open pull requests and agents.
+
+    The un-migrated home is ~/.foreman itself, with install/ directly inside.
+    Its parent is $HOME, which holds no installation.toml directories, so that
+    home still reads as legacy. Only a home UNDER a root of installations is
+    refused.
+    """
+    parent = os.path.dirname(home)
+    try:
+        entries = sorted(os.listdir(parent))
+    except OSError as exc:
+        die(f"cannot list {parent} to prove {home} is the un-migrated home: {exc}")
+    siblings = [name for name in entries if declared(os.path.join(parent, name))]
+    if siblings:
+        die(f"{home} has no {INSTALLATION_FILE}, but {parent} holds declared "
+            f"installations ({', '.join(siblings)}), so it is not the un-migrated "
+            f"Claude home. Run {home}/install/bin/install.sh to declare it, or "
+            "`boardctl migrate` from it if migrate left it moved but undeclared")
 
 
 def record(home: str) -> list[str]:
@@ -409,6 +459,7 @@ def record(home: str) -> list[str]:
     # branches, agents and worktrees the old code named, or every in-flight
     # card reads "no PR" and is built again on top of its open pull request.
     if not declared(home):
+        refuse_undeclared_beside_siblings(home)
         return fields(CLAUDE, CLAUDE, True, True, home, home, CLAUDE_MODELS)
 
     path = os.path.join(home, INSTALLATION_FILE)
@@ -473,8 +524,17 @@ def render(harness: str, is_default: bool, legacy_names: bool, models: dict) -> 
 
 
 def write(home: str, harness: str | None, is_default: bool, legacy_names: bool,
-          given: dict) -> None:
-    """Declare <home> an installation, refusing to overwrite one that exists."""
+          given: dict, dry_run: bool, boards_file: str | None) -> None:
+    """Declare <home> an installation, refusing to overwrite one that exists.
+
+    With <dry_run>, write nothing and refuse exactly where the write would.
+    bin/boardctl migrate runs it BEFORE it moves a home. Found in review on
+    2026-09-14: migrate moved the home first and the write refused after,
+    leaving ~/.foreman/claude undeclared, its FOREMAN_ROOT no longer pointing
+    at the linear.key left one level up, and a re-run moving it again into
+    claude/claude. <boards_file> is where the boards are before the move, so
+    the collision check reads the boards the home will have.
+    """
     if harness is None:
         die(f"--write needs --harness (one of {', '.join(HARNESSES)})")
     if harness not in HARNESSES:
@@ -490,6 +550,14 @@ def write(home: str, harness: str | None, is_default: bool, legacy_names: bool,
     models = resolve_models("--write", harness, given)
 
     path = os.path.join(home, INSTALLATION_FILE)
+    if dry_run:
+        if os.path.exists(path):
+            die(f"{path} already exists; edit or remove it, this never overwrites one")
+        # The same sibling checks record() applies to the file once written.
+        pending = (os.path.basename(home), home, is_default, legacy_names)
+        siblings_checked(os.path.dirname(home), pending,
+                         {home: boards_file} if boards_file else None)
+        return
     # O_EXCL, not a stat and then a write: the refusal to overwrite is the
     # whole safety of this command, and a check separate from the write is a
     # window in which a second operator's install lands.
@@ -524,7 +592,7 @@ def emit(out: list[str]) -> None:
 def usage() -> None:
     die("usage: installation.py [--home <path>] "
         "[--siblings | --write --harness <name> [--default] [--legacy-names] "
-        "[--model-<stage> <model>]]")
+        "[--model-<stage> <model>] [--dry-run [--boards-file <path>]]]")
 
 
 def main(argv: list[str]) -> int:
@@ -534,6 +602,8 @@ def main(argv: list[str]) -> int:
     harness = None
     is_default = False
     legacy_names = False
+    dry_run = False
+    boards_file = None
     models = {}
 
     rest = argv[1:]
@@ -559,21 +629,31 @@ def main(argv: list[str]) -> int:
             is_default = True
         elif arg == "--legacy-names":
             legacy_names = True
+        elif arg == "--dry-run":
+            dry_run = True
+        elif arg == "--boards-file":
+            boards_file = absolute(value_for(arg), "--boards-file")
         else:
             usage()
     if want_siblings and want_write:
         usage()
+    # --boards-file changes what a dry run reads; on a real write the boards
+    # are wherever the home is, and accepting it there would check a file the
+    # written installation never reads.
+    if boards_file is not None and not dry_run:
+        die("--boards-file is only for --write --dry-run")
 
     if home is None:
         home = os.path.normpath(foreman_home())
     if want_write:
-        write(home, harness, is_default, legacy_names, models)
+        write(home, harness, is_default, legacy_names, models, dry_run, boards_file)
         return 0
     # A flag that only --write reads, passed to a read, means the operator
     # believes they are writing. Saying nothing would print a record that
     # ignores every model they named.
-    if harness is not None or is_default or legacy_names or models:
-        die("--harness, --default, --legacy-names and --model-<stage> are only for --write")
+    if harness is not None or is_default or legacy_names or models or dry_run:
+        die("--harness, --default, --legacy-names, --model-<stage> and --dry-run "
+            "are only for --write")
 
     if not want_siblings:
         emit(record(home))
@@ -581,6 +661,7 @@ def main(argv: list[str]) -> int:
     # An un-migrated home is its own only installation: there is no root full
     # of siblings to list, because the root IS the home.
     if not declared(home):
+        refuse_undeclared_beside_siblings(home)
         emit([CLAUDE, home])
         return 0
     root = os.path.dirname(home)

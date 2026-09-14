@@ -155,6 +155,17 @@ exported="$(env LEGACY_NAMES=1 HOME="$work_dir" FOREMAN_HOME="$scoped_home" FORE
 check "an exported LEGACY_NAMES=1 does not give a scoped installation the legacy shapes" \
   "foreman/codex/demo/PRA-7"$'\n'"$repo/.claude/worktrees/foreman-codex-demo-PRA-7" "$exported"
 
+# An exported TICK_AGENT_NAME=foreman/tick gave a scoped sibling the legacy
+# tick's name, and its --restart would stop the legacy installation's tick.
+check "an exported TICK_AGENT_NAME does not change the scoped sibling's tick name" \
+  "foreman/codex/tick" \
+  "$(env TICK_AGENT_NAME=foreman/tick HOME="$work_dir" FOREMAN_HOME="$scoped_home" FOREMAN_INSTANCE=demo \
+       bash -c ". '$board_dir/config.sh' >/dev/null; printf %s \"\$TICK_AGENT_NAME\"")"
+check "an exported TICK_AGENT_NAME does not change the legacy installation's tick name" \
+  "foreman/tick" \
+  "$(env TICK_AGENT_NAME=foreman/codex/tick HOME="$work_dir" FOREMAN_HOME="$legacy_home" FOREMAN_INSTANCE=demo \
+       bash -c ". '$board_dir/config.sh' >/dev/null; printf %s \"\$TICK_AGENT_NAME\"")"
+
 # =============================================================================
 # D. each installation's sweep --orphans reaps only its own worktree
 # =============================================================================
@@ -253,6 +264,52 @@ refuses "a legacy board named like a scoped sibling installation refuses, naming
   "legacy installation claude" --home "$clash/codex"
 refuses "the same refusal names the scoped installation it collides with" \
   "as the installation codex" --home "$clash/claude"
+
+# A home with no installation.toml beside declared installations is not the
+# un-migrated home. Read as one, a refused install would take foreman/tick and
+# the live installation's branches, and adopt its open pull requests.
+mkdir -p "$root/.foreman/codex2"
+refuses "an undeclared home beside declared installations refuses, naming install.sh" \
+  "install.sh" --home "$root/.foreman/codex2"
+# The un-migrated layout itself: ~/.foreman's parent is $HOME, full of plain
+# directories and none of them declared.
+mkdir -p "$unmigrated_root/Developer" "$unmigrated_root/Documents"
+if legacy_record="$("$inst" --home "$unmigrated_home" | tr '\0' '\n')" \
+    && grep -qx 'LEGACY_NAMES' <<<"$legacy_record" \
+    && [[ "$(grep -A1 -x 'LEGACY_NAMES' <<<"$legacy_record" | tail -1)" == 1 ]]; then
+  ok "the un-migrated home, whose parent holds only undeclared directories, still reads as legacy"
+else
+  bad "the un-migrated home, whose parent holds only undeclared directories, still reads as legacy: $legacy_record"
+fi
+
+# A legacy board on an unmounted disk. The collision check is about names, so
+# a missing repo must not stop the scoped sibling from loading.
+unmounted="$work_dir/unmounted/.foreman"; mkdir -p "$unmounted/claude" "$unmounted/codex"
+toml "$unmounted/claude/installation.toml" true legacy
+toml "$unmounted/codex/installation.toml" false scoped
+fixture_add_board_in "$unmounted/claude" demo "$work_dir/no-such-disk/target"
+if loaded="$("$inst" --home "$unmounted/codex" 2>&1 | tr '\0' '\n')" \
+    && grep -qx 'codex' <<<"$loaded"; then
+  ok "a legacy sibling's board on a missing repo does not stop a scoped sibling from loading"
+else
+  bad "a legacy sibling's board on a missing repo does not stop a scoped sibling from loading: $loaded"
+fi
+
+# `boardctl add codex` on the legacy installation beside the scoped `codex`
+# would make every installation under the root refuse on its next read.
+cp -p "$legacy_home/boards.toml" "$work_dir/boards.before"
+if env -u LEGACY_NAMES FOREMAN_HOME="$legacy_home" "$repo_root/bin/boardctl" add codex --repo "$repo" \
+    >"$work_dir/add.out" 2>&1; then
+  bad "boardctl add of a legacy board named like a scoped sibling is refused: it succeeded: $(cat "$work_dir/add.out")"
+else
+  ok "boardctl add of a legacy board named like a scoped sibling is refused"
+fi
+if cmp -s "$work_dir/boards.before" "$legacy_home/boards.toml" \
+    && [[ -z "$(find "$legacy_home" -maxdepth 1 -name 'boards.toml.*')" ]]; then
+  ok "the refused add leaves boards.toml byte-identical, with no temp file"
+else
+  bad "the refused add leaves boards.toml byte-identical, with no temp file: $(diff "$work_dir/boards.before" "$legacy_home/boards.toml"; ls "$legacy_home")"
+fi
 
 # A value this loader cannot make sense of is refused, not read as scoped.
 odd="$work_dir/odd"; mkdir -p "$odd/solo"

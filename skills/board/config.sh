@@ -134,7 +134,9 @@ fi
 # either one makes these globs match another installation's work.
 #
 # Assigned here, never read from the environment, for the reason LEGACY_NAMES
-# is unset above.
+# is unset above. The same holds for every name composed from them:
+# NAME_SCOPE, WORKTREE_SCOPE, BOARD_NAME_PREFIX, BOARD_WORKTREE_PREFIX and
+# TICK_AGENT_NAME.
 if [[ -n "$LEGACY_NAMES" ]]; then
   NAME_SCOPE=""
   WORKTREE_SCOPE=""
@@ -418,7 +420,12 @@ AGENT_SKIP_PERMISSIONS="${AGENT_SKIP_PERMISSIONS-1}"
 # would each read the other as the one supervise.sh must stop before starting a
 # replacement. The legacy installation keeps `foreman/tick`; installation.py
 # allows only one of those per root, so the name stays unique.
-TICK_AGENT_NAME="${TICK_AGENT_NAME:-foreman/${NAME_SCOPE}tick}"
+#
+# NOT environment-wins, unlike the knobs around it. Found in review on
+# 2026-09-14: an operator shell exporting TICK_AGENT_NAME=foreman/tick gave a
+# scoped sibling the legacy tick's name, and `supervise.sh --restart` there
+# would stop the legacy installation's live tick.
+TICK_AGENT_NAME="foreman/${NAME_SCOPE}tick"
 TICK_INTERVAL_MINUTES="${TICK_INTERVAL_MINUTES:-20}"
 
 # Wedged: mid-turn and silent. A tick genuinely working is never quiet this long.
