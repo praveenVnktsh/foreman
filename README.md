@@ -109,6 +109,14 @@ flags. `bin/boardctl add` on a repository the first installation already
 serves adds a second builder for it; nothing about routing needs the operator
 to say so, because the label does the routing.
 
+**A non-default installation's boards take only surplus.** `boardctl add`
+writes `priority = 0` there, so each board uses only the slots of
+`HOST_MAX_CONCURRENT` the default installation is not using. At the implicit
+priority 1, every new board reserves a slot while it holds no cards, and on a
+machine running four slots that stopped the default installation's boards from
+planning anything. To give a board a floor, add it with `--priority N`, for
+example `boardctl add myproject --repo ~/Developer/myproject --priority 1`.
+
 ### Migrating an existing home
 
 A home installed before installations existed has `~/.foreman/install`

@@ -148,6 +148,11 @@ esac
   fail "--may-dispatch from the second installation allowed a dispatch at the ceiling too: it must see the SAME joint total, not just its own board's two cards"
 echo "ok  --may-dispatch refuses from either installation once their joint total reaches HOST_MAX_CONCURRENT"
 
+run_may_dispatch_in() { # <home> <foreman_home> <board> HOST_MAX_CONCURRENT
+  HOME="$1" FOREMAN_HOME="$2" FOREMAN_INSTANCE="$3" HOST_MAX_CONCURRENT="$4" \
+    "$reconcile" --may-dispatch "$3"
+}
+
 room_first="$(run_may_dispatch "$first_home" boardA 5)"
 room_second="$(run_may_dispatch "$second_home" boardB 5)"
 
@@ -156,6 +161,41 @@ expect "" "$room_first" \
 expect "" "$room_second" \
   "--may-dispatch allows a dispatch from the second installation too, under the same raised ceiling"
 echo "ok  --may-dispatch allows a dispatch from either installation once HOST_MAX_CONCURRENT covers the joint total"
+
+# ============================================================================
+# A second installation added by the real `boardctl add` does not throttle the
+# default installation's boards.
+#
+# Measured on 2026-09-14. The default Claude installation ran three boards at
+# priorities 2, 0 and 3. A Codex installation added the same three boards with
+# `boardctl add`, which wrote no priority, so each read as 1 and reserved a
+# slot while holding nothing. At HOST_MAX_CONCURRENT=4 with nothing held, the
+# priority-2 board read "at its share: ... 4 more are reserved" and the Claude
+# tick planned no card. The boards below carry those priorities. `add` in a non-default installation now writes priority 0.
+# ============================================================================
+
+surplus_root="$work_dir/surplus-root"
+mkdir -p "$surplus_root"
+fixture_add_installation "$surplus_root" claude claude --default
+fixture_add_installation "$surplus_root" codex codex
+claude_home="$surplus_root/.foreman/claude"
+codex_home="$surplus_root/.foreman/codex"
+
+for spec in product:2 idle:0 tooling:3; do
+  fixture_add_board_in "$claude_home" "${spec%%:*}" "$target"
+  printf 'priority = %s\n' "${spec#*:}" >> "$claude_home/boards.toml"
+done
+for board in product idle tooling; do
+  HOME="$surplus_root" FOREMAN_HOME="$codex_home" "$repo_root/bin/boardctl" \
+    add "$board" --repo "$target" >/dev/null ||
+    fail "boardctl add $board in the non-default codex installation failed"
+done
+
+surplus_verdict="$(run_may_dispatch_in "$surplus_root" "$claude_home" product 4)" ||
+  fail "--may-dispatch exited non-zero for claude/product: $surplus_verdict"
+expect "" "$surplus_verdict" \
+  "--may-dispatch allows the default installation's priority-2 board with nothing held at HOST_MAX_CONCURRENT=4, beside a non-default installation whose boards boardctl added"
+echo "ok  a non-default installation's boards added by boardctl take only surplus, so the default's priority-2 board may dispatch on an empty machine"
 
 # ============================================================================
 # A legacy single home (no installation.toml) still reports its own count,

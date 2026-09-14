@@ -13,6 +13,11 @@
 # itself a no-op rather than refusing once boards.toml exists -- migrate has a
 # second step, and a refusal here would put it out of reach.
 #
+# `add` writes `priority = 0` in an installation that is not the default, so a
+# second installation takes only surplus; writes no priority in the default
+# one; takes `--priority N` over both; and refuses a priority that is not a
+# non-negative integer, leaving boards.toml byte-identical.
+#
 # No network is reached anywhere here: unlike the instance-directory-building
 # `add` this replaces, the new one never calls bin/resolve-ids.py, so there is
 # no Linear stub to start.
@@ -459,6 +464,96 @@ if [[ $status -ne 0 ]] && [[ ! -e "$home15/boards.toml" ]] \
 else
   not_ok "migrate is all-or-nothing: one bad board leaves no boards.toml written: status=$status exists=$([[ -e "$home15/boards.toml" ]] && echo yes || echo no) err=$(cat "$work_dir/migrate6.err")"
 fi
+
+# =============================================================================
+# Priorities `add` writes
+#
+# Measured on 2026-09-14: a Codex installation added three boards at the
+# implicit priority 1 beside the default Claude installation. Each reserved a
+# slot of HOST_MAX_CONCURRENT while holding no cards, and the Claude tick
+# refused to plan anything. A board added to a non-default installation must
+# therefore take only surplus.
+# =============================================================================
+
+# board_priority <foreman_home> <name> -- PRIORITY as bin/boards.py reads it.
+board_priority() {
+  FOREMAN_HOME="$1" "$repo_root/bin/boards.py" "$2" | tr '\0' '\n' \
+    | awk 'prev == "PRIORITY" { print; exit } { prev = $0 }'
+}
+
+# A root with a default installation and a second one that is not. boardctl
+# asks bin/installation.py which it is running in, from FOREMAN_HOME.
+nd_root="$work_dir/nondefault-root"
+mkdir -p "$nd_root"
+fixture_add_installation "$nd_root" first claude --default
+fixture_add_installation "$nd_root" second claude
+nd_home="$nd_root/.foreman/second"
+nd_target="$(new_target)"
+run "$nd_home" add surplus --repo "$nd_target" >"$work_dir/prio1.out" 2>"$work_dir/prio1.err" \
+  || not_ok "add in a non-default installation failed: $(cat "$work_dir/prio1.err")"
+
+if grep -qx 'priority = 0' "$nd_home/boards.toml" 2>/dev/null; then
+  ok "add in a non-default installation writes priority = 0"
+else
+  not_ok "add in a non-default installation writes priority = 0: $(cat "$nd_home/boards.toml" 2>&1)"
+fi
+
+if grep -q '^# This installation is not the default, so this board takes only capacity' \
+    "$nd_home/boards.toml" 2>/dev/null; then
+  ok "add in a non-default installation writes the comment saying why"
+else
+  not_ok "add in a non-default installation writes the comment saying why: $(cat "$nd_home/boards.toml" 2>&1)"
+fi
+
+got="$(board_priority "$nd_home" surplus 2>&1)"
+if [[ "$got" == "0" ]]; then
+  ok "bin/boards.py reads PRIORITY 0 for a board added in a non-default installation"
+else
+  not_ok "bin/boards.py reads PRIORITY 0 for a board added in a non-default installation: got [$got]"
+fi
+
+# home1 is a lone home, and a lone home is the default installation.
+if ! grep -q '^priority' "$home1/boards.toml"; then
+  ok "add in the default installation writes no priority line"
+else
+  not_ok "add in the default installation writes no priority line: $(cat "$home1/boards.toml")"
+fi
+
+got="$(board_priority "$home1" alpha 2>&1)"
+if [[ "$got" == "1" ]]; then
+  ok "bin/boards.py reads PRIORITY 1 for a board added in the default installation"
+else
+  not_ok "bin/boards.py reads PRIORITY 1 for a board added in the default installation: got [$got]"
+fi
+
+home16="$(new_home)"
+run "$home16" add chosen --repo "$(new_target)" --priority 3 >/dev/null 2>"$work_dir/prio2.err" || true
+if grep -qx 'priority = 3' "$home16/boards.toml" 2>/dev/null \
+    && [[ "$(grep -c '^priority' "$home16/boards.toml")" == "1" ]]; then
+  ok "--priority 3 writes priority = 3 in the default installation"
+else
+  not_ok "--priority 3 writes priority = 3 in the default installation: $(cat "$work_dir/prio2.err") $(cat "$home16/boards.toml" 2>&1)"
+fi
+
+run "$nd_home" add chosen --repo "$(new_target)" --priority 3 >/dev/null 2>"$work_dir/prio3.err" || true
+chosen_table="$(awk '$0 == "[boards.chosen]" { on = 1; next } /^\[/ { on = 0 } on' "$nd_home/boards.toml")"
+if [[ "$chosen_table" == *"priority = 3"* && "$chosen_table" != *"priority = 0"* ]]; then
+  ok "--priority 3 writes priority = 3 in a non-default installation, not 0"
+else
+  not_ok "--priority 3 writes priority = 3 in a non-default installation, not 0: $(cat "$work_dir/prio3.err") table=[$chosen_table]"
+fi
+
+for bad_priority in -1 x; do
+  cp "$home16/boards.toml" "$work_dir/prio-before.toml"
+  status=0
+  run "$home16" add refused --repo "$(new_target)" --priority "$bad_priority" \
+    >/dev/null 2>"$work_dir/prio-bad.err" || status=$?
+  if [[ $status -ne 0 ]] && cmp -s "$work_dir/prio-before.toml" "$home16/boards.toml"; then
+    ok "--priority $bad_priority is refused and boards.toml is left byte-identical"
+  else
+    not_ok "--priority $bad_priority is refused and boards.toml is left byte-identical: status=$status err=$(cat "$work_dir/prio-bad.err")"
+  fi
+done
 
 if [[ $fail -eq 0 ]]; then
   printf '\nPASS\n'

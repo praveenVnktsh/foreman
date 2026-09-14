@@ -387,6 +387,14 @@ installation's `boards.toml`. `HOST_MAX_CONCURRENT` stays one number for the
 machine, read from the environment as today. A lone installation counts only
 itself, which is today's behaviour.
 
+`boardctl add` in a non-default installation writes `priority = 0`, so that
+installation's boards take only surplus and reserve no floor. Measured on
+2026-09-14: a Codex installation added three boards at the implicit priority 1
+beside a default Claude installation at priorities 2, 0 and 3. Each Codex board
+reserved a slot while holding no cards, and the Claude tick refused to plan a
+card: its priority-2 board read "at its share: 1 of 4 slots are held and 4
+more are reserved". `--priority N` gives a board a floor deliberately.
+
 ## Supervision
 
 Each installation has its own `supervise.sh`, because it lives in that
