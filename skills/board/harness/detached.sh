@@ -779,6 +779,33 @@ detached_stop() { # <home> <id>
   _detached_mark_stopped "$record"
 }
 
+# Exit 0 while the recorded process is still THIS agent's, 1 once it is gone,
+# and 2 with a message when the record cannot say. Same test as detached_stop
+# and the records python: pid plus the start time recorded at spawn. A bare
+# `kill -0` would call a recycled pid alive, and a caller waiting on that
+# answer would wait out its whole timeout on a stranger's process.
+detached_is_running() { # <home> <id>
+  if [[ $# -ne 2 ]]; then
+    printf 'foreman: detached_is_running needs <home> <id>\n' >&2
+    return 2
+  fi
+  local home="$1" id="$2" pid started_by
+  pid="$(_detached_record_field "$home" "$id" pid)" || return 2
+  if [[ -z "$pid" ]]; then
+    printf 'foreman: %s records no pid; cannot say whether the agent is running\n' \
+      "$(_detached_record_path "$home" "$id")" >&2
+    return 2
+  fi
+  kill -0 "$pid" 2>/dev/null || return 1
+  started_by="$(_detached_record_field "$home" "$id" startedBy)" || return 2
+  if [[ -z "$started_by" ]]; then
+    printf 'foreman: %s records no startedBy; cannot tell pid %s apart from a later process reusing it\n' \
+      "$(_detached_record_path "$home" "$id")" "$pid" >&2
+    return 2
+  fi
+  [[ "$(_detached_start_time "$pid")" == "$started_by" ]]
+}
+
 # Record that this agent was asked to stop. `default`, so a second stop keeps
 # the first time. state_of reads the field as stopped, and says why.
 _detached_mark_stopped() { # <record file>

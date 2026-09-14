@@ -196,22 +196,120 @@ os.replace(tmp, dest)
 ' "$@"
 }
 
-# Scan a spawned agent's log for the first `sessionID` any event carries. See
-# this file's header for why "first field on the first line" is not assumed —
-# every event type this CLI printed during testing carried it, so this reads
-# every line rather than only the first.
+# How long spawn waits for opencode to name its session, in whole seconds.
+#
+# `opencode run --format json` prints NOTHING until the model's first step
+# produces output, although the session exists within about two seconds
+# (OpenCode's own log: `message=created id=ses_...`). Measured 2026-09-14 on
+# opencode 1.18.30:
+#
+#   - The wait was 15 seconds. The first foreman/opencode/tick, whose prompt
+#     loads the board skill and an MCP server before answering, was killed at
+#     15 seconds with an empty log. With a one-word prompt and nothing to load,
+#     the two working models took 6.4 and 7.0 seconds to their first event.
+#   - opencode-go/deepseek-v4.1-flash never answered at all: no event and no
+#     error for 120 seconds. A longer wait does not rescue that model, which
+#     is why the timeout message names it and the command that checks it.
+#
+# FOREMAN_OPENCODE_SESSION_WAIT_SECONDS overrides it. It exists for the tests,
+# which cannot sit out two minutes per claim, and for an operator on a model
+# slower than this.
+_OPENCODE_SESSION_WAIT_DEFAULT_SECONDS=120
+_OPENCODE_SESSION_POLL_SECONDS=0.5
+
+# What _opencode_wait_for_session returns besides 0, so spawn can tell a model
+# that never answered from a process that is gone.
+_OPENCODE_WAIT_TIMED_OUT=1
+_OPENCODE_WAIT_EXITED=2
+_OPENCODE_WAIT_UNKNOWABLE=3
+
+# How many trailing log lines an error quotes.
+_OPENCODE_LOG_TAIL_LINES=5
+
+# The wait in whole seconds, refusing an override that is not one. A typo such
+# as `2m` must not quietly become the default, or a wait of zero.
+_opencode_session_wait_seconds() {
+  local wait="${FOREMAN_OPENCODE_SESSION_WAIT_SECONDS:-$_OPENCODE_SESSION_WAIT_DEFAULT_SECONDS}"
+  if [[ ! "$wait" =~ ^[1-9][0-9]*$ ]]; then
+    printf 'foreman: FOREMAN_OPENCODE_SESSION_WAIT_SECONDS is %s; expected a positive whole number of seconds\n' "$wait" >&2
+    return 1
+  fi
+  printf '%s\n' "$wait"
+}
+
+# Poll <log> until opencode names its session, the process dies, or <wait>
+# seconds pass. Prints the session id on success; otherwise returns one of the
+# _OPENCODE_WAIT_* codes above.
 #
 # Polls, because the log is being written by a process we just started:
 # `detached_spawn` returns as soon as the wrapper is recorded, not once
-# opencode has spoken. Fifteen seconds covers model startup; a run that has
-# not named a session by then is treated as never going to.
-_OPENCODE_SESSION_WAIT_POLLS=60
-_OPENCODE_SESSION_WAIT_SECONDS=0.25
-_opencode_wait_for_session() { # <log>
-  local log="$1" waited=0 session
-  while [[ "$waited" -lt "$_OPENCODE_SESSION_WAIT_POLLS" ]]; do
-    if [[ -s "$log" ]]; then
-      session="$(python3 -c '
+# opencode has spoken.
+#
+# The deadline reads bash's SECONDS, not a count of polls: every poll also runs
+# python, so a count of polls waits longer than the number it claims.
+_opencode_wait_for_session() { # <home> <id> <log> <wait-seconds>
+  local home="$1" id="$2" log="$3" wait="$4" session running
+  local deadline=$(( SECONDS + wait ))
+  while :; do
+    session="$(_opencode_session_in_log "$log")"
+    [[ -n "$session" ]] && { printf '%s\n' "$session"; return 0; }
+
+    running=0
+    detached_is_running "$home" "$id" || running=$?
+    if [[ "$running" -eq 1 ]]; then
+      # Read once more. The last event can land between the read above and the
+      # exit: the stub, and a fast real run, print a session and finish at once.
+      session="$(_opencode_session_in_log "$log")"
+      [[ -n "$session" ]] && { printf '%s\n' "$session"; return 0; }
+      return "$_OPENCODE_WAIT_EXITED"
+    fi
+    [[ "$running" -eq 0 ]] || return "$_OPENCODE_WAIT_UNKNOWABLE"
+
+    [[ "$SECONDS" -lt "$deadline" ]] || return "$_OPENCODE_WAIT_TIMED_OUT"
+    sleep "$_OPENCODE_SESSION_POLL_SECONDS"
+  done
+}
+
+# The last lines of <log> for an error message, with secrets masked, or a
+# sentence saying the log is empty. The log holds whatever opencode printed on
+# both streams, and a provider error can echo the key it was handed; this
+# message goes to dispatch.sh's output and from there into card comments.
+_opencode_log_tail() { # <log>
+  python3 -c '
+import re, sys
+
+path, count = sys.argv[1], int(sys.argv[2])
+try:
+    with open(path, errors="replace") as handle:
+        lines = [line.rstrip("\n") for line in handle if line.strip()]
+except FileNotFoundError:
+    lines = []
+if not lines:
+    print("the log %s is empty" % path)
+    sys.exit(0)
+
+QUOTE = "[\"\x27]?"
+MASKS = (
+    (re.compile(r"sk-[A-Za-z0-9_-]+"), "sk-***"),
+    (re.compile(r"Bearer\s+\S+", re.IGNORECASE), "Bearer ***"),
+    (re.compile(r"((?:api[_-]?key|token|secret|password)" + QUOTE + r"\s*[:=]\s*" + QUOTE + r")[^\s\"\x27,}]+", re.IGNORECASE), r"\1***"),
+    # A long unbroken run of key characters is what a token looks like.
+    (re.compile(r"[A-Za-z0-9_-]{32,}"), "***"),
+)
+print("last lines of %s:" % path)
+for line in lines[-count:]:
+    for pattern, replacement in MASKS:
+        line = pattern.sub(replacement, line)
+    print("  " + line)
+' "$1" "$_OPENCODE_LOG_TAIL_LINES"
+}
+
+# The first `sessionID` any event in <log> carries, or nothing. See this file's
+# header for why "first field on the first line" is not assumed — every event
+# type this CLI printed during testing carried it, so this reads every line.
+_opencode_session_in_log() { # <log>
+  [[ -s "$1" ]] || return 0
+  python3 -c '
 import json, sys
 
 try:
@@ -229,20 +327,16 @@ try:
                 break
 except FileNotFoundError:
     pass
-' "$log")"
-      [[ -n "$session" ]] && { printf '%s\n' "$session"; return 0; }
-    fi
-    sleep "$_OPENCODE_SESSION_WAIT_SECONDS"
-    waited=$(( waited + 1 ))
-  done
-  return 1
+' "$1"
 }
 
 spawn() {
   detached_parse_spawn "$@"
 
-  local home id log session
+  local home id log session wait waited=0
   home="$(detached_home)" || exit 1
+  # Read before anything starts, so a bad override refuses with nothing to stop.
+  wait="$(_opencode_session_wait_seconds)" || exit 1
 
   local args=(opencode run --dir "$DETACHED_CWD" -m "$DETACHED_MODEL" --format json --title "$DETACHED_NAME")
   # Always auto-approved: detached_parse_spawn refuses a spawn without
@@ -267,13 +361,27 @@ spawn() {
   id="$(detached_spawn "$DETACHED_NAME" "$DETACHED_CWD" "$home" "$DETACHED_LOOP_MINUTES" -- "${args[@]}")" || exit 1
   log="$(detached_transcript "$home" "$id")" || exit 1
 
-  if ! session="$(_opencode_wait_for_session "$log")"; then
+  session="$(_opencode_wait_for_session "$home" "$id" "$log" "$wait")" || waited=$?
+
+  if [[ "$waited" -eq "$_OPENCODE_WAIT_EXITED" ]]; then
+    # Nothing to stop: the process is gone, and its record keeps the exit code.
+    die "spawned $DETACHED_NAME (foreman id $id) but OpenCode exited before naming a session; $(_opencode_log_tail "$log")"
+  fi
+  if [[ "$waited" -ne 0 ]]; then
     # STOP IT BEFORE DYING. The process is running opencode in the worktree
     # right now; giving up without stopping it leaves a live harness there
     # while dispatch.sh moves on to attempt 2 and `git worktree remove -f -f`s
     # the same directory out from under it.
     detached_stop "$home" "$id" || true
-    die "spawned $DETACHED_NAME (foreman id $id) but no sessionID appeared in $log within 15s"
+  fi
+  if [[ "$waited" -eq "$_OPENCODE_WAIT_UNKNOWABLE" ]]; then
+    die "spawned $DETACHED_NAME (foreman id $id) but could not tell whether it was still running, so stopped it"
+  fi
+  if [[ "$waited" -ne 0 ]]; then
+    # Worded for the operator. Measured 2026-09-14: the old message named
+    # neither the model nor the live process, so a model that never answers
+    # read as a broken adapter. The command it names settles which one it is.
+    die "spawned $DETACHED_NAME (foreman id $id): no output from opencode model $DETACHED_MODEL within ${wait}s (the process was alive and waiting); check the model with: opencode run -m $DETACHED_MODEL --format json \"Reply with ok\""
   fi
   detached_note_session "$home" "$id" "$session" || exit 1
   printf '%s\n' "$session"

@@ -427,6 +427,22 @@ esac
 
 printf 'opencode\n' >>"$STUB_RUNS"
 
+# When the first event comes, chosen by HARNESS_STUB_OPENCODE_FIRST_EVENT and
+# read from the environment for the reason the codex version is. Real opencode
+# prints nothing until the model's first step has output, and a model can take
+# a long time to get there or never get there (measured 2026-09-14):
+#   now (default)  print at once
+#   after-<N>      print after N seconds, a slow model
+#   never          print nothing and stay alive until stopped, a hung model
+#   exit           print nothing and exit 1 at once, a crashed opencode
+case "${HARNESS_STUB_OPENCODE_FIRST_EVENT:-now}" in
+  now) ;;
+  after-*) sleep "${HARNESS_STUB_OPENCODE_FIRST_EVENT#after-}" ;;
+  never) while :; do sleep 1; done ;;
+  exit) exit 1 ;;
+  *) printf 'opencode-stub: no such first-event mode %s\n' "$HARNESS_STUB_OPENCODE_FIRST_EVENT" >&2; exit 2 ;;
+esac
+
 # Every event `opencode run --format json` prints carries a top-level
 # sessionID, and `-s/--session <id>` continues an existing one. opencode.sh
 # takes the first sessionID it sees, so the stub names the resumed session on

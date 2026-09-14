@@ -485,6 +485,76 @@ for harness in claude codex opencode; do
     { kill "$stdin_holder"; wait "$stdin_holder"; } 2>/dev/null || true
   fi
 
+  # `opencode run --format json` prints nothing until the model's first step
+  # has output. Measured 2026-09-14: spawn gave up after 15 seconds, which
+  # killed the first real tick with an empty log, and its message named neither
+  # the model nor the live process, so a model that never answers read as an
+  # adapter bug. The wait is lowered to SESSION_WAIT seconds here so the suite
+  # does not sit out the two-minute default per claim.
+  if [[ "$harness" == opencode ]]; then
+    SESSION_WAIT=6
+    # How long stopping a hung stub may add after the wait, in seconds: a TERM
+    # to its group ends it at once, and python polls add well under a second.
+    STOP_SLACK=3
+    wait_err="$work/$harness/session-wait.err"
+
+    if env FOREMAN_OPENCODE_SESSION_WAIT_SECONDS="$SESSION_WAIT" \
+        HARNESS_STUB_OPENCODE_FIRST_EVENT=after-3 \
+        "$adapter" spawn --name slowmodel --cwd "$agent_cwd" --model stub-slow-model \
+        --prompt-file "$prompt" --skip-permissions >/dev/null 2>"$wait_err"; then
+      ok "$harness spawn waits for a model whose first event comes late, up to the session wait"
+    else
+      bad "$harness spawn gave up on a model that answered in 3s of a ${SESSION_WAIT}s wait: $(cat "$wait_err")"
+    fi
+
+    started=$SECONDS
+    if env FOREMAN_OPENCODE_SESSION_WAIT_SECONDS="$SESSION_WAIT" \
+        HARNESS_STUB_OPENCODE_FIRST_EVENT=never \
+        "$adapter" spawn --name hungmodel --cwd "$agent_cwd" --model stub-hung-model \
+        --prompt-file "$prompt" --skip-permissions >/dev/null 2>"$wait_err"; then
+      bad "$harness spawn succeeded for a model that never prints"
+    else
+      elapsed=$(( SECONDS - started ))
+      if [[ "$elapsed" -le $(( SESSION_WAIT + STOP_SLACK )) ]]; then
+        ok "$harness spawn gives up on a model that never prints within the session wait"
+      else
+        bad "$harness spawn took ${elapsed}s to give up with a ${SESSION_WAIT}s session wait"
+      fi
+      if grep -qF "stub-hung-model" "$wait_err"; then
+        ok "$harness spawn names the model that never printed"
+      else
+        bad "$harness spawn's timeout does not name the model: $(cat "$wait_err")"
+      fi
+      if wait_for_state hungmodel stopped; then
+        ok "$harness spawn stops a model that never printed before giving up"
+      else
+        bad "$harness spawn left a model that never printed at $(agent_field hungmodel state)"
+      fi
+    fi
+    # Leave nothing hung behind, whatever the claims above found.
+    run_adapter stop "$(agent_field hungmodel id)" >/dev/null 2>&1 || true
+
+    started=$SECONDS
+    if env FOREMAN_OPENCODE_SESSION_WAIT_SECONDS="$SESSION_WAIT" \
+        HARNESS_STUB_OPENCODE_FIRST_EVENT=exit \
+        "$adapter" spawn --name deadmodel --cwd "$agent_cwd" --model stub-dead-model \
+        --prompt-file "$prompt" --skip-permissions >/dev/null 2>"$wait_err"; then
+      bad "$harness spawn succeeded for an opencode that exited without printing"
+    else
+      elapsed=$(( SECONDS - started ))
+      if [[ "$elapsed" -lt $(( SESSION_WAIT / 2 )) ]]; then
+        ok "$harness spawn stops waiting as soon as opencode exits"
+      else
+        bad "$harness spawn took ${elapsed}s of a ${SESSION_WAIT}s wait to notice opencode had exited"
+      fi
+      if grep -qF "OpenCode exited before naming a session" "$wait_err"; then
+        ok "$harness spawn says opencode exited before naming a session"
+      else
+        bad "$harness spawn's error for an exited opencode: $(cat "$wait_err")"
+      fi
+    fi
+  fi
+
   if [[ -n "$(run_adapter skills-dir)" ]]; then ok "$harness skills-dir prints a path"
   else bad "$harness skills-dir prints a path"; fi
 
