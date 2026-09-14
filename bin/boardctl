@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # boardctl -- declare and control this machine's boards.
 #
-#     boardctl add <name> --repo <path> [--key-file <path>]
+#     boardctl add <name> --repo <path> [--key-file <path>] [--priority N]
 #     boardctl remove <name>
 #     boardctl list
 #     boardctl status <name>
@@ -97,7 +97,7 @@ MIGRATED_ENTRIES="install boards.toml instances installed-skills replaced-skills
 usage() {
   cat >&2 <<'USAGE'
 usage:
-  boardctl add <name> --repo <path> [--key-file <path>]
+  boardctl add <name> --repo <path> [--key-file <path>] [--priority N]
   boardctl remove <name>
   boardctl list
   boardctl status <name>
@@ -107,6 +107,10 @@ usage:
 USAGE
   exit 2
 }
+
+# The priority `add` writes for a board in an installation that is NOT this
+# machine's default. See priority_lines for why.
+SURPLUS_ONLY_PRIORITY=0
 
 instance_home() { printf '%s/instances/%s\n' "$FOREMAN_HOME" "$1"; }
 
@@ -235,12 +239,44 @@ new_tmp() {
   mktemp "$boards_toml.XXXXXX"
 }
 
+# priority_lines <priority> -- the lines `add` writes into a new board's table
+# for its priority. <priority> is what the operator passed to --priority, or
+# empty when they passed nothing.
+#
+# A BOARD IN A NON-DEFAULT INSTALLATION TAKES ONLY SURPLUS. Measured on
+# 2026-09-14: HOST_MAX_CONCURRENT is divided between every board of every
+# installation on the machine by priority, and each board with a priority
+# above 0 reserves a floor of at least one slot. The default Claude
+# installation ran three boards at priorities 2, 0 and 3. A Codex installation
+# added the same three boards with no priority line, so each read as 1 and
+# reserved a slot while holding no cards. The live product board then read "at
+# its share: 1 of 4 slots are held and 4 more are reserved", and the Claude
+# tick planned nothing until the Codex boards were set to 0 by hand. So a board added to a
+# non-default installation is written at 0, and adding an installation never
+# throttles the boards already running.
+#
+# The default installation keeps writing no line, which reads as
+# bin/boards.py's DEFAULT_PRIORITY. A boards.toml written before priorities
+# existed then divides exactly as it always did.
+priority_lines() {
+  local priority="$1"
+  if [[ -n "$priority" ]]; then
+    printf 'priority = %s\n' "$priority"
+    return 0
+  fi
+  [[ -z "${IS_DEFAULT:-}" ]] || return 0
+  printf '# This installation is not the default, so this board takes only capacity\n'
+  printf '# the default installation is not using, and adding it never throttles the\n'
+  printf '# boards already running. Raise it deliberately to give this board a floor.\n'
+  printf 'priority = %s\n' "$SURPLUS_ONLY_PRIORITY"
+}
+
 cmd_add() {
   [[ $# -ge 1 ]] || usage
   local name="$1"; shift
   validate_name "$name"
 
-  local repo="" key_file=""
+  local repo="" key_file="" priority=""
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --repo)
@@ -249,10 +285,19 @@ cmd_add() {
       --key-file)
         [[ $# -ge 2 ]] || die "add: --key-file needs a value"
         key_file="$2"; shift 2 ;;
+      --priority)
+        [[ $# -ge 2 ]] || die "add: --priority needs a value"
+        priority="$2"; shift 2 ;;
       *) die "add: unrecognized argument '$1'" ;;
     esac
   done
   [[ -n "$repo" ]] || die "add: --repo is required"
+  # A non-negative integer, as bin/boards.py requires, spelled the way TOML
+  # spells one: `007` is not a TOML integer. Refused here so the message names
+  # the flag; revert_unless_valid still asks boards.py about the whole file.
+  if [[ -n "$priority" && ! "$priority" =~ ^(0|[1-9][0-9]*)$ ]]; then
+    die "add: --priority must be a non-negative integer, got '$priority'"
+  fi
 
   [[ -d "$repo" ]] || die "no such repository directory: $repo"
   repo="$(cd -- "$repo" && pwd)"
@@ -274,6 +319,7 @@ cmd_add() {
     printf '[boards.%s]\n' "$name"
     printf 'repo = %s\n' "$(toml_string "$repo")"
     [[ -n "$key_file" ]] && printf 'key = %s\n' "$(toml_string "$key_file")"
+    priority_lines "$priority"
   } >>"$tmp"
 
   revert_unless_valid "$tmp" \
@@ -315,8 +361,8 @@ cmd_remove() {
   # Removes the block from "[boards.$name]" up to (not including) the next
   # "[...]" header or end of file. Safe because boardctl is the only writer
   # of this file and never emits anything inside a board's table but plain
-  # KEY = VALUE lines -- there is no nested table to mistake for the next
-  # board's header.
+  # KEY = VALUE lines and the `#` comment `add` writes above a priority --
+  # there is no nested table to mistake for the next board's header.
   awk -v header="[boards.$name]" '
     $0 == header { skip = 1; next }
     skip && /^\[/ { skip = 0 }
