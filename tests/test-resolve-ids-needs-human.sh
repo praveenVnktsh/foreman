@@ -57,8 +57,11 @@ chmod 600 "$workspace_key"
 run_resolve() {
   # run_resolve <api-url>  -- output lands in $work_dir/out.*
   local api_url="$1"
+  # --installation is required and is this installation's own name. The fixture
+  # home declares no installation.toml, so bin/installation.py reads it as the
+  # lone Claude installation and the name is `claude`.
   HOME="$home" FOREMAN_HOME="$foreman_home" FOREMAN_INSTANCE=fixture \
-    "$resolve_ids" --instance fixture --api-url "$api_url" \
+    "$resolve_ids" --instance fixture --installation claude --api-url "$api_url" \
     >"$work_dir/out.log" 2>"$work_dir/err.log"
 }
 

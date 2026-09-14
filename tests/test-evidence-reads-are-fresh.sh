@@ -58,7 +58,11 @@
 #      the ugrep wrapper the agents run. That is #159 with the audit trail
 #      intact and the answer wrong. `--text` still round-trips byte for byte,
 #      which is where the buffer's fidelity on NUL-carrying content is pinned.
-#   7. a read killed mid-fetch leaves no `refs/foreman/fixture/evidence/<pid>` behind.
+#   7. a read killed mid-fetch leaves no
+#      `refs/foreman/<installation>/<board>/evidence/<pid>` behind. This home
+#      declares no installation.toml, so bin/installation.py reads it as the
+#      lone Claude installation and the refs below are
+#      `refs/foreman/claude/fixture/evidence/<pid>`.
 #      Nothing else reaps that namespace, and the ref pins every object the
 #      fetch brought with it.
 #
@@ -104,7 +108,11 @@ export BOARD_HOME="$work_dir/board-home"
 # tmp-dir.sh of their own.
 inst_home="$work_dir/foreman-home"
 fixture_add_instance "$inst_home" fixture
-export HOME="$inst_home" FOREMAN_INSTANCE=fixture
+# FOREMAN_HOME is named explicitly. config.sh no longer derives it from $HOME:
+# it asks bin/installation.py, which reads the home as the parent of this
+# clone. An explicit home is what that derivation yields to, and it is how this
+# file stays pointed at its temporary directory.
+export HOME="$inst_home" FOREMAN_HOME="$inst_home/.foreman" FOREMAN_INSTANCE=fixture
 
 fail() {
   echo "FAIL: $1" >&2
@@ -279,7 +287,7 @@ echo "  ok: $races concurrent pairs each answered their own question"
 # Nothing accumulates in the shared ref namespace either: a leaked private ref
 # per call would keep every fetched commit alive forever in a repository the
 # board fetches into every few minutes.
-leaked="$(git -C "$tick" for-each-ref --format='%(refname)' 'refs/foreman/fixture/evidence/*')"
+leaked="$(git -C "$tick" for-each-ref --format='%(refname)' 'refs/foreman/claude/fixture/evidence/*')"
 [[ -z "$leaked" ]] || fail "evidence.sh left private refs behind:
 $leaked"
 echo "  ok: no private refs left behind"
@@ -580,7 +588,7 @@ echo "  ok: no diff buffer left behind in the scratch root"
 
 # --- 7. a killed read leaves no ref behind -----------------------------------
 #
-# The leak window is between the fetch that creates `refs/foreman/fixture/evidence/<pid>`
+# The leak window is between the fetch that creates `refs/foreman/claude/fixture/evidence/<pid>`
 # and the `update-ref -d` that removes it -- and the fetch is the slow part, so
 # `claude stop` on a stalled tick and a tick's own budget expiring both land
 # here. Nothing reaps that namespace: `sweep.sh` handles worktrees and board
@@ -597,7 +605,7 @@ cat > "$shim_dir/git" <<SHIM
 # Stall inside evidence.sh's leak window, and only there.
 for arg in "\$@"; do
   case "\$arg" in
-    refs/foreman/fixture/evidence/*)
+    refs/foreman/claude/fixture/evidence/*)
       case " \$* " in *" rev-parse "*) sleep 3 ;; esac
       ;;
   esac
@@ -610,10 +618,10 @@ REPO="$tick" PATH="$shim_dir:$PATH" "$evidence" main deploy.sh >/dev/null 2>&1 &
 victim=$!
 # The ref exists the moment the fetch returns, which is before the stall.
 for _ in $(seq 1 100); do
-  git -C "$tick" show-ref --verify --quiet "refs/foreman/fixture/evidence/$victim" && break
+  git -C "$tick" show-ref --verify --quiet "refs/foreman/claude/fixture/evidence/$victim" && break
   sleep 0.1
 done
-git -C "$tick" show-ref --verify --quiet "refs/foreman/fixture/evidence/$victim" || {
+git -C "$tick" show-ref --verify --quiet "refs/foreman/claude/fixture/evidence/$victim" || {
   fail "the private ref never appeared, so this case proves nothing about the
   window it is supposed to widen"
 }
@@ -621,7 +629,7 @@ kill -TERM "$victim"
 wait "$victim" || true
 rm -f "$shim_dir/git"
 
-leaked="$(git -C "$tick" for-each-ref --format='%(refname)' 'refs/foreman/fixture/evidence/*')"
+leaked="$(git -C "$tick" for-each-ref --format='%(refname)' 'refs/foreman/claude/fixture/evidence/*')"
 [[ -z "$leaked" ]] || fail "a killed read left its private ref behind:
 $leaked
   SIGKILL cannot be trapped and the sweep reaps that case, but a TERM -- which

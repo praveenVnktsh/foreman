@@ -69,8 +69,11 @@ chmod 600 "$workspace_key"
 run_resolve() {
   # run_resolve <api-url> [extra args...]  -- output lands in $work_dir/out.*
   local api_url="$1"; shift
+  # --installation is required and is this installation's own name. The fixture
+  # home declares no installation.toml, so bin/installation.py reads it as the
+  # lone Claude installation and the name is `claude`.
   HOME="$home" FOREMAN_HOME="$foreman_home" FOREMAN_INSTANCE=fixture \
-    "$resolve_ids" --instance fixture --api-url "$api_url" "$@" \
+    "$resolve_ids" --instance fixture --installation claude --api-url "$api_url" "$@" \
     >"$work_dir/out.log" 2>"$work_dir/err.log"
 }
 
@@ -144,6 +147,11 @@ JSON
 # created only the labels it writes itself would leave them typing the name by
 # hand, and the typo shows up as a card that silently never parks. Adding it to
 # the fixture to hold the create count at one would delete the only coverage.
+#
+# `foreman:claude` is absent too, and is the THIRD create. It is the label that
+# says which installation owns a card, and its name is only known at run time
+# from --installation -- so a fixture that pre-declared it would stop proving
+# that an installation resolving for the first time gets a label at all.
 
 start_stub "$work_dir/happy.json"
 if run_resolve "$STUB_URL"; then
@@ -175,16 +183,27 @@ if run_resolve "$STUB_URL"; then
   if [[ "$created_id" == created-* && "$needs_plan_id" == created-* ]] \
        && grep -q "^mutation CreateLabel .*\"board-failed\"" "$happy_log" \
        && grep -q "^mutation CreateLabel .*\"needs-plan\"" "$happy_log" \
-       && [[ "$create_calls" -eq 2 ]]; then
+       && [[ "$create_calls" -eq 3 ]]; then
     ok "creates both absent labels, the board's and the operator's, and records their ids"
   else
     not_ok "creates absent labels: board-failed=[$created_id] needs-plan=[$needs_plan_id] creates=[$create_calls] log=$(cat "$happy_log")"
   fi
 
+  # The installation's own label, named from --installation and written where
+  # the tick reads it. An installation that never resolves one cannot claim a
+  # card, and every card it takes stays owned by whoever is default.
+  installation_id="$(read_id "$ids_env" LABEL_INSTALLATION)"
+  if [[ "$installation_id" == created-* ]] \
+       && grep -q "^mutation CreateLabel .*\"foreman:claude\"" "$happy_log"; then
+    ok "creates foreman:<installation> and records it as LABEL_INSTALLATION"
+  else
+    not_ok "creates foreman:<installation>: LABEL_INSTALLATION=[$installation_id] log=$(cat "$happy_log")"
+  fi
+
   if [[ "$(read_id "$ids_env" LABEL_FOLLOW_UP)" == "label-followup" && \
         "$(read_id "$ids_env" LABEL_FOLLOW_UPS_WRITTEN)" == "label-followupswritten" && \
         "$(read_id "$ids_env" LABEL_NEEDS_MERGE)" == "label-needsmerge" && \
-        "$create_calls" -eq 2 ]]; then
+        "$create_calls" -eq 3 ]]; then
     ok "reuses a label that does exist rather than creating a second"
   else
     not_ok "reuses a label that does exist: $(cat "$ids_env")"
@@ -512,7 +531,7 @@ start_stub "$work_dir/leak_check.json"
 # REPO is set in the ENVIRONMENT, ambient, the way an export from a previous
 # `config.sh` load would be -- not passed by resolve-ids.py's own logic.
 if HOME="$home" FOREMAN_HOME="$foreman_home" FOREMAN_INSTANCE=leaky REPO="$target" \
-    "$resolve_ids" --instance leaky --api-url "$STUB_URL" \
+    "$resolve_ids" --instance leaky --installation claude --api-url "$STUB_URL" \
     >"$work_dir/leak.out.log" 2>"$work_dir/leak.err.log"; then
   leaky_ids="$leaky_home/ids.env"
   team_id="$(read_id "$leaky_ids" LINEAR_TEAM_ID)"

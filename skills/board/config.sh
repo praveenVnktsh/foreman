@@ -3,11 +3,117 @@
 # Every value is overridable from the environment so a tick can be throttled
 # without editing the skill.
 #
-# Sourced once per board, in a subshell. ONE tick agent walks every board on
-# this machine, so it must never hold every board's values -- or every board's
-# credential -- in one environment. That is why KEY_FILE below is a PATH and
-# why nothing here opens it: the key stays out of the calling process, and the
-# subprocess that actually talks to Linear is the only thing that reads it.
+# Sourced once per board, in a subshell. ONE tick agent walks every board this
+# installation serves, so it must never hold every board's values -- or every
+# board's credential -- in one environment. That is why KEY_FILE below is a
+# PATH and why nothing here opens it: the key stays out of the calling process,
+# and the subprocess that actually talks to Linear is the only thing that reads
+# it.
+
+# This installation's own clone. Derived once, from this file's location:
+# config.sh lives in skills/board/, so the root of the clone is two directories
+# up. The target repository is not obliged to ship any of these scripts.
+#
+# THREE ROOTS, and they are not each other. This one is the CLONE
+# (~/.foreman/<installation>/install). `FOREMAN_HOME` is the installation's own
+# directory, the clone's parent. `FOREMAN_ROOT` is the MACHINE root that holds
+# every installation, one level above that. This local used to be called
+# `_foreman_root`, one character from the machine root's name, in a file that
+# exports both.
+_foreman_install_root="$(dirname -- "$(dirname -- "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)")")"
+
+# The reader for this installation's loaders -- bin/installation.py,
+# bin/boards.py, bin/contract.py. bin/load-pairs.sh carries the bash 3.2
+# temp-file rule behind it, and bin/boardctl and the three installers source
+# the same file.
+#
+# From THIS installation's root, the same root every path below is derived
+# from. A missing file is refused here, by name: without it every load below
+# would fail as "command not found" and blame the loader it ran.
+if ! . "$_foreman_install_root/bin/load-pairs.sh"; then
+  printf 'foreman: cannot read %s/bin/load-pairs.sh\n' "$_foreman_install_root" >&2
+  if [[ $- == *i* ]]; then return 1; else exit 1; fi
+fi
+
+# Which installation this is: its home, the root it shares with its siblings,
+# its harness, whether it owns the cards that carry no label, and the four
+# stage models further down. bin/installation.py reads all of that out of
+# $FOREMAN_HOME/installation.toml, and answers for a home that has none by
+# naming it a lone Claude installation -- which is what every machine looked
+# like before installations existed.
+#
+# FOREMAN_HOME has NO default here any more. One machine now runs several
+# installations under one root, and identity comes from the path: the home is
+# the parent of this clone. installation.py owns that derivation and this file
+# copies none of it -- two derivations of one home agree only until one of
+# them is edited, and the half that disagreed would read a sibling's
+# boards.toml. An explicit FOREMAN_HOME still wins, which is how a test points
+# everything at a temporary directory.
+#
+# Exported BEFORE the load rather than with the rest at the end: both
+# installation.py here and bin/boards.py below read $FOREMAN_HOME themselves
+# to find their file, so an unexported home leaves this shell and the loaders
+# it runs answering for two different installations. `export` on an unset
+# variable exports nothing, so this never turns an absent home into an empty
+# one.
+export FOREMAN_HOME
+# These four come from the loader ALONE, so they are unset first. Every other
+# key in this file is environment-wins, and these four cannot be: they say who
+# this installation is, and the environment is not allowed to answer that.
+#
+# Two failures, both silent. `IS_DEFAULT=1` in the environment makes a
+# non-default installation claim every card carrying no `foreman:*` label,
+# straight past bin/installation.py's one-default check -- two ticks then
+# dispatch the same unlabelled card. `INSTALLATION=a-b` reopens the
+# hyphen-absorption hole this file documents for INSTANCE below, one segment
+# earlier: worktree_path joins the installation with a hyphen, so a-b's
+# worktrees match installation a's sweep glob on a shared REPO.
+#
+# FOREMAN_HOME above is deliberately NOT in this list. An explicit home is how
+# every test in tests/ points a whole installation at a temporary directory,
+# and it selects a home rather than contradicting what that home declares.
+unset INSTALLATION IS_DEFAULT HARNESS FOREMAN_ROOT
+if ! _foreman_load_pairs "this installation's declaration" "$_foreman_install_root/bin/installation.py"; then
+  if [[ $- == *i* ]]; then return 1; else exit 1; fi
+fi
+if [[ -z "${FOREMAN_HOME:-}" ]]; then
+  # installation.py never emits an empty home, so an empty one here can only
+  # come from an explicitly empty environment override, which the `-` above
+  # honours. It would resolve boards.toml, instances/ and supervise.lock
+  # against "/", quietly.
+  printf 'foreman: FOREMAN_HOME resolved empty; leave it unset to derive it from this installation\n' >&2
+  if [[ $- == *i* ]]; then return 1; else exit 1; fi
+fi
+# No hyphen, no slash, the same rule INSTANCE is held to below and for the same
+# glob: worktree_path and every sweep glob join the installation and the
+# instance with a HYPHEN, so INSTALLATION=a-b makes "foreman-a-b-demo-PRA-1"
+# match installation a's glob "foreman-a-*" on a repository both serve.
+#
+# Re-checked HERE even though bin/installation.py applies the rule when it
+# reads the name. The loader above is not the only way a value arrives, and a
+# name this shell pastes into a glob is worth one line to re-establish. It is
+# also the check that catches a loader whose own rule is one day loosened.
+if [[ ! "$INSTALLATION" =~ ^[A-Za-z0-9_]+$ ]]; then
+  printf 'foreman: installation name %s is invalid; only letters, digits and underscore are allowed (no hyphen, no slash)\n' "$INSTALLATION" >&2
+  if [[ $- == *i* ]]; then return 1; else exit 1; fi
+fi
+export FOREMAN_HOME FOREMAN_ROOT INSTALLATION HARNESS IS_DEFAULT
+
+# The adapter for this installation's harness: Claude Code, Codex or OpenCode.
+# Every script that ran `claude` itself runs this instead, so one file knows
+# how a CLI spells its flags. The five verbs are in
+# docs/specs/2026-09-14-installations-per-harness-design.md.
+#
+# Refused HERE, where the installation is read, and not at the spawn. An
+# adapter that is missing or not executable otherwise surfaces inside
+# dispatch.sh, after the worktree is cut and the branch pushed, once for every
+# card the board takes.
+HARNESS_SH="$_foreman_install_root/skills/board/harness/$HARNESS.sh"
+if [[ ! -x "$HARNESS_SH" ]]; then
+  printf 'foreman: harness %s has no executable adapter at %s\n' "$HARNESS" "$HARNESS_SH" >&2
+  if [[ $- == *i* ]]; then return 1; else exit 1; fi
+fi
+export HARNESS_SH
 
 # Which board this is, where its repository is, and where its runtime lives.
 #
@@ -16,12 +122,6 @@
 # installed once and pointed at many. The wrong answer was silent: the board
 # would cut its worktrees inside its own installation. The board is now told
 # which repository it serves, and refuses to guess.
-FOREMAN_HOME="${FOREMAN_HOME:-$HOME/.foreman}"
-# Exported here rather than with the rest at the end: bin/boards.py below reads
-# $FOREMAN_HOME itself to find boards.toml, and a test that points this at a
-# temporary directory has to move both halves at once or the loader and its
-# parser disagree about which machine's boards they are reading.
-export FOREMAN_HOME
 INSTANCE="${FOREMAN_INSTANCE:-}"
 if [[ -z "$INSTANCE" ]]; then
   printf 'foreman: FOREMAN_INSTANCE is unset; refusing to guess which repository to build\n' >&2
@@ -32,11 +132,13 @@ if [[ -z "$INSTANCE" ]]; then
   if [[ $- == *i* ]]; then return 1; else exit 1; fi
 fi
 # No hyphen, no slash. worktree_path and every worktree/scratch glob in
-# sweep.sh join the instance and the ticket with a HYPHEN
-# (foreman-<instance>-<ticket>), which an unconstrained instance name can
-# absorb: INSTANCE=alpha-x makes "foreman-alpha-x-PRA-1" match the glob
-# "foreman-alpha-*", so alpha's sweep would reap alpha-x's worktrees on a
-# shared REPO. agent_name/branch_name/evidence_ref are `/`-delimited and safe
+# sweep.sh join the installation, the instance and the ticket with a HYPHEN
+# (foreman-<installation>-<instance>-<ticket>), which an unconstrained instance
+# name can absorb: INSTANCE=alpha-x makes "foreman-claude-alpha-x-PRA-1" match
+# the glob "foreman-claude-alpha-*", so alpha's sweep would reap alpha-x's
+# worktrees on a shared REPO. bin/installation.py applies this same rule to the
+# installation segment, for this same reason.
+# agent_name/branch_name/evidence_ref are `/`-delimited and safe
 # regardless, but the name is constrained here rather than changing the
 # worktree delimiter -- any separator can be absorbed by an unconstrained
 # name, so the name is what actually has to be closed. Underscores stay legal
@@ -52,7 +154,7 @@ if [[ ! "$INSTANCE" =~ ^[A-Za-z0-9_]+$ ]]; then
 fi
 # The per-board runtime directory: cards/, HALT, and the ids.env cache.
 #
-# Its absence is not a refusal any more. ~/.foreman/boards.toml is what
+# Its absence is not a refusal any more. $FOREMAN_HOME/boards.toml is what
 # declares which boards exist, so bin/boards.py is what refuses an unknown
 # board, by name. This directory is derived state that a board which has never
 # run has never created, and every writer of it -- card_log below,
@@ -61,44 +163,6 @@ fi
 # wrong problem.
 INSTANCE_HOME="$FOREMAN_HOME/instances/$INSTANCE"
 BOARD_HOME="${BOARD_HOME:-$INSTANCE_HOME}"
-
-# This installation's own bin/. Derived once, from this file's location:
-# config.sh lives in skills/board/, so the root is two directories up. The
-# target repository is not obliged to ship any of these scripts.
-_foreman_root="$(dirname -- "$(dirname -- "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)")")"
-
-# Read one of this installation's loaders -- bin/boards.py, bin/contract.py --
-# into this shell. Both emit NUL-separated KEY, VALUE pairs and always emit
-# every key.
-#
-# Through a TEMP FILE, never a `$(...)` capture: bash 3.2 silently discards NUL
-# bytes in command substitution (measured on this machine -- `printf 'a\0b\0'`
-# captured through `$(...)` comes back 2 bytes, not 4), which would make every
-# key end up unset with a zero exit status. A file preserves the NUL delimiters
-# and lets the read loop and the exit-status check both work.
-#
-# The locals are lowercase and the key regex is uppercase-only, so a loader can
-# never emit a key that overwrites this function's own state.
-_foreman_load_pairs() { # <what> <loader> [args...]
-  local what="$1"; shift
-  local file key value
-  file="$(mktemp)" || {
-    printf 'foreman: mktemp failed; cannot read %s\n' "$what" >&2
-    return 1
-  }
-  if ! "$@" >"$file"; then
-    rm -f "$file"
-    printf 'foreman: %s did not load (see above)\n' "$what" >&2
-    return 1
-  fi
-  while IFS= read -r -d '' key && IFS= read -r -d '' value; do
-    [[ "$key" =~ ^[A-Z_][A-Z0-9_]*$ ]] || continue
-    # Environment wins. `-` and not `:-`: an explicitly empty override must
-    # mean empty, the same distinction HIGH_RISK_PATHS depends on.
-    eval "$key=\"\${$key-\$value}\""
-  done <"$file"
-  rm -f "$file"
-}
 
 # ids.env is KEY=VALUE, written by bin/resolve-ids.py, never by hand and never
 # by a target repository. Read line by line rather than sourced: the same rule
@@ -116,12 +180,12 @@ _foreman_read_env() {
   done <"$file"
 }
 
-# What this machine declares about this board: REPO, and the KEY_FILE holding
-# the credential for the Linear workspace that board lives in. Two facts, one
-# file, ~/.foreman/boards.toml -- the Linear team and project come from the
-# target repository's own board.toml below, because the repository declares
-# itself and a second copy on this machine would drift.
-if ! _foreman_load_pairs "$FOREMAN_HOME/boards.toml" "$_foreman_root/bin/boards.py" "$INSTANCE"; then
+# What this installation declares about this board: REPO, and the KEY_FILE
+# holding the credential for the Linear workspace that board lives in. Two
+# facts, one file, $FOREMAN_HOME/boards.toml -- the Linear team and project come
+# from the target repository's own board.toml below, because the repository
+# declares itself and a second copy here would drift.
+if ! _foreman_load_pairs "$FOREMAN_HOME/boards.toml" "$_foreman_install_root/bin/boards.py" "$INSTANCE"; then
   if [[ $- == *i* ]]; then return 1; else exit 1; fi
 fi
 
@@ -154,14 +218,26 @@ fi
 # The one process that reads the key refuses by path when it cannot.
 
 # The target's own contract. Everything a repository knows about itself.
-if ! _foreman_load_pairs "$REPO/board.toml" "$_foreman_root/bin/contract.py" "$REPO/board.toml"; then
+if ! _foreman_load_pairs "$REPO/board.toml" "$_foreman_install_root/bin/contract.py" "$REPO/board.toml"; then
   if [[ $- == *i* ]]; then return 1; else exit 1; fi
 fi
 export REPO KEY_FILE INSTANCE INSTANCE_HOME BOARD_HOME
 
 MAX_BUDGET_USD="${MAX_BUDGET_USD:-}"
 
-# One model per STAGE, because the three stages need different things.
+# One model per STAGE, because the stages need different things.
+#
+# The four values are loaded above, from bin/installation.py. The defaults this
+# file used to hold now live there, because an installation declares its own:
+# `claude` keeps exactly what was typed here (`fable`, `fable`, `opus`,
+# `opus`), and a `codex` or `opencode` installation has no defaults at all and
+# must name all four. A wrong model name on those two harnesses is not refused
+# at the spawn -- the agent fails inside its own log and the card simply never
+# moves -- so installation.py refuses an unnamed one in front of the operator.
+#
+# The TICK follows the prose in skills/board/SKILL.md and holds no state, so a
+# tick that gets a pass wrong costs one pass: the next one re-derives every
+# card's position from Linear, gh and git. It is not where strength is spent.
 #
 # The PLAN is where the strongest model is spent. It is drawn once, before any
 # code exists, and every build agent afterwards is only as good as the graph it
@@ -177,13 +253,11 @@ MAX_BUDGET_USD="${MAX_BUDGET_USD:-}"
 # The REVIEW reads a diff nobody else will read again before it merges, and a
 # missed blocking finding is discovered in production. It stays at `opus`.
 #
-# `-`, not `:-`: `PLAN_MODEL=` must reach the CLI as an empty `--model`, which
-# Claude Code reads as "inherit this session's model" -- the way back to the
-# previous behaviour, and the same distinction every other override in this
-# file makes.
-PLAN_MODEL="${PLAN_MODEL-fable}"
-BUILD_MODEL="${BUILD_MODEL:-opus}"
-REVIEW_MODEL="${REVIEW_MODEL:-opus}"
+# The environment still wins over all four, with `-` and not `:-`, because
+# _foreman_load_pairs applies `-` to every key it reads: `PLAN_MODEL=` must
+# reach the CLI as an empty `--model`, which Claude Code reads as "inherit this
+# session's model" -- the way back to the previous behaviour, and the same
+# distinction every other override in this file makes.
 
 # How many times a card may FAIL to be planned before it is parked, separate
 # from MAX_BUILD_ATTEMPTS and MAX_PLAN_ROUNDS.
@@ -205,15 +279,20 @@ REVIEW_MODEL="${REVIEW_MODEL:-opus}"
 # "disabled" reading of an empty attempt count, only a nonsensical one.
 MAX_PLAN_ATTEMPTS="${MAX_PLAN_ATTEMPTS:-2}"
 
-# The MACHINE's ceiling, across every instance sharing it -- not this
-# repository's `MAX_CONCURRENT`, which is a per-instance limit declared in
-# board.toml and has no idea another instance's cards exist. Two instances
-# each dispatching up to their own MAX_CONCURRENT can still jointly exceed
-# what one machine's RAM and /tmp can sustain, which is the same class of
-# failure PROBE_TMP_MB/MIN_FREE_TMP_MB guard against for a single instance.
-# `reconcile.py --host-slots` does the counting, across
-# `~/.foreman/instances/*/cards/`; this is the ceiling it is checked against
-# before a dispatch, in addition to the instance's own MAX_CONCURRENT.
+# The MACHINE's ceiling, across every instance of every installation sharing it
+# -- not this repository's `MAX_CONCURRENT`, which is a per-instance limit
+# declared in board.toml and has no idea another instance's cards exist. Two
+# instances each dispatching up to their own MAX_CONCURRENT can still jointly
+# exceed what one machine's RAM and /tmp can sustain, which is the same class of
+# failure PROBE_TMP_MB/MIN_FREE_TMP_MB guard against for a single instance. A
+# second installation is that same arithmetic again, on a harness this one
+# cannot see.
+#
+# `reconcile.py --host-slots` does the counting, across every sibling's
+# `instances/*/cards/` under $FOREMAN_ROOT, and nothing here counts anything:
+# one number stays one number for the machine, and the file that can see every
+# installation is the one that adds them up. This is the ceiling it is checked
+# against before a dispatch, in addition to the instance's own MAX_CONCURRENT.
 HOST_MAX_CONCURRENT="${HOST_MAX_CONCURRENT:-4}"
 
 # How stale a card's LAST history.jsonl entry may be before --host-slots stops
@@ -270,21 +349,23 @@ AGENT_SKIP_PERMISSIONS="${AGENT_SKIP_PERMISSIONS-1}"
 
 # The self-looping tick agent, and the watchdog that keeps it alive.
 #
-# This machine runs ONE long-lived background agent executing `/loop <interval>
-# /board`. Cron does not run ticks — it runs supervise.sh, which only ensures
-# that agent exists and is healthy. Keeping dispatch out of cron is deliberate:
-# a watchdog that could also dispatch would double-dispatch the moment it
-# misjudged liveness.
+# This INSTALLATION runs ONE long-lived background agent executing the board
+# skill on a loop. Cron does not run ticks — it runs supervise.sh, which only
+# ensures that agent exists and is healthy. Keeping dispatch out of cron is
+# deliberate: a watchdog that could also dispatch would double-dispatch the
+# moment it misjudged liveness.
 #
-# The name carries NO board segment, unlike agent_name, branch_name,
-# worktree_path and evidence_ref below. There is ONE tick for every board on
-# this machine -- it walks them in turn -- so a per-board name would ask
-# supervise.sh to keep N agents alive and let N ticks dispatch against one
-# machine-wide HOST_MAX_CONCURRENT. The per-CARD names keep their board
-# segment, which is what stops two boards reaping each other's work.
-TICK_AGENT_NAME="${TICK_AGENT_NAME:-foreman/tick}"
+# The name carries the INSTALLATION and no board segment, unlike agent_name,
+# branch_name, worktree_path and evidence_ref below. There is ONE tick for
+# every board this installation serves -- it walks them in turn -- so a
+# per-board name would ask supervise.sh to keep N agents alive and let N ticks
+# dispatch against one machine-wide HOST_MAX_CONCURRENT. The installation
+# segment is the other half: a machine runs one tick per installation, on a
+# different harness each, and two ticks named `foreman/tick` in one registry
+# would each read the other as the one supervise.sh must stop before starting a
+# replacement.
+TICK_AGENT_NAME="${TICK_AGENT_NAME:-foreman/$INSTALLATION/tick}"
 TICK_INTERVAL_MINUTES="${TICK_INTERVAL_MINUTES:-20}"
-TICK_MODEL="${TICK_MODEL:-fable}"
 
 # Wedged: mid-turn and silent. A tick genuinely working is never quiet this long.
 TICK_STALL_MINUTES="${TICK_STALL_MINUTES:-45}"
@@ -325,13 +406,13 @@ TICK_DRAIN_SECONDS="${TICK_DRAIN_SECONDS:-120}"
 # defaults. Waiting less would refuse a gesture that was only ever queued.
 TICK_LOCK_WAIT_SECONDS="${TICK_LOCK_WAIT_SECONDS:-240}"
 
-# How long supervise.sh waits for a tick it asked `claude stop` to close to
+# How long supervise.sh waits for a tick it asked the adapter to `stop` to
 # actually leave the registry, before refusing to start a replacement.
 #
-# THIS BOUND IS A CORRECTNESS BOUND, unlike TICK_DRAIN_SECONDS above.
-# `claude stop` is not instantaneous and it can fail, and a replacement started
-# beside a tick that never stopped gives one machine two ticks, both running
-# `/loop /board` against one HOST_MAX_CONCURRENT -- the double-dispatch
+# THIS BOUND IS A CORRECTNESS BOUND, unlike TICK_DRAIN_SECONDS above. `stop` is
+# not instantaneous and it can fail, and a replacement started beside a tick
+# that never stopped gives one installation two ticks, both looping the board
+# skill against one HOST_MAX_CONCURRENT -- the double-dispatch
 # supervise.sh exists to prevent. Worse, it is invisible: the registry read
 # reports only the NEWEST agent of that name, so every later fire sees the
 # healthy replacement and never the survivor behind it. supervise.sh therefore
@@ -342,8 +423,8 @@ TICK_LOCK_WAIT_SECONDS="${TICK_LOCK_WAIT_SECONDS:-240}"
 # the tick whose stop is slowest to land is the wedged one the watchdog exists
 # to replace, so one attempt followed by a wait gave up on the case that matters.
 #
-# 30 seconds is far longer than `claude stop` takes on a healthy daemon and
-# short enough that an operator waiting on a restart is not left guessing.
+# 30 seconds is far longer than a `stop` takes on a healthy harness and short
+# enough that an operator waiting on a restart is not left guessing.
 TICK_STOP_TIMEOUT_SECONDS="${TICK_STOP_TIMEOUT_SECONDS:-30}"
 
 # How long a ticket-mode sweep waits for a terminal card's idle agents to leave
@@ -360,8 +441,8 @@ AGENT_STOP_TIMEOUT_SECONDS="${AGENT_STOP_TIMEOUT_SECONDS:-30}"
 # How long `supervise.sh --restart` waits for the REPLACEMENT tick to appear in
 # the agent registry before reporting failure.
 #
-# `claude --bg` returns as soon as the agent is SPAWNED, so the "started
-# foreman/tick" line supervise.sh prints is not evidence that a tick exists. A
+# The adapter's `spawn` returns as soon as the agent is SPAWNED, so the
+# "started" line supervise.sh prints is not evidence that a tick exists. A
 # restart that reports success over a tick which never came up leaves the board
 # silently stopped until the next timer fire, and the operator has just been
 # told it worked, so nobody looks. A restart is the one gesture that cannot
@@ -407,6 +488,11 @@ WAIT_BUILD_SECONDS="${WAIT_BUILD_SECONDS:-0}"
 # what filled the list. Passed per spawn rather than written into the
 # operator's settings.json, so their own sessions on the machine keep Remote
 # Control too.
+#
+# dispatch.sh hands it to the harness adapter as `--settings`. Only Claude Code
+# registers a Remote Control session, so only harness/claude.sh forwards it;
+# the codex and opencode adapters accept it and drop it, because nothing on
+# those harnesses registers with a claude.ai account for it to turn off.
 CARD_AGENT_SETTINGS='{"disableRemoteControl":true}'
 
 # When set, mutating operations print what they would do and exit.
@@ -448,10 +534,10 @@ BOARD_DRY_RUN="${BOARD_DRY_RUN:-}"
 # "$WORKTREE")"`) or silently reap nothing (sweep.sh's `remove_agent_tmp
 # "$(agent_tmp_for "$path")"`, where an empty argument passes
 # `[[ -d "" ]] || return 0` and reports success). Named here from
-# $_foreman_root and kept, rather than derived a second time, because
+# $_foreman_install_root and kept, rather than derived a second time, because
 # agent_tmp_for() below needs the identical path: two independent derivations
 # of one path agree only until one of them is edited.
-_foreman_tmp_dir_sh="$_foreman_root/bin/tmp-dir.sh"
+_foreman_tmp_dir_sh="$_foreman_install_root/bin/tmp-dir.sh"
 if ! AGENT_TMP_ROOT="$(BOARD_HOME="$BOARD_HOME" "$_foreman_tmp_dir_sh" --root)"; then
   printf 'foreman: bin/tmp-dir.sh failed; cannot derive the agent scratch root\n' >&2
   if [[ $- == *i* ]]; then return 1; else exit 1; fi
@@ -462,20 +548,28 @@ card_dir() { printf '%s/cards/%s\n' "$BOARD_HOME" "$1"; }
 # reaps the worktree can reap the scratch without tracking anything.
 # THIS INSTALLATION's bin/tmp-dir.sh -- see the comment above AGENT_TMP_ROOT.
 agent_tmp_for() { BOARD_HOME="$BOARD_HOME" "$_foreman_tmp_dir_sh" "$1"; }
-# Every name carries the instance. `claude agents` is one flat registry shared
-# by every installation on this machine, matched by prefix in reconcile.py and
-# by regex in watch-agents.py; without this segment two instances reap each
-# other's agents, and two projects may legitimately both use the team key PRA.
+# Every name carries the installation and then the instance. The agent registry
+# is one flat list shared by everything on this machine, matched by prefix in
+# reconcile.py and sweep.sh and by regex in watch-agents.py; without the
+# INSTANCE segment two boards reap each other's agents, and two projects may
+# legitimately both use the team key PRA.
+#
+# The INSTALLATION segment closes the same hole one level up: two installations
+# on this machine may serve one repository -- that is the point of running a
+# second harness -- and they then share a board name, a ticket key, a REPO and
+# so every worktree, branch and evidence ref under it. Without this segment the
+# codex installation's sweep reaps the claude installation's worktree, and its
+# dispatch pushes onto the branch a live build is committing to.
 #
 # The prefix is its own function because sweep.sh matches on it: everything a
-# card ever dispatched -- plan, build, review, every attempt and every
-# `--bg --resume` fork -- shares `foreman/<instance>/<ticket>/`, and a second
+# card ever dispatched -- plan, build, review, every attempt and every resume
+# fork -- shares `foreman/<installation>/<instance>/<ticket>/`, and a second
 # spelling of that shape here or there is how a sweep starts missing sessions.
-card_agents_prefix() { printf 'foreman/%s/%s/\n' "$INSTANCE" "$1"; }
+card_agents_prefix() { printf 'foreman/%s/%s/%s/\n' "$INSTALLATION" "$INSTANCE" "$1"; }
 agent_name() { printf '%s%s-%s\n' "$(card_agents_prefix "$1")" "$2" "$3"; }
-worktree_path() { printf '%s/.claude/worktrees/foreman-%s-%s\n' "$REPO" "$INSTANCE" "$1"; }
-branch_name() { printf 'foreman/%s/%s\n' "$INSTANCE" "$1"; }
-evidence_ref() { printf 'refs/foreman/%s/evidence/%s\n' "$INSTANCE" "$1"; }
+worktree_path() { printf '%s/.claude/worktrees/foreman-%s-%s-%s\n' "$REPO" "$INSTALLATION" "$INSTANCE" "$1"; }
+branch_name() { printf 'foreman/%s/%s/%s\n' "$INSTALLATION" "$INSTANCE" "$1"; }
+evidence_ref() { printf 'refs/foreman/%s/%s/evidence/%s\n' "$INSTALLATION" "$INSTANCE" "$1"; }
 
 # Append one line to a card's transition log. Never rewritten, only appended.
 card_log() {

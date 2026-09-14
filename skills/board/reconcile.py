@@ -8,7 +8,15 @@ of running twenty shell commands and eyeballing the output.
 
 Linear is deliberately NOT read here — the tick already has the card's column
 from MCP and joins it in. This script covers the three evidence sources that
-answer "what actually happened": `claude agents`, git, and `gh`.
+answer "what actually happened": the harness adapter, git, and `gh`.
+
+Nothing here runs `claude` by name any more. One machine runs several
+installations at once, each on a different coding-agent harness, so liveness
+and the transcript path are asked of `$HARNESS_SH` -- the adapter config.sh
+selected for THIS installation. Every name this file matches on carries the
+installation for the same reason: two installations may serve one repository,
+and without the segment each would read the other's agents, worktrees and
+branches as its own.
 
 Nothing here is authoritative on its own. Every field is re-derived on each run
 from the outside world, so deleting the sidecar loses history, never position.
@@ -18,7 +26,6 @@ from __future__ import annotations
 
 import json
 import os
-import re
 import subprocess
 import sys
 import time
@@ -35,7 +42,7 @@ def _load_config() -> dict[str, str]:
     keys = (
         "REPO", "BOARD_HOME", "REQUIRED_CHECKS", "HIGH_RISK_PATHS",
         "DEPLOY_WORKFLOW", "DEPLOY_STEP", "CI_WORKFLOW", "INSTANCE",
-        "FOREMAN_HOME", "HOST_SLOT_STALE_MINUTES",
+        "FOREMAN_HOME", "HOST_SLOT_STALE_MINUTES", "INSTALLATION", "HARNESS_SH",
     )
     script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.sh")
     printf = 'printf "%s\\0" ' + " ".join(f'"${k}"' for k in keys)
@@ -82,6 +89,10 @@ if not _CFG["CI_WORKFLOW"]:
     )
 CI_WORKFLOW = _CFG["CI_WORKFLOW"]
 FOREMAN_HOME = _CFG["FOREMAN_HOME"]
+INSTALLATION = _CFG["INSTALLATION"]
+# The adapter for this installation's harness. config.sh refuses to export a
+# path that is not executable, so nothing here re-checks it.
+HARNESS_SH = _CFG["HARNESS_SH"]
 # Empty means "disabled" -- see host_slots()'s docstring for why that is a
 # real, supported value and not just an unset-variable accident.
 HOST_SLOT_STALE_MINUTES = (
@@ -130,24 +141,40 @@ def run_json(args: list[str], cwd: str | None = None):
 
 
 def transcript_path(cwd: str, session_id: str) -> str:
-    """Claude persists a session at ~/.claude/projects/<slug>/<id>.jsonl.
+    """The file whose mtime is this agent's last activity, or "" if unknown.
 
-    The slug is the cwd with every '/' and '.' replaced by '-'.
+    Asked of the adapter, `$HARNESS_SH transcript <cwd> <session-id>`. The rule
+    that Claude persists a session at `~/.claude/projects/<slug>/<id>.jsonl`,
+    with the slug being the cwd with every '/' and '.' replaced by '-', now
+    lives in `skills/board/harness/claude.sh` and nowhere else -- Codex and
+    OpenCode keep a log instead, and a copy of Claude's slug rule here would be
+    the wrong path on two harnesses out of three.
+
+    The name stays because `waitfor.py` imports this module's readers rather
+    than restating them.
+
+    "" for an adapter that could not answer, which every caller already handles:
+    a path it does not get is a path it does not stat, so the agent reports no
+    transcript and no idle time. That is the same answer as an agent whose
+    session file has not been written yet, and it is the safe one -- idle time
+    is only ever used to judge a stall, never to decide that work may start.
     """
-    slug = re.sub(r"[/.]", "-", cwd)
-    return os.path.expanduser(f"~/.claude/projects/{slug}/{session_id}.jsonl")
+    code, out = run([HARNESS_SH, "transcript", cwd, session_id])
+    if code != 0:
+        return ""
+    return out.strip()
 
 
 def load_agents() -> list[dict] | None:
     """Every registered agent, or None if the registry could not be read.
 
-    `or []` folded a failed `claude agents` into "no agents are running" — the
+    `or []` folded a failed registry read into "no agents are running" — the
     same defect fixed in supervise.sh, where answering it by starting an agent
     produces a second loop agent. Here it is quieter and worse: a card whose
     build agent exists reads as having none, and step 2 treats "no agent, no PR"
     as a tick that died before dispatching and re-dispatches on top of a live one.
     """
-    agents = run_json(["claude", "agents", "--json", "--all"])
+    agents = run_json([HARNESS_SH, "list"])
     if agents is None or not isinstance(agents, list):
         return None
     return [a for a in agents if isinstance(a, dict)]
@@ -169,7 +196,14 @@ def agents_for(agents: list[dict], ticket: str) -> list[dict]:
     # The trailing slash is load-bearing: without it "PRA-1" is a PREFIX MATCH
     # for "PRA-10", "PRA-11", "PRA-100"... and one card would reap another's
     # agents.
-    prefix = f"foreman/{INSTANCE}/{ticket}/"
+    #
+    # The INSTALLATION segment closes the same hole one level up. The registry
+    # this reads is one flat list for the machine, and two installations may
+    # serve one repository on different harnesses -- so without the segment the
+    # codex tick would match the claude tick's build agent for the same ticket
+    # and read its phase as its own. config.sh:agent_name composes the same
+    # four parts; this must match it exactly or a card reports no agents at all.
+    prefix = f"foreman/{INSTALLATION}/{INSTANCE}/{ticket}/"
     out = []
     for a in agents:
         name = a.get("name") or ""
@@ -264,8 +298,13 @@ def branch_for(ticket: str) -> str:
     request up by this branch, so a copy of the format string that drifts from
     what dispatch.sh actually cuts finds nothing — and a miss reads as an
     absence: the card has no pull request, on evidence about the wrong branch.
+
+    That is why the INSTALLATION segment is here too: config.sh:branch_name
+    gained it so two installations sharing a repository stop pushing onto one
+    branch, and a copy here that had not gained it would find no pull request
+    for any card on any installation.
     """
-    return f"foreman/{INSTANCE}/{ticket}"
+    return f"foreman/{INSTALLATION}/{INSTANCE}/{ticket}"
 
 
 def pr_for(ticket: str) -> dict | None:
@@ -842,7 +881,7 @@ def _entry_age_minutes(entry: dict) -> float | None:
 def card_holds_slot(history_path: str, stale_minutes: float | None) -> bool:
     """Does this card's own record say it is still occupying a build slot?
 
-    `--host-slots` cannot ask Linear or `claude agents` for every instance on
+    `--host-slots` cannot ask Linear or the agent registry for every board on
     the machine the way a single tick asks about its own cards — that would be
     a network or registry round trip per instance, on every dispatch, for a
     ceiling that exists specifically to be cheap enough to check before every
@@ -893,10 +932,73 @@ def card_holds_slot(history_path: str, stale_minutes: float | None) -> bool:
     return True
 
 
-BOARDS_PY = os.path.join(
+_BIN = os.path.join(
     os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
-    "bin", "boards.py",
+    "bin",
 )
+BOARDS_PY = os.path.join(_BIN, "boards.py")
+INSTALLATION_PY = os.path.join(_BIN, "installation.py")
+
+
+def siblings() -> list[tuple[str, str]]:
+    """Every installation on this machine, as `(name, home)`, from
+    `bin/installation.py --siblings`.
+
+    One machine now runs several installations under one root, each on its own
+    harness, and the machine ceiling has to see all of them: two ticks that
+    cannot count each other's cards jointly exceed the RAM and disk that
+    `HOST_MAX_CONCURRENT` exists to bound. The list is asked of
+    `installation.py` rather than derived here, because what makes a directory
+    an installation is that it holds an `installation.toml`, and that test lives
+    in exactly one file.
+
+    `--home` is passed explicitly rather than left to the environment. config.sh
+    has already resolved which home this process serves, and `installation.py`
+    would otherwise re-derive it from its own location -- two derivations that
+    agree until one of them is run from a different clone.
+
+    A home with no `installation.toml` answers with itself alone, named
+    `claude`, which is every machine's layout before installations existed.
+
+    FALLS BACK TO THIS INSTALLATION ALONE when the listing fails, and says so on
+    stderr. Counting nothing would report an empty machine and let every board
+    dispatch at once, which is the one direction this ceiling must never fail
+    in; counting only ourselves is what the machine did yesterday. A listing
+    that fails for a real reason -- two siblings claiming `default = true` --
+    has already taken config.sh down at import, so what reaches here is a race
+    or a permission, not a misconfiguration nobody has seen.
+    """
+    code, out = run([INSTALLATION_PY, "--home", FOREMAN_HOME, "--siblings"])
+    fields = [f for f in out.split("\0") if f]
+    if code != 0 or not fields or len(fields) % 2:
+        print(f"reconcile: could not list the installations under {FOREMAN_HOME}; "
+              f"counting only {INSTALLATION}", file=sys.stderr)
+        return [(INSTALLATION, FOREMAN_HOME)]
+    return list(zip(fields[0::2], fields[1::2]))
+
+
+def slot_key(installation: str, board: str) -> str:
+    """How a board is named across the machine: `<installation>/<board>`.
+
+    Two installations may serve one repository -- that is the point of running a
+    second harness -- so they share a board name. Keyed by board alone, one
+    would have overwritten the other's count in every report below, and the
+    ceiling would have been computed against half the cards in flight.
+    """
+    return f"{installation}/{board}"
+
+
+class BoardsUnreadable(Exception):
+    """One installation's `boards.toml` could not be read.
+
+    It is an exception and not an empty roster because of what an empty roster
+    would mean here: zero cards in flight for that installation. The ceiling
+    would then be computed as though a sibling's builds did not exist, and this
+    installation would dispatch on top of them -- the 2026-09-01 over-dispatch
+    (five builds against a MAX_CONCURRENT of 1, load average 14) one level up,
+    and with nothing on any tick's stderr to say so. One unmounted repository
+    path is enough to make `boards.py` refuse a sibling's file.
+    """
 
 
 def declared_boards(foreman_home: str) -> list[str]:
@@ -908,27 +1010,50 @@ def declared_boards(foreman_home: str) -> list[str]:
     counting — otherwise removing a board from `boards.toml` silently shrinks
     what this machine will ever dispatch, forever, with nothing saying so.
 
-    Tolerant like the rest of this module: a `boards.toml` that fails to load
-    (missing, malformed, refused by `boards.py`) reads as "no boards declared"
-    rather than raising. `--host-slots` is advisory input to a ceiling — a
-    machine not yet carrying a valid `boards.toml` must not take the tick down
-    over it.
+    RAISES `BoardsUnreadable` when that file will not load, rather than reading
+    a failed load as "no boards declared". See the exception's own docstring:
+    the tolerant version turned a sibling nobody could read into a sibling with
+    nothing in flight, which is the one direction this count must never fail in.
+    `boards.py`'s own message is carried through, because it is the only thing
+    that says WHICH declaration is wrong.
     """
-    code, out = run([BOARDS_PY, "--file", os.path.join(foreman_home, "boards.toml"), "--list"])
-    if code != 0:
-        return []
-    return [name for name in out.split("\0") if name]
+    boards_toml = os.path.join(foreman_home, "boards.toml")
+    try:
+        done = subprocess.run([BOARDS_PY, "--file", boards_toml, "--list"],
+                              capture_output=True, text=True, timeout=GH_TIMEOUT)
+    except (subprocess.TimeoutExpired, FileNotFoundError) as exc:
+        raise BoardsUnreadable(f"could not run {BOARDS_PY} on {boards_toml}: {exc}") from exc
+    if done.returncode != 0:
+        raise BoardsUnreadable(
+            f"{boards_toml} did not load (boards.py --list exited "
+            f"{done.returncode}): {done.stderr.strip() or 'no message on stderr'}"
+        )
+    return [name for name in done.stdout.split("\0") if name]
 
 
-def board_priorities(foreman_home: str) -> dict:
+def boards_of(installation: str, foreman_home: str) -> list[str]:
+    """`declared_boards()`, with the installation named in any refusal.
+
+    A machine-wide count names a path in its error and the operator then has to
+    work out whose it is. One installation per directory means the name is
+    already known at the call site, so it is put in the message there.
+    """
+    try:
+        return declared_boards(foreman_home)
+    except BoardsUnreadable as exc:
+        raise BoardsUnreadable(f"installation {installation}: {exc}") from exc
+
+
+def board_priorities(installation: str, foreman_home: str) -> dict:
     """Each declared board's priority, from `boards.py`. Absent reads as 1.
 
-    Tolerant for the same reason `declared_boards()` is: this feeds a ceiling,
-    and a machine whose `boards.toml` will not load must not take the tick down
-    over it. A board whose priority cannot be read is treated as ordinary.
+    The ROSTER refuses when it cannot be read -- see `declared_boards()` -- but
+    one board's unreadable priority still reads as 1. The two are different
+    failures: a roster nobody can read hides cards from the ceiling, while a
+    priority nobody can read only weights an existing board as ordinary.
     """
     out = {}
-    for name in declared_boards(foreman_home):
+    for name in boards_of(installation, foreman_home):
         code, blob = run([BOARDS_PY, "--file",
                           os.path.join(foreman_home, "boards.toml"), name])
         priority = 1
@@ -944,9 +1069,30 @@ def board_priorities(foreman_home: str) -> dict:
     return out
 
 
-def dispatch_verdict(foreman_home: str, board: str, host_max: int,
+def host_priorities(installations: list[tuple[str, str]]) -> dict:
+    """Every board on this machine's priority, keyed `<installation>/<board>`.
+
+    Each installation's own `boards.toml` is what weights its boards, read
+    through `board_priorities()` and therefore through `bin/boards.py`. A
+    sibling's file is never parsed here a second time: `boards.py` is what
+    refuses a priority that is not an integer, and a second parser would accept
+    what it refuses.
+    """
+    out = {}
+    for installation, home in installations:
+        for board, priority in board_priorities(installation, home).items():
+            out[slot_key(installation, board)] = priority
+    return out
+
+
+def dispatch_verdict(installations: list[tuple[str, str]], board: str, host_max: int,
                      stale_minutes: float | None = HOST_SLOT_STALE_MINUTES) -> str:
     """"" if `board` may take a slot, else one line saying why not.
+
+    `board` is a `<installation>/<board>` key, because the boards being weighed
+    against each other are every board of every installation on the machine.
+    `--may-dispatch` takes the bare board name an operator and the tick already
+    use and composes the key from THIS installation.
 
     THE PROBLEM. `HOST_MAX_CONCURRENT` bounds cards in flight across every board
     sharing a machine, because RAM and disk are shared. First-come-first-served
@@ -973,10 +1119,10 @@ def dispatch_verdict(foreman_home: str, board: str, host_max: int,
     say "run this when nothing else needs the machine", and it is deliberately
     expressible.
     """
-    slots = host_slots(foreman_home, stale_minutes)
+    slots = host_slots(installations, stale_minutes)
     held = slots.get("instances") or {}
     total = slots.get("total", 0)
-    priorities = board_priorities(foreman_home)
+    priorities = host_priorities(installations)
     if board not in priorities:
         # Not declared: `boards.py` refuses it elsewhere, and inventing a floor
         # for a board this machine does not run would reserve capacity forever.
@@ -1001,10 +1147,28 @@ def dispatch_verdict(foreman_home: str, board: str, host_max: int,
             f"{', '.join(reserved)}")
 
 
-def host_slots(foreman_home: str, stale_minutes: float | None = HOST_SLOT_STALE_MINUTES) -> dict:
-    """Cards holding a slot, counted across every DECLARED board on this machine.
+def cards_holding_slots(cards_dir: str, stale_minutes: float | None) -> list[str]:
+    """The tickets under one board's `cards/` that still occupy a build slot.
 
-    `{"instances": {name: count, ...}, "tickets": {name: [id, ...]}, "total": N}`.
+    `[]` for a directory that cannot be listed -- a declared board that has
+    never dispatched anything, or has no runtime directory at all. That is the
+    same "absence is not an error" reading `_read_jsonl()` gives an unreadable
+    history, and it is why `host_slots()` never has to know why a read failed.
+    """
+    try:
+        tickets = sorted(os.listdir(cards_dir))
+    except OSError:
+        return []
+    return [t for t in tickets
+            if card_holds_slot(os.path.join(cards_dir, t, "history.jsonl"), stale_minutes)]
+
+
+def host_slots(installations: list[tuple[str, str]],
+               stale_minutes: float | None = HOST_SLOT_STALE_MINUTES) -> dict:
+    """Cards holding a slot, across every DECLARED board of every installation.
+
+    `{"instances": {key: count, ...}, "tickets": {key: [id, ...]}, "total": N}`,
+    where each key is `<installation>/<board>` -- see `slot_key()`.
     The counts are the ceiling's input; `tickets` is what lets a caller tell a
     card ENTERING the board from one already on it. `dispatch.sh` needs that
     distinction: a resume or a reviewer for a card that already holds a slot
@@ -1014,41 +1178,45 @@ def host_slots(foreman_home: str, stale_minutes: float | None = HOST_SLOT_STALE_
     board sharing this machine's RAM and disk, the same way a single
     instance's `MAX_CONCURRENT` bounds its own cards — see config.sh.
 
-    The board roster comes from `declared_boards()`, i.e. `boards.toml`, not
-    from listing `<foreman_home>/instances/`. Each declared board's runtime
-    directory still keeps its name and its `cards/` subdirectory — that part
-    of the layout survives — so the read itself is unchanged: no Linear, no
-    `gh`, no `claude agents`, cheap enough to check before every dispatch.
+    EVERY SIBLING, not only this home. `HOST_MAX_CONCURRENT` is one number for
+    one machine, and a machine now runs several installations, each on its own
+    harness and each with its own `boards.toml` and `instances/`. An
+    installation that counted only its own cards would let the machine carry
+    N installations' worth of builds against a ceiling written for one -- the
+    same arithmetic the per-board ceiling already exists to stop, one level up.
+    `installations` is `siblings()`, so a lone un-migrated home counts itself
+    and nothing else, which is exactly what this counted before.
 
-    Tolerant by design, per its one caller (a tick deciding whether IT may
-    dispatch): a declared board with no runtime directory yet, no `cards/` at
-    all, a card with no `history.jsonl`, or a `history.jsonl` holding
-    unparseable lines must never raise. This is advisory input to a ceiling,
-    not a fact the tick depends on being able to fetch — failing to read one
-    board's slots must not take down the tick that asked about all of them.
+    The board roster comes from `declared_boards()`, i.e. each home's own
+    `boards.toml`, not from listing `<home>/instances/`. Each declared board's
+    runtime directory still keeps its name and its `cards/` subdirectory — that
+    part of the layout survives — so the read itself is unchanged: no Linear, no
+    `gh`, no agent registry, cheap enough to check before every dispatch.
+
+    Tolerant about a board's RUNTIME, per its one caller (a tick deciding
+    whether IT may dispatch): a declared board with no runtime directory yet,
+    no `cards/` at all, a card with no `history.jsonl`, or a `history.jsonl`
+    holding unparseable lines all read as zero cards and never raise. Each of
+    those really is a board holding nothing.
+
+    NOT tolerant about a sibling's ROSTER. An installation whose `boards.toml`
+    will not load raises `BoardsUnreadable` and this whole count refuses, never
+    returning a number that is short by that sibling's in-flight cards. The two
+    are opposite failures: an empty `cards/` is evidence, and an unreadable
+    `boards.toml` is the absence of evidence.
     """
-    instances_dir = os.path.join(foreman_home, "instances")
     result: dict = {"instances": {}, "tickets": {}, "total": 0}
-    for name in declared_boards(foreman_home):
-        cards_dir = os.path.join(instances_dir, name, "cards")
-        try:
-            tickets = sorted(os.listdir(cards_dir))
-        except OSError:
-            # No cards/ at all -- a declared board that has never dispatched
-            # anything yet, or has no runtime directory at all. Present in the
-            # report at 0, not absent: an absent key would be indistinguishable
-            # from a listing failure for `instances_dir` itself.
-            result["instances"][name] = 0
-            result["tickets"][name] = []
-            continue
-        holding = []
-        for ticket in tickets:
-            history_path = os.path.join(cards_dir, ticket, "history.jsonl")
-            if card_holds_slot(history_path, stale_minutes):
-                holding.append(ticket)
-        result["instances"][name] = len(holding)
-        result["tickets"][name] = holding
-        result["total"] += len(holding)
+    for installation, home in installations:
+        for board in boards_of(installation, home):
+            # Present at 0 rather than absent, for a board with no cards/ at
+            # all: an absent key would be indistinguishable from a board this
+            # process could not reach.
+            holding = cards_holding_slots(
+                os.path.join(home, "instances", board, "cards"), stale_minutes)
+            key = slot_key(installation, board)
+            result["instances"][key] = len(holding)
+            result["tickets"][key] = holding
+            result["total"] += len(holding)
     return result
 
 
@@ -1402,7 +1570,12 @@ def death_report(path: str | None) -> dict | None:
 
 def reconcile(ticket: str, agents: list[dict]) -> dict:
     pr = pr_for(ticket)
-    worktree = os.path.join(REPO, ".claude", "worktrees", f"foreman-{INSTANCE}-{ticket}")
+    # Composed exactly as config.sh:worktree_path composes it, installation
+    # first: dispatch.sh cuts the directory and sweep.sh reaps it, and a path
+    # missing the segment here reports "no worktree" for every live build.
+    worktree = os.path.join(
+        REPO, ".claude", "worktrees", f"foreman-{INSTALLATION}-{INSTANCE}-{ticket}"
+    )
     entries = history(ticket)
     mine = agents_for(agents, ticket)
     # Diagnose only the agents that have stopped. A running agent's transcript
@@ -1460,7 +1633,12 @@ def main(argv: list[str]) -> int:
             host_max = int(os.environ.get("HOST_MAX_CONCURRENT", "4"))
         except ValueError:
             host_max = 4
-        verdict = dispatch_verdict(FOREMAN_HOME, argv[1], host_max)
+        # Takes the BARE board name, as the tick and the operator say it, and
+        # composes the machine-wide key from this installation. A caller that
+        # had to spell `<installation>/<board>` itself would be a second place
+        # the key shape lived, and the copy that drifted would weigh a board
+        # nothing on this machine answers to.
+        verdict = dispatch_verdict(siblings(), slot_key(INSTALLATION, argv[1]), host_max)
         if verdict:
             print(verdict)
         return 0
@@ -1501,7 +1679,7 @@ def main(argv: list[str]) -> int:
         # Same reasoning as --main-ci: this answers one question about the
         # whole machine, over local files only, and must not require the
         # agent registry (which is per-process, not per-instance) to answer it.
-        json.dump(host_slots(FOREMAN_HOME), sys.stdout, indent=2)
+        json.dump(host_slots(siblings()), sys.stdout, indent=2)
         print()
         return 0
     agents = load_agents()
@@ -1517,4 +1695,14 @@ def main(argv: list[str]) -> int:
 
 
 if __name__ == "__main__":
-    sys.exit(main(sys.argv[1:]))
+    try:
+        sys.exit(main(sys.argv[1:]))
+    except BoardsUnreadable as exc:
+        # Caught here rather than inside each mode, because every mode that
+        # reads a roster fails the same way and must exit the same way:
+        # non-zero, with the installation and boards.py's own message named,
+        # and NO count on stdout. `--host-slots` and `--may-dispatch` are the
+        # two that feed the machine ceiling, and dispatch.sh refuses to
+        # dispatch when either of them exits non-zero.
+        print(f"reconcile: {exc}", file=sys.stderr)
+        sys.exit(1)

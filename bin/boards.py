@@ -31,6 +31,12 @@ import re
 import sys
 import tomllib
 
+# Same bin/ directory. The root that holds the shared credential is a fact
+# about the installation, so it is asked of the installation loader rather
+# than derived a second time here.
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import installation  # noqa: E402
+
 # The one top-level table. A stray `[board]` or `[instances]` is a typo that
 # would otherwise declare nothing at all, silently.
 BOARDS_TABLE = "boards"
@@ -38,8 +44,9 @@ BOARDS_TABLE = "boards"
 # What a board may say about itself. `repo` is required. `key` is optional and
 # names a credential for a board that lives in a DIFFERENT Linear workspace;
 # every board in the usual single-workspace installation shares
-# $FOREMAN_HOME/linear.key, which is why the per-instance copy of that same
-# secret is gone.
+# $FOREMAN_ROOT/linear.key -- the MACHINE root, one level above an
+# installation's home, so every installation on the machine reads one key --
+# which is why the per-instance copy of that same secret is gone.
 BOARD_KEYS = {"repo", "key", "priority"}
 
 # How this MACHINE divides its own capacity between repositories when they
@@ -73,12 +80,19 @@ def die(message: str) -> None:
 
 
 def foreman_home() -> str:
-    """~/.foreman unless the environment says otherwise.
+    """This installation's home, asked of bin/installation.py.
 
-    Empty counts as unset, matching config.sh's `${FOREMAN_HOME:-$HOME/.foreman}`.
-    Tests point this at a temporary directory; nothing here may touch the real one.
+    $FOREMAN_HOME when it is set, else the parent of this clone -- identity
+    comes from the path, so a clone at ~/.foreman/codex/install reads the codex
+    installation's boards.toml. Deriving it here instead would be a second
+    copy: it used to default to ~/.foreman, which is the machine ROOT now and
+    holds no boards.toml at all, so every clone but a legacy one read the wrong
+    file or none.
+
+    Empty counts as unset, matching config.sh's `${FOREMAN_HOME:-...}`. Tests
+    point this at a temporary directory; nothing here may touch the real one.
     """
-    return os.environ.get("FOREMAN_HOME") or os.path.join(os.path.expanduser("~"), ".foreman")
+    return installation.foreman_home()
 
 
 def absolute(path: str, what: str, board: str) -> str:
@@ -133,7 +147,7 @@ def board_record(path: str, home: str, name: str, table: object) -> tuple[str, s
 
     key = table.get("key")
     if key is None:
-        return repo, os.path.join(home, DEFAULT_KEY_FILE), priority
+        return repo, os.path.join(installation.foreman_root(home), DEFAULT_KEY_FILE), priority
     if not isinstance(key, str):
         die(f"{path}: board {name}: key must be a string")
     # `key = ""` reads as "this board declares its own credential" and would

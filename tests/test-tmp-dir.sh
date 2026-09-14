@@ -89,6 +89,14 @@ stub_installation() {
   cp "$repo_root/skills/board/config.sh" "$dir/skills/board/config.sh"
   cp "$repo_root/bin/contract.py" "$dir/bin/contract.py"
   cp "$repo_root/bin/boards.py" "$dir/bin/boards.py"
+  # config.sh reads this installation's declaration before anything else, from
+  # THIS root's bin/ -- a stub without it refuses at config.sh's first line.
+  cp "$repo_root/bin/installation.py" "$dir/bin/installation.py"
+  # config.sh sources its pair reader from THIS root's bin/ on its first line.
+  cp "$repo_root/bin/load-pairs.sh" "$dir/bin/load-pairs.sh"
+  # config.sh refuses a harness with no executable adapter under this root, so
+  # the whole directory comes along rather than the one file this stub selects.
+  cp -R "$repo_root/skills/board/harness" "$dir/skills/board/harness"
   echo "$dir"
 }
 
@@ -119,7 +127,11 @@ echo "==> the board asks bin/tmp-dir.sh for the scratch root, not the target"
 install="$(stub_installation stubbed)"
 target="$(target_stub target-a)"
 home="$(instance_home home-a "$target")"
-board_root="$(env HOME="$home" FOREMAN_INSTANCE=demo bash -c \
+# FOREMAN_HOME is named explicitly in every source below. config.sh no longer
+# derives it from $HOME: it asks bin/installation.py, which reads the home as
+# the parent of the install root -- the stub under $work_dir, which holds no
+# boards.toml. An explicit home is what that derivation yields to.
+board_root="$(env HOME="$home" FOREMAN_HOME="$home/.foreman" FOREMAN_INSTANCE=demo bash -c \
   "source '$install/skills/board/config.sh'; printf '%s\n' \"\$AGENT_TMP_ROOT\"")"
 expect "SENTINEL --root" "$board_root" "config.sh AGENT_TMP_ROOT"
 
@@ -134,14 +146,14 @@ expect "SENTINEL --root" "$board_root" "config.sh AGENT_TMP_ROOT"
 # longer needs one.
 echo "==> agent_tmp_for asks bin/tmp-dir.sh too, never a script of the target's own"
 [[ -e "$target/ops" ]] && fail "target-a fixture must not have scripts of its own -- the whole point is that it doesn't need any"
-tmp_for="$(env HOME="$home" FOREMAN_INSTANCE=demo bash -c \
+tmp_for="$(env HOME="$home" FOREMAN_HOME="$home/.foreman" FOREMAN_INSTANCE=demo bash -c \
   "source '$install/skills/board/config.sh'; agent_tmp_for /some/worktree/board-PRA-9")"
 expect "SENTINEL /some/worktree/board-PRA-9" "$tmp_for" "agent_tmp_for routes through bin/tmp-dir.sh"
 
 echo "==> the board stops rather than guessing when the script is unusable"
 rm "$install/bin/tmp-dir.sh"
 status=0
-env HOME="$home" FOREMAN_INSTANCE=demo bash -c \
+env HOME="$home" FOREMAN_HOME="$home/.foreman" FOREMAN_INSTANCE=demo bash -c \
   "source '$install/skills/board/config.sh'" >/dev/null 2>&1 || status=$?
 [[ "$status" -ne 0 ]] || fail "config.sh sourced cleanly with no bin/tmp-dir.sh"
 

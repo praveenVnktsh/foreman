@@ -43,7 +43,8 @@ value = pairs.get(b"REQUIRED_DOCS", b"").decode()
 docs = [d for d in value.split(" ") if d]
 
 if not docs:
-    print("FAIL board.toml's [docs] required is empty; this test would check nothing")
+    print("FAIL the [docs] required list in board.toml is empty; "
+          "this test would check nothing")
     sys.exit(0)
 
 import os
@@ -73,6 +74,14 @@ esac
 #
 # One python pass does both checks (names present, no stale count) so the
 # STATE_ROLES parse -- and the refusal if it comes back empty -- happens once.
+#
+# NO APOSTROPHE ANYWHERE IN THIS PYTHON. It is a quoted here-doc inside a
+# `$( )`, and bash 3.2 scans that command substitution for its closing paren
+# before it knows the here-doc body is literal: one unbalanced `'` there and
+# the whole FILE fails `bash -n` with "syntax error near unexpected token `)'".
+# Measured on macOS, which ships 3.2; CI's bash 5 parses it, so the file read
+# green in CI and would not parse at all on the machine the board runs on.
+# Write `the STATE_ROLES list in bin/resolve-ids.py`, never `resolve-ids.py's`.
 check_output="$(python3 - "$root/bin/resolve-ids.py" "$root" "${required_docs[@]}" <<'PY'
 import os
 import re
@@ -80,7 +89,8 @@ import sys
 
 # Doc paths come off the contract relative to the repository root, and this
 # test must answer the same from any working directory -- run-all.sh runs
-# each file with `bash "$t"` and never cd's. So every read joins $root,
+# each file with `bash "$t"` and never changes directory. So every read joins
+# $root,
 # while the messages below keep the relative path the contract names.
 resolver_path, root, doc_paths = sys.argv[1], sys.argv[2], sys.argv[3:]
 resolver = open(resolver_path, encoding="utf-8").read()
@@ -104,11 +114,11 @@ problems = []
 for name in roles:
     if not re.search(r"\b" + re.escape(name) + r"\b", all_text):
         problems.append(f"no required doc names the state `{name}` "
-                         f"(bin/resolve-ids.py's STATE_ROLES pins it)")
+                        f"(the STATE_ROLES list in bin/resolve-ids.py pins it)")
 
 # Claim 2: no required doc quotes a stale state count. A number word or a
 # digit run immediately before "states" (case-insensitive) must spell
-# len(STATE_ROLES) -- today's count -- or it is describing a board that no
+# len(STATE_ROLES) -- the count today -- or it is describing a board that no
 # longer exists.
 WORDS = ["zero", "one", "two", "three", "four", "five", "six", "seven",
          "eight", "nine", "ten", "eleven", "twelve"]
@@ -123,8 +133,9 @@ for path, text in lines.items():
             found = word_to_n[token] if token in word_to_n else int(token)
             if found != expected:
                 problems.append(
-                    f"{path}:{lineno} says {found} states, but bin/resolve-ids.py's "
-                    f"STATE_ROLES now has {expected}: {line.strip()!r}")
+                    f"{path}:{lineno} says {found} states, but the STATE_ROLES "
+                    f"list in bin/resolve-ids.py now has {expected}: "
+                    f"{line.strip()!r}")
 
 if problems:
     print("FAIL " + "\n     ".join(problems))

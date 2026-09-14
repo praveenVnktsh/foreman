@@ -86,7 +86,7 @@ def _load_config() -> dict[str, str]:
     """
     keys = ("REPO", "FOREMAN_HOME", "MIN_FREE_TMP_MB", "MIN_FREE_REPO_MB",
             "PROBE_TMP_MB", "PROBE_REPO_MB", "QUICK_PROBE_MB",
-            "MIN_FREE_MEMORY_MB")
+            "MIN_FREE_MEMORY_MB", "HARNESS", "HARNESS_SH")
     script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.sh")
     printf = 'printf "%s\\0" ' + " ".join(f'"${k}"' for k in keys)
     out = subprocess.run(
@@ -395,7 +395,10 @@ def main() -> int:
             # not a gate.
             command_check("gh auth", ["gh", "api", "user"]),
             runner_check(repo),
-            command_check("claude binary", ["claude", "--version"]),
+            # Named by harness, not by "claude": an operator on a codex
+            # installation needs to be told codex is missing, not claude, and
+            # `check` is the adapter's own verb -- see harness/*.sh.
+            command_check(f"{cfg['HARNESS']} binary", [cfg["HARNESS_SH"], "check"]),
         ]
 
     # Every check here gates. There is no advisory tier any more: the only thing

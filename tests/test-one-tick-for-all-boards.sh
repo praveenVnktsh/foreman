@@ -103,10 +103,16 @@ started="$(grep -c . "$spawn_log" 2>/dev/null || echo 0)"
 [[ "$started" == "1" ]] \
   && ok "two boards start exactly one tick" \
   || bad "two boards started $started ticks: $(cat "$spawn_log")"
+# The name carries the INSTALLATION and still no board. This fixture's home
+# declares no installation.toml, so bin/installation.py reads it as the lone
+# Claude installation and the segment is `claude`. A machine runs one tick per
+# installation, on a different harness each, and two agents named
+# `foreman/tick` in one registry would each read the other as the one
+# supervise.sh must stop before starting a replacement.
 name="$(head -1 "$spawn_log" 2>/dev/null || true)"
-[[ "$name" == "foreman/tick" ]] \
+[[ "$name" == "foreman/claude/tick" ]] \
   && ok "the tick carries no board in its name" \
-  || bad "tick was named '$name', expected foreman/tick"
+  || bad "tick was named '$name', expected foreman/claude/tick"
 
 # --- the tick is given foreman's OWN mcp config, not the cwd's ---------------
 #
@@ -125,7 +131,10 @@ fi
 
 # and the prompt must still survive: --mcp-config is variadic, so anything after
 # it is eaten as another config path. dispatch.sh documents the same trap.
-if grep -qE -- "--permission-mode [a-zA-Z]+ /loop /board|--permission-mode [a-zA-Z]+ /board" "$argv_log"; then
+# Either spelling of the permission flag counts: the adapter passes
+# `--dangerously-skip-permissions` when permissions are skipped and
+# `--permission-mode acceptEdits` when they are not, and both are non-variadic.
+if grep -qE -- "(--dangerously-skip-permissions|--permission-mode [a-zA-Z]+) (/loop )?/board" "$argv_log"; then
   ok "a non-variadic flag sits between --mcp-config and the prompt"
 else
   bad "the prompt may have been swallowed by --mcp-config: $(cat "$argv_log")"

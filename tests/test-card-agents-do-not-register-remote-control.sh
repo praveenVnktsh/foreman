@@ -95,7 +95,11 @@ cat >"$home/.local/bin/claude" <<STUB
 if [[ "\$1" == "agents" ]]; then cat "$registry"; exit 0; fi
 if [[ "\$1" == "--bg" ]]; then
   printf '%s\n' "\$@" >"$tick_argv"
-  printf '[{"id":"tick-1","name":"foreman/tick","state":"working","startedAt":%s,"cwd":"","sessionId":""}]\n' "\$(date +%s)000" >"$registry"
+  # The adapter reads the session id back by name after it spawns, so the row
+  # carries the name it was given and a session id.
+  name=""; prev=""
+  for a in "\$@"; do [[ "\$prev" == "--name" ]] && name="\$a"; prev="\$a"; done
+  printf '[{"id":"tick-1","name":"%s","state":"working","pid":4242,"startedAt":%s,"cwd":"","sessionId":"tick-sid"}]\n' "\$name" "\$(date +%s)000" >"$registry"
   exit 0
 fi
 exit 0

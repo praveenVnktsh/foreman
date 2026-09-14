@@ -55,7 +55,13 @@ TOML
 
 fixture_add_board "$home" demo "$repo"
 
-ask_brief() { env HOME="$home" FOREMAN_INSTANCE=demo "$brief" "$@"; }
+# FOREMAN_HOME is named explicitly. config.sh no longer derives it from $HOME:
+# it asks bin/installation.py, which reads the home as the parent of this
+# clone. An explicit home is what that derivation yields to, and it is how this
+# file stays pointed at its temporary directory.
+ask_brief() {
+  env HOME="$home" FOREMAN_HOME="$home/.foreman" FOREMAN_INSTANCE=demo "$brief" "$@"
+}
 
 TICKET="ACME-7"
 

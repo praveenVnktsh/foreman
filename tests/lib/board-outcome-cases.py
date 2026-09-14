@@ -344,9 +344,12 @@ check(pr["needs_update"] is True and pr["is_draft"] is True,
       "needs_update and is_draft survive the unreadable path", json.dumps(pr))
 
 print("==> pr_for's --head branch carries this instance's namespace, not just the ticket")
-# Reverting `branch = f"foreman/{INSTANCE}/{ticket}"` back to `f"board/{ticket}"`
-# is the most consequential regression in this file: get it wrong and
-# reconcile never finds the pull request for any card again. The World stub's
+# Reverting `branch = f"foreman/{INSTALLATION}/{INSTANCE}/{ticket}"` back to
+# `f"board/{ticket}"` is the most consequential regression in this file: get it
+# wrong and reconcile never finds the pull request for any card again. The
+# INSTALLATION segment is the same claim one level up -- two installations may
+# serve one repository, so they share a board name, a ticket key and every
+# branch under them. The World stub's
 # dispatch on `run_json` matches only on args[:3] (["gh", "pr", "list"]) and
 # answers the same `prs` regardless of `--head`, so this has to inspect the
 # recorded call directly rather than trust the stub to notice a wrong branch.
@@ -357,18 +360,20 @@ check(len(pr_list_calls) == 1, "exactly one gh pr list call", str(pr_list_calls)
 head = None
 if pr_list_calls and "--head" in pr_list_calls[0]:
     head = pr_list_calls[0][pr_list_calls[0].index("--head") + 1]
-check(head == f"foreman/{reconcile.INSTANCE}/PRA-7",
+check(head == f"foreman/{reconcile.INSTALLATION}/{reconcile.INSTANCE}/PRA-7",
       "the --head value is the instance-scoped branch, not board/PRA-7", head)
 
 print("==> reconcile()'s worktree field finds the instance-scoped worktree dispatch.sh actually creates")
-# `worktree = os.path.join(REPO, ".claude", "worktrees", f"foreman-{INSTANCE}-{ticket}")`
+# `worktree = os.path.join(REPO, ".claude", "worktrees",
+#                          f"foreman-{INSTALLATION}-{INSTANCE}-{ticket}")`
 # has to match what `worktree_path()` in config.sh actually names, or every
 # card's reported worktree reads as absent. Only a directory at the CORRECT
 # name is created, so a reversion to the old `board-{ticket}` shape (or any
 # other mismatch) reports `None` here instead of the real path.
 World(prs=[]).install()
-wt_dir = os.path.join(reconcile.REPO, ".claude", "worktrees",
-                       f"foreman-{reconcile.INSTANCE}-PRA-8")
+wt_dir = os.path.join(
+    reconcile.REPO, ".claude", "worktrees",
+    f"foreman-{reconcile.INSTALLATION}-{reconcile.INSTANCE}-PRA-8")
 os.makedirs(wt_dir, exist_ok=True)
 record = reconcile.reconcile("PRA-8", [])
 check(record["worktree"] == wt_dir,

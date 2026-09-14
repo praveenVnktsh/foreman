@@ -50,7 +50,12 @@ fixture_add_instance "$py_home" demo "$fixture_repo"
 board_home="$py_home/.foreman/instances/demo"
 
 echo "==> what reconcile.py concludes when no [deploy] is configured"
-HOME="$py_home" FOREMAN_INSTANCE=demo BOARD_HOME="$board_home" python3 - "$here/../skills/board" <<'PY'
+# FOREMAN_HOME is named explicitly. config.sh no longer derives it from $HOME:
+# it asks bin/installation.py, which reads the home as the parent of this
+# clone. An explicit home is what that derivation yields to, and it is how this
+# file stays pointed at its temporary directory.
+HOME="$py_home" FOREMAN_HOME="$py_home/.foreman" FOREMAN_INSTANCE=demo \
+  BOARD_HOME="$board_home" python3 - "$here/../skills/board" <<'PY'
 import json
 import os
 import sys

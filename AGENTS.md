@@ -55,6 +55,7 @@
 | Order this machine's boards for one pass | `skills/board/reconcile.py --board-order` | the name order `bin/boards.py --list` prints |
 | Record that a board's slice reached it | `skills/board/reconcile.py --served <board>` | assuming `history.jsonl` shows it; an idle slice writes nothing |
 | Manage a board | `bin/boardctl add\|list\|status\|halt\|resume` | editing `boards.toml` by hand |
+| Write a new installation's config | `bin/install.sh --harness H ...` | writing `installation.toml` by hand |
 | Make skills resolvable | `bin/install-skills.sh` | assuming the install directory is searched |
 | View a diagram | `bin/render-diagram.sh <file.md>` | committing the render |
 | Check a plan is a graph | `bin/check-plan-graph.py --max-label-chars <N> <file>` | reading the plan by eye, or the checker's default budget over a target that sets its own |

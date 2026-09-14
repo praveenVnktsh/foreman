@@ -44,7 +44,7 @@ fixture_board_toml "$target"
 fixture_add_board "$home" alpha "$target"
 fixture_add_board "$home" beta "$target"
 
-wt() { printf '%s/.claude/worktrees/foreman-%s-%s\n' "$target" "$1" "$2"; }
+wt() { printf '%s/.claude/worktrees/foreman-claude-%s-%s\n' "$target" "$1" "$2"; }
 # The slug Claude Code files a transcript under: `/` and `.` become `-`.
 slug() { printf '%s' "$1" | sed 's#[/.]#-#g'; }
 
@@ -68,14 +68,14 @@ agent() {
 }
 registry_state() { cut -f2 "$STUB_REGISTRY/$1"; }
 
-agent aaaa1111 foreman/alpha/ABC-1/build-1    done    "$(wt alpha ABC-1)"
-agent aaaa2222 foreman/alpha/ABC-1/review-1a  stopped "$(wt alpha ABC-1-review-1a)"
-agent aaaa3333 foreman/alpha/ABC-1/plan-1     done    "$target"
-agent aaaa4444 foreman/alpha/ABC-1/review-1b  blocked "$(wt alpha ABC-1-review-1b)"
-agent bbbb1111 foreman/alpha/ABC-2/build-1    working "$(wt alpha ABC-2)"
-agent cccc1111 foreman/beta/ABC-1/build-1     done    "$(wt beta ABC-1)"
-agent dddd1111 foreman/tick                   done    "$target"
-agent eeee1111 foreman/alpha/ABC-10/build-1   done    "$(wt alpha ABC-10)"
+agent aaaa1111 foreman/claude/alpha/ABC-1/build-1    done    "$(wt alpha ABC-1)"
+agent aaaa2222 foreman/claude/alpha/ABC-1/review-1a  stopped "$(wt alpha ABC-1-review-1a)"
+agent aaaa3333 foreman/claude/alpha/ABC-1/plan-1     done    "$target"
+agent aaaa4444 foreman/claude/alpha/ABC-1/review-1b  blocked "$(wt alpha ABC-1-review-1b)"
+agent bbbb1111 foreman/claude/alpha/ABC-2/build-1    working "$(wt alpha ABC-2)"
+agent cccc1111 foreman/claude/beta/ABC-1/build-1     done    "$(wt beta ABC-1)"
+agent dddd1111 foreman/claude/tick                   done    "$target"
+agent eeee1111 foreman/claude/alpha/ABC-10/build-1   done    "$(wt alpha ABC-10)"
 printf '{"type":"summary"}\n' > "$projects/$(slug "$target")/operator.jsonl"
 mkdir -p "$(wt alpha ABC-1)" "$(wt alpha ABC-2)"
 
@@ -118,10 +118,10 @@ out="$(BOARD_DRY_RUN=1 sweep ABC-1 ABC-2)"
 [[ "$(registry_state aaaa1111)" == "done" && -d "$jobs/aaaa2222" && -d "$projects/$(slug "$(wt alpha ABC-1)")" ]] \
   && ok "a dry run stops and forgets nothing" \
   || bad "a dry run stopped an agent or removed a session: $out"
-grep -q 'DRY RUN: would stop session foreman/alpha/ABC-1/build-1' <<<"$out" \
+grep -q 'DRY RUN: would stop session foreman/claude/alpha/ABC-1/build-1' <<<"$out" \
   && ok "a dry run names the agent it would stop" \
   || bad "dry run output does not name the agent to stop: $out"
-grep -q 'DRY RUN: would forget session foreman/alpha/ABC-1/review-1a' <<<"$out" \
+grep -q 'DRY RUN: would forget session foreman/claude/alpha/ABC-1/review-1a' <<<"$out" \
   && ok "a dry run names the session it would forget" \
   || bad "dry run output does not name the session to forget: $out"
 
@@ -140,8 +140,8 @@ out="$(sweep ABC-1 ABC-2)" || { bad "sweep.sh ABC-1 ABC-2 exited non-zero: $out"
 [[ ! -d "$projects/$(slug "$(wt alpha ABC-1)")" && ! -d "$projects/$(slug "$(wt alpha ABC-1-review-1a)")" ]] \
   && ok "their transcripts go with them" \
   || bad "ABC-1's transcripts survived the sweep: $out"
-grep -q 'stopping session foreman/alpha/ABC-1/build-1' <<<"$out" \
-  && grep -q 'forgot session foreman/alpha/ABC-1/build-1' <<<"$out" \
+grep -q 'stopping session foreman/claude/alpha/ABC-1/build-1' <<<"$out" \
+  && grep -q 'forgot session foreman/claude/alpha/ABC-1/build-1' <<<"$out" \
   && ok "the sweep says which session it stopped and forgot" \
   || bad "the sweep did not report stopping and forgetting ABC-1's build session: $out"
 
@@ -158,7 +158,7 @@ grep -q -- "$(slug "$target")" <<<"$out" \
 [[ "$(registry_state bbbb1111)" == "working" && -d "$jobs/bbbb1111" && -d "$(wt alpha ABC-2)" ]] \
   && ok "a working agent is neither stopped nor forgotten, even for a ticket named on the command line" \
   || bad "ABC-2's working agent was stopped or forgotten: $out"
-grep -q 'leaving session foreman/alpha/ABC-2/build-1' <<<"$out" \
+grep -q 'leaving session foreman/claude/alpha/ABC-2/build-1' <<<"$out" \
   && ok "and the sweep says it is leaving it" \
   || bad "the sweep left ABC-2's session without saying so: $out"
 
@@ -186,8 +186,8 @@ out="$(sweep ABC-1)" || { bad "second sweep of ABC-1 exited non-zero: $out"; exi
 ok "sweeping an already-forgotten card exits zero"
 
 # --- --orphans never stops or forgets --------------------------------------------
-agent ffff1111 foreman/alpha/ABC-3/build-1 stopped "$(wt alpha ABC-3)"
-agent gggg1111 foreman/alpha/ABC-4/build-1 done    "$(wt alpha ABC-4)"
+agent ffff1111 foreman/claude/alpha/ABC-3/build-1 stopped "$(wt alpha ABC-3)"
+agent gggg1111 foreman/claude/alpha/ABC-4/build-1 done    "$(wt alpha ABC-4)"
 out="$(sweep --orphans)" || { bad "sweep.sh --orphans exited non-zero: $out"; exit "$fail"; }
 [[ -d "$jobs/ffff1111" && -d "$projects/$(slug "$(wt alpha ABC-3)")" ]] \
   && ok "--orphans leaves a stopped session's record and transcript for reconcile to read" \
@@ -197,7 +197,7 @@ out="$(sweep --orphans)" || { bad "sweep.sh --orphans exited non-zero: $out"; ex
   || bad "--orphans stopped ABC-4's agent: $out"
 
 # --- a stop that never lands leaves the session and says so -------------------
-agent hhhh1111 foreman/alpha/ABC-5/build-1 done "$(wt alpha ABC-5)"
+agent hhhh1111 foreman/claude/alpha/ABC-5/build-1 done "$(wt alpha ABC-5)"
 mkdir -p "$(wt alpha ABC-5)" "$cards/ABC-5"
 out="$(STUB_STOP_IS_IGNORED=1 AGENT_STOP_TIMEOUT_SECONDS=1 sweep ABC-5)"
 status=$?

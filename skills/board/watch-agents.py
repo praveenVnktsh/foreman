@@ -10,12 +10,14 @@ several minutes later.
 
 TWO RULES MAKE THIS SAFE.
 
-**It never reports the tick agent.** `foreman/<instance>/tick` runs the loop
-itself, so its turn ending is the board finishing work, not work arriving.
-Emitting that would wake the loop with news of itself and spin forever. Any
-name that is not `foreman/<instance>/<TICKET>/<role>-<attempt>` for THIS
-instance is ignored for the same reason -- including another instance's
-agents, which would otherwise wake this one on work that is not its own.
+**It never reports the tick agent.** `foreman/<installation>/<instance>/tick`
+runs the loop itself, so its turn ending is the board finishing work, not work
+arriving. Emitting that would wake the loop with news of itself and spin
+forever. Any name that is not
+`foreman/<installation>/<instance>/<TICKET>/<role>-<attempt>` for THIS
+installation's THIS instance is ignored for the same reason -- including
+another instance's agents, or another installation's, which would otherwise
+wake this one on work that is not its own.
 
 **It emits transitions, not states.** A line is written when an agent moves from
 working into a finished phase — once, on the edge. Re-reporting a finished agent
@@ -41,21 +43,29 @@ import time
 
 POLL_SECONDS = int(os.environ.get("WATCH_POLL_SECONDS", "15"))
 
-# INSTANCE, reused from reconcile.py's own `_load_config` rather than a second
-# reader shelling out to config.sh on its own -- two readers of the same
-# setting is exactly the drift `_load_config`'s docstring warns about, and this
-# process already needs reconcile.py's other machinery for nothing here, so
+# INSTANCE, INSTALLATION and HARNESS_SH, reused from reconcile.py's own
+# `_load_config` rather than a second reader shelling out to config.sh on its
+# own -- two readers of the same setting is exactly the drift `_load_config`'s
+# docstring warns about, and this process already imports reconcile.py, so
 # there is no cost to sharing its one subprocess call instead of paying for a
 # second.
+#
+# This file used to source config.sh a second time, in another `bash -c`, for
+# the two values reconcile.py had already exported at module scope. That cost
+# every arm of this Monitor a second shell and left two places that could
+# disagree about which installation this process watches.
 _SKILL_DIR = os.path.dirname(os.path.abspath(__file__))
 if _SKILL_DIR not in sys.path:
     sys.path.insert(0, _SKILL_DIR)
 import reconcile  # noqa: E402
 
 INSTANCE = reconcile.INSTANCE
+INSTALLATION = reconcile.INSTALLATION
+HARNESS_SH = reconcile.HARNESS_SH
 
-# foreman/<instance>/<TICKET>/<role>-<attempt>. The tick is foreman/<instance>/tick,
-# which has no fourth segment and therefore never matches.
+# foreman/<installation>/<instance>/<TICKET>/<role>-<attempt>. The tick is
+# foreman/<installation>/<instance>/tick, which has no fifth segment and
+# therefore never matches.
 #
 # The team-key half of TICKET is `[A-Z0-9]+`, not `[A-Z]+`: nothing in this
 # codebase constrains a Linear team key to letters only -- bin/contract.py
@@ -73,7 +83,9 @@ INSTANCE = reconcile.INSTANCE
 # it here costs no error at all: the agent runs, finishes, and this Monitor
 # stays silent, so the board discovers the work on its next ordinary poll
 # instead of waking immediately.
-DISPATCHED = re.compile(r"^foreman/([^/]+)/([A-Z0-9]+-\d+)/(plan|build|review)-(\w+)$")
+DISPATCHED = re.compile(
+    r"^foreman/([^/]+)/([^/]+)/([A-Z0-9]+-\d+)/(plan|build|review)-(\w+)$"
+)
 
 # Phases that mean "this agent is no longer working". `done` is a completed turn;
 # `stopped` covers both a deliberate stop and a death.
@@ -82,23 +94,25 @@ FINISHED = {"done", "stopped"}
 
 def _dispatched(name: str) -> tuple[str, str, str] | None:
     """(ticket, role, attempt) if `name` is a plan/build/review agent dispatched
-    by THIS instance, else None.
+    by THIS installation's THIS instance, else None.
 
-    A capture group on the instance segment is not enough on its own -- it
-    would still let one instance's Monitor wake on another instance's agents.
-    This is what actually compares the captured instance against INSTANCE and
-    skips everything that does not match.
+    Capture groups on the installation and instance segments are not enough on
+    their own -- two installations can share one repository, so a name with the
+    right instance but the wrong installation (or vice versa) still names
+    somebody else's agent. This is what actually compares BOTH captured
+    segments against INSTALLATION and INSTANCE and skips everything that does
+    not match both.
     """
     m = DISPATCHED.match(name)
-    if not m or m.group(1) != INSTANCE:
+    if not m or m.group(1) != INSTALLATION or m.group(2) != INSTANCE:
         return None
-    return m.group(2), m.group(3), m.group(4)
+    return m.group(3), m.group(4), m.group(5)
 
 
 def poll() -> dict[str, str]:
     try:
         out = subprocess.run(
-            ["claude", "agents", "--json", "--all"],
+            [HARNESS_SH, "list"],
             capture_output=True, text=True, timeout=30,
         )
         agents = json.loads(out.stdout or "[]")

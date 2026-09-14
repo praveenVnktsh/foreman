@@ -63,13 +63,23 @@ printf '[]\n'
 STUB
 chmod +x "$stub_dir/claude"
 
+# FOREMAN_HOME is named explicitly. config.sh no longer derives it from $HOME:
+# it asks bin/installation.py, which reads the home as the parent of this
+# clone. An explicit home is what that derivation yields to, and it is how this
+# file stays pointed at its temporary directory.
 run_sweep() { # instance sweep-args...
   local inst="$1"; shift
-  HOME="$home" FOREMAN_INSTANCE="$inst" PATH="$stub_dir:$PATH" "$sweep" "$@"
+  HOME="$home" FOREMAN_HOME="$home/.foreman" FOREMAN_INSTANCE="$inst" \
+    PATH="$stub_dir:$PATH" "$sweep" "$@"
 }
 
-worktree_dir() { printf '%s/.claude/worktrees/foreman-%s-%s\n' "$fixture" "$1" "$2"; }
-scratch_dir()  { printf '%s/foreman-%s-%s\n' "$tmp_root_alpha" "$1" "$2"; }
+# `foreman-<installation>-<instance>-<ticket>`. The fixture home declares no
+# installation.toml, so bin/installation.py reads it as the lone Claude
+# installation and the segment is `claude`. The installation segment closes the
+# same hole the instance segment does, one level up: two installations may
+# serve one repository and would otherwise share every worktree path.
+worktree_dir() { printf '%s/.claude/worktrees/foreman-claude-%s-%s\n' "$fixture" "$1" "$2"; }
+scratch_dir()  { printf '%s/foreman-claude-%s-%s\n' "$tmp_root_alpha" "$1" "$2"; }
 
 # --- A. sweep.sh <ticket> removes the worktree AND its paired scratch dir ----
 # (sweep.sh:52's guard and :36's guard, both on the normal removal path)
@@ -145,7 +155,7 @@ fi
 # (sweep.sh:181's glob)
 
 wt_e_primary="$(worktree_dir alpha PRA-4)"; mkdir -p "$wt_e_primary"
-wt_e_review="$fixture/.claude/worktrees/foreman-alpha-PRA-4-review-1a"; mkdir -p "$wt_e_review"
+wt_e_review="$fixture/.claude/worktrees/foreman-claude-alpha-PRA-4-review-1a"; mkdir -p "$wt_e_review"
 if run_sweep alpha PRA-4 >/tmp/sweep-e.out 2>&1; then
   if [[ ! -d "$wt_e_primary" && ! -d "$wt_e_review" ]]; then
     ok "sweep.sh PRA-4 removes the primary worktree and its review-slot worktree"

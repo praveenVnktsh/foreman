@@ -48,7 +48,10 @@ fixture_board_toml "$fixture"
 home="$work_dir/home"
 fixture_add_instance "$home" alpha "$fixture"
 
-wt="$fixture/.claude/worktrees/foreman-alpha-PRA-1"
+# Every worktree name starts at the INSTALLATION. The fixture home declares no
+# installation.toml, so bin/installation.py reads it as the lone Claude
+# installation and the segment is `claude`.
+wt="$fixture/.claude/worktrees/foreman-claude-alpha-PRA-1"
 mkdir -p "$wt"
 
 lockfile="$fixture/.git/board-worktree.lock"
@@ -94,7 +97,12 @@ STUB
 chmod +x "$stub_dir/claude"
 
 sweep_out="$work_dir/sweep.out"
-if ! HOME="$home" FOREMAN_INSTANCE=alpha PATH="$stub_dir:$PATH" "$sweep" PRA-1 \
+# FOREMAN_HOME is named explicitly. config.sh no longer derives it from $HOME:
+# it asks bin/installation.py, which reads the home as the parent of this
+# clone. An explicit home is what that derivation yields to, and it is how this
+# file stays pointed at its temporary directory.
+if ! HOME="$home" FOREMAN_HOME="$home/.foreman" FOREMAN_INSTANCE=alpha \
+     PATH="$stub_dir:$PATH" "$sweep" PRA-1 \
     >"$sweep_out" 2>&1; then
   bad "sweep.sh PRA-1 exited non-zero: $(cat "$sweep_out")"
 fi
@@ -117,7 +125,7 @@ fi
 # inside (not lock contention) can now happen there too, and it must be
 # reported as itself -- not relabeled "lock is held", which would send an
 # operator looking for a contending process that does not exist.
-usage_out="$(HOME="$home" FOREMAN_INSTANCE=alpha "$sweep" 2>&1)" && \
+usage_out="$(HOME="$home" FOREMAN_HOME="$home/.foreman" FOREMAN_INSTANCE=alpha "$sweep" 2>&1)" && \
   bad "sweep.sh with no arguments should refuse (usage error), not succeed"
 case "$usage_out" in
   *"usage: sweep.sh"*) ok "a real failure inside the lock is reported as itself, not as \"lock is held\"" ;;
