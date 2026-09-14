@@ -132,6 +132,36 @@ else
 fi
 
 # =============================================================================
+# Case: migrate writes names = "legacy"
+#
+# The migrated home has open pull requests on foreman/<board>/<ticket>, and
+# reconcile.py finds a card's pull request by that branch. A migrate that
+# wrote the scoped shape would make every in-flight card read "no PR", and the
+# board would build each one again on top of its open pull request.
+# =============================================================================
+if grep -qx 'names = "legacy"' "$op1/.foreman/claude/installation.toml" 2>/dev/null; then
+  ok 'migrate writes names = "legacy"'
+else
+  not_ok "migrate writes names = \"legacy\": toml=$(cat "$op1/.foreman/claude/installation.toml" 2>&1)"
+fi
+
+# =============================================================================
+# Case: after migrating, config.sh's branch_name for a board is still
+# foreman/<board>/<ticket>
+#
+# Read through the moved clone's own config.sh, which is what the tick sources,
+# so the claim covers the loader, the declaration and the shape together.
+# =============================================================================
+branch="$(env -u FOREMAN_HOME -u LEGACY_NAMES FOREMAN_INSTANCE=demo bash -c \
+  ". '$op1/.foreman/claude/install/skills/board/config.sh' >/dev/null; branch_name PRA-1" \
+  2>"$work_dir/branch.err" || true)"
+if [[ "$branch" == "foreman/demo/PRA-1" ]]; then
+  ok "after migrating, config.sh's branch_name for a board is still foreman/<board>/<ticket>"
+else
+  not_ok "after migrating, config.sh's branch_name for a board is still foreman/<board>/<ticket>: got '$branch' err=$(cat "$work_dir/branch.err")"
+fi
+
+# =============================================================================
 # Case: a second migrate is a no-op that says so
 #
 # Run from the MOVED clone: the one at $FOREMAN_HOME/install is gone, exactly
@@ -209,6 +239,68 @@ if [[ $status -ne 0 ]] \
   ok "migrate REFUSES and moves nothing when the registry shows a live foreman/ agent"
 else
   not_ok "migrate REFUSES and moves nothing when the registry shows a live foreman/ agent: status=$status err=$(cat "$work_dir/migrate3.err") claude_dir_exists=$([[ -e "$op3/.foreman/claude" ]] && echo yes || echo no)"
+fi
+
+# =============================================================================
+# Case: a migrate whose declaration would be refused moves nothing
+#
+# A declared sibling `codex` already claims default = true, so the migrated
+# `claude` (also default) would be refused. That write used to run after the
+# move and left <root>/claude undeclared. It is now checked first.
+# =============================================================================
+op5="$(mktemp -d "$work_dir/op5.XXXXXX")"
+make_farm "$op5"
+mkdir -p "$op5/.foreman/codex"
+printf 'harness = "claude"\ndefault = true\n' > "$op5/.foreman/codex/installation.toml"
+
+status=0
+run_migrate "$op5" "$stub1" >"$work_dir/migrate5.out" 2>"$work_dir/migrate5.err" || status=$?
+if [[ $status -ne 0 ]] \
+    && [[ -d "$op5/.foreman/install" ]] \
+    && [[ -f "$op5/.foreman/boards.toml" ]] \
+    && [[ -d "$op5/.foreman/instances/demo" ]] \
+    && [[ ! -e "$op5/.foreman/claude" ]]; then
+  ok "a migrate whose declaration would be refused moves nothing"
+else
+  not_ok "a migrate whose declaration would be refused moves nothing: status=$status err=$(cat "$work_dir/migrate5.err") claude_dir_exists=$([[ -e "$op5/.foreman/claude" ]] && echo yes || echo no)"
+fi
+
+# =============================================================================
+# Case: a half-migrated root is declared, and never moved again
+#
+# <root>/claude holds install/ and no installation.toml, and <root> holds no
+# install/: a move that landed and a declaration that did not. A re-run used
+# to treat <root>/claude as a fresh home and move it into claude/claude.
+# =============================================================================
+op6="$(mktemp -d "$work_dir/op6.XXXXXX")"
+make_farm "$op6"
+mkdir -p "$op6/.foreman/claude"
+for entry in install boards.toml instances; do
+  mv "$op6/.foreman/$entry" "$op6/.foreman/claude/$entry"
+done
+
+half_migrate() {
+  env -u FOREMAN_HOME PATH="$stub1:$PATH" "$op6/.foreman/claude/install/bin/boardctl" migrate
+}
+status=0
+half_migrate >"$work_dir/migrate6.out" 2>"$work_dir/migrate6.err" || status=$?
+if [[ $status -eq 0 ]] \
+    && grep -qx 'names = "legacy"' "$op6/.foreman/claude/installation.toml" 2>/dev/null \
+    && [[ -d "$op6/.foreman/claude/install/bin" ]] \
+    && [[ -f "$op6/.foreman/claude/boards.toml" ]] \
+    && [[ ! -e "$op6/.foreman/claude/claude" ]]; then
+  ok "a half-migrated root is declared in place, legacy names kept, and nothing moves"
+else
+  not_ok "a half-migrated root is declared in place, legacy names kept, and nothing moves: status=$status out=$(cat "$work_dir/migrate6.out") err=$(cat "$work_dir/migrate6.err")"
+fi
+
+status=0
+half_migrate >"$work_dir/migrate7.out" 2>&1 || status=$?
+if [[ $status -eq 0 ]] && [[ ! -e "$op6/.foreman/claude/claude" ]] \
+    && grep -q 'nothing to migrate' "$work_dir/migrate7.out"; then
+  ok "a second migrate of a completed half-migrated root never produces claude/claude"
+else
+  not_ok "a second migrate of a completed half-migrated root never produces claude/claude: status=$status out=$(cat "$work_dir/migrate7.out")"
 fi
 
 # =============================================================================

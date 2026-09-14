@@ -120,8 +120,15 @@ fixture_linear_key() {
 # Codex and OpenCode have no default models, so a placeholder is passed for all
 # four stages. It is deliberately not a real model name: no test asserts on it,
 # and a plausible one invites a reader to believe the fixture spends it.
+#
+# FIXTURE_LEGACY_NAMES=1 in the caller's environment writes `names = "legacy"`,
+# the shape `boardctl migrate` gives the installation it moves. An environment
+# knob and not a fifth argument, so every existing caller stays exactly as it
+# reads.
 fixture_add_installation() {
   local home="$1" name="$2" harness="$3" default_flag="${4:-}"
+  local legacy_flag=""
+  [[ -z "${FIXTURE_LEGACY_NAMES:-}" ]] || legacy_flag="--legacy-names"
   local root="$home/.foreman"
   local install_home="$root/$name"
   local repo_root models=()
@@ -136,5 +143,5 @@ fixture_add_installation() {
   # error, not an empty expansion.
   "$repo_root/bin/installation.py" --write --home "$install_home" \
     --harness "$harness" ${default_flag:+"$default_flag"} \
-    ${models[@]+"${models[@]}"}
+    ${legacy_flag:+"$legacy_flag"} ${models[@]+"${models[@]}"}
 }

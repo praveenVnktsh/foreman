@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Claim: a `foreman/<installation>/tick` registry row with no process behind it is not a live
+# Claim: a `foreman/[<installation>/]tick` registry row with no process behind it is not a live
 # tick. supervise.sh does not wait for it to stop, and starts a replacement
 # past it.
 #
@@ -59,7 +59,7 @@ import json, os, sys, time
 path, tid, state, pid, sid = sys.argv[1:6]
 age_hours = float(sys.argv[6]) if len(sys.argv) > 6 else 264
 rows = json.load(open(path)) if os.path.exists(path) else []
-r = {"id": tid, "name": "foreman/claude/tick", "state": state,
+r = {"id": tid, "name": "foreman/tick", "state": state,
      "startedAt": int((time.time() - age_hours * 3600) * 1000),
      "cwd": os.environ["INSTALL"], "sessionId": sid}
 if pid != "-":
@@ -122,13 +122,13 @@ run() { # <mode...>
 # --- a row with no pid and a transcript silent for days is a corpse ----------
 reset; row corpse working - sid-corpse; transcript sid-corpse old
 out="$(run)"
-grep -q 'foreman/claude/tick' "$started" \
+grep -q 'foreman/tick' "$started" \
   && ok "run mode starts a tick past a working row that has no process" \
   || bad "run mode started nothing past the corpse: $out"
 [[ ! -s "$stopped" ]] \
   && ok "and asks nothing to stop, since a stop cannot land on a process that does not exist" \
   || bad "run mode asked the corpse to stop: $(cat "$stopped")"
-grep -q 'ignoring foreman/claude/tick (corpse)' <<<"$out" \
+grep -q 'ignoring foreman/tick (corpse)' <<<"$out" \
   && ok "and says which row it is ignoring, and why" \
   || bad "the corpse was not named in the log: $out"
 grep -q 'ERROR' <<<"$out" \
@@ -141,7 +141,7 @@ out="$(run)"
 grep -qx 'wedged' "$stopped" \
   && ok "a working row with a pid and a silent transcript is a wedged tick and is asked to stop" \
   || bad "the wedged tick with a pid was not asked to stop: $out"
-grep -q 'foreman/claude/tick' "$started" \
+grep -q 'foreman/tick' "$started" \
   && ok "and is replaced once the stop lands" \
   || bad "no replacement after stopping the wedged tick: $out"
 
@@ -166,7 +166,7 @@ out="$(run --restart)"; status=$?
 [[ "$(sort -u "$stopped" | tr '\n' ' ')" == "live " ]] \
   && ok "it stops the live tick and only the live tick" \
   || bad "--restart stopped the wrong set: $(sort -u "$stopped" | tr '\n' ' ')"
-grep -q 'confirmed: foreman/claude/tick is up (tick-new)' <<<"$out" \
+grep -q 'confirmed: foreman/tick is up (tick-new)' <<<"$out" \
   && ok "and confirms the replacement, uncounted against the corpse" \
   || bad "--restart did not confirm the replacement: $out"
 

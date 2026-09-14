@@ -103,16 +103,16 @@ started="$(grep -c . "$spawn_log" 2>/dev/null || echo 0)"
 [[ "$started" == "1" ]] \
   && ok "two boards start exactly one tick" \
   || bad "two boards started $started ticks: $(cat "$spawn_log")"
-# The name carries the INSTALLATION and still no board. This fixture's home
-# declares no installation.toml, so bin/installation.py reads it as the lone
-# Claude installation and the segment is `claude`. A machine runs one tick per
-# installation, on a different harness each, and two agents named
-# `foreman/tick` in one registry would each read the other as the one
-# supervise.sh must stop before starting a replacement.
+# The name carries no board. This fixture's home declares no
+# installation.toml, so bin/installation.py reads it as the lone Claude
+# installation with legacy names, and its tick keeps `foreman/tick`. A scoped
+# installation's tick carries its own name instead, and installation.py
+# allows one legacy installation per root, so two agents named
+# `foreman/tick` never share a registry.
 name="$(head -1 "$spawn_log" 2>/dev/null || true)"
-[[ "$name" == "foreman/claude/tick" ]] \
+[[ "$name" == "foreman/tick" ]] \
   && ok "the tick carries no board in its name" \
-  || bad "tick was named '$name', expected foreman/claude/tick"
+  || bad "tick was named '$name', expected foreman/tick"
 
 # --- the tick is given foreman's OWN mcp config, not the cwd's ---------------
 #

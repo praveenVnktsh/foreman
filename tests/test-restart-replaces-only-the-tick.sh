@@ -8,13 +8,14 @@
 # in the host-global registry belongs to a card that is mid-build, and stopping
 # one throws away a build that may have been running for half an hour.
 #
-# A prefix match is how that goes wrong. The tick is `foreman/<installation>/tick`
-# and a card agent is `foreman/<installation>/<board>/build/<ticket>-<n>`; a
-# matcher that reaches for `foreman/<installation>/` -- or one that stops every
+# A prefix match is how that goes wrong. The tick is `foreman/[<installation>/]tick`
+# and a card agent is `foreman/[<installation>/]<board>/build/<ticket>-<n>`; a
+# matcher that reaches for `foreman/[<installation>/]` -- or one that stops every
 # agent it inspected -- kills every build on the machine and reports a clean
 # restart. The fixture home declares no installation.toml, so
-# bin/installation.py reads it as the lone Claude installation and every name
-# below carries `claude`.
+# bin/installation.py reads it as the lone Claude installation with legacy
+# names: the tick is `foreman/tick` and every card agent starts `foreman/`,
+# the shape where a prefix match reaches furthest.
 #
 # The registry, `claude stop` and `claude --bg` are stubbed. Everything inside
 # supervise.sh runs for real, including its flock.
@@ -61,31 +62,31 @@ path, tick_state, extra = sys.argv[1], sys.argv[2], sys.argv[3:]
 # read as 56 years old, which sends every timer fire down the recycle branch.
 now = int(time.time() * 1000)
 agents = [
-    {"id": "tick-1", "name": "foreman/claude/tick", "state": tick_state,
+    {"id": "tick-1", "name": "foreman/tick", "state": tick_state,
      "startedAt": now - 60_000, "cwd": "", "sessionId": "session-tick-1"},
-    {"id": "card-a", "name": "foreman/claude/demo/build/ABC-1-1", "state": "working",
+    {"id": "card-a", "name": "foreman/demo/build/ABC-1-1", "state": "working",
      "startedAt": now - 50_000, "cwd": "", "sessionId": "session-card-a"},
-    {"id": "card-b", "name": "foreman/claude/demo/review/ABC-2-1", "state": "working",
+    {"id": "card-b", "name": "foreman/demo/review/ABC-2-1", "state": "working",
      "startedAt": now - 40_000, "cwd": "", "sessionId": "session-card-b"},
 ]
 # An extra tick row is written OLDER than tick-1, so it is the one the registry
 # read hides behind the newest.
 for n, spec in enumerate(extra, start=1):
     tid, state, age_seconds = spec.split(":")
-    agents.append({"id": tid, "name": "foreman/claude/tick", "state": state,
+    agents.append({"id": tid, "name": "foreman/tick", "state": state,
                    "startedAt": now - int(age_seconds) * 1000,
                    "cwd": "", "sessionId": "session-" + tid})
 json.dump(agents, open(path, "w"))
 PY
 }
 
-# Every foreman/claude/tick in the registry that is not stopped, space-separated. One
+# Every foreman/tick in the registry that is not stopped, space-separated. One
 # is the only correct number, so most assertions below are about this string.
 live_ticks() {
   python3 - "$registry" <<'PY'
 import json, sys
 print(" ".join(sorted(a["id"] for a in json.load(open(sys.argv[1]))
-                      if a["name"] == "foreman/claude/tick" and a["state"] != "stopped")))
+                      if a["name"] == "foreman/tick" and a["state"] != "stopped")))
 PY
 }
 
@@ -196,8 +197,8 @@ if [[ "$(cat "$stopped")" == "tick-1" ]]; then
 else
   bad "the restart stopped: $(tr '\n' ' ' <"$stopped") -- it must stop only tick-1"
 fi
-if grep -q "foreman/claude/demo/build/ABC-1-1" <<<"$out" \
-   && grep -q "foreman/claude/demo/review/ABC-2-1" <<<"$out"; then
+if grep -q "foreman/demo/build/ABC-1-1" <<<"$out" \
+   && grep -q "foreman/demo/review/ABC-2-1" <<<"$out"; then
   ok "it names the in-flight card agents it is leaving alone"
 else
   bad "it never named the card agents in flight: $out"
@@ -248,7 +249,7 @@ fi
 
 # --- `claude stop` fails and the old tick keeps running
 # The restart must not start a replacement it cannot place beside a stopped
-# tick. Two live `foreman/claude/tick` agents both run `/loop /board` against one
+# tick. Two live `foreman/tick` agents both run `/loop /board` against one
 # machine-wide HOST_MAX_CONCURRENT, which is the double-dispatch supervise.sh
 # exists to prevent -- and the survivor is invisible afterwards, because the
 # registry read reports only the newest agent of that name.

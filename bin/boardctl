@@ -68,7 +68,18 @@ load_foreman_home() {
   export FOREMAN_HOME
 }
 
-load_foreman_home
+# MIGRATE DOES NOT ASK bin/installation.py WHICH HOME THIS IS. It is the one
+# command that repairs a home installation.py refuses to read: a home migrate
+# moved but never declared sits under a root of declared siblings, and
+# installation.py refuses such a home by design. So migrate takes the same
+# answer installation.py derives -- $FOREMAN_HOME, else the parent of this
+# clone with symlinks resolved -- without the refusal.
+if [[ "${1:-}" == migrate ]]; then
+  FOREMAN_HOME="${FOREMAN_HOME:-$(cd -- "$root/.." && pwd -P)}"
+  export FOREMAN_HOME
+else
+  load_foreman_home
+fi
 boards_toml="$FOREMAN_HOME/boards.toml"
 
 # The installation a pre-installations home becomes. Its harness carries the
@@ -267,7 +278,30 @@ cmd_add() {
 
   revert_unless_valid "$tmp" \
     "boards.toml would not parse after adding '$name'; nothing written"
+
+  # A boards.toml that parses can still break the root. Found in review on
+  # 2026-09-14: `boardctl add codex` on the legacy installation succeeded
+  # beside a scoped `codex` sibling, and every installation under the root
+  # refused on its next read, because a legacy board named like a sibling
+  # makes their names collide. bin/installation.py is the one reader that
+  # knows that rule, so it is asked after the write, and the previous file
+  # comes back byte for byte when it refuses.
+  local backup=""
+  if [[ -f "$boards_toml" ]]; then
+    backup="$(new_tmp)"
+    cp -p "$boards_toml" "$backup"
+  fi
   mv -f "$tmp" "$boards_toml"
+  local err_out
+  if ! err_out="$("$installation_py" --home "$FOREMAN_HOME" 2>&1 >/dev/null)"; then
+    if [[ -n "$backup" ]]; then
+      mv -f "$backup" "$boards_toml"
+    else
+      rm -f "$boards_toml"
+    fi
+    die "adding '$name' would make this root's installations refuse to load; boards.toml restored: $err_out"
+  fi
+  [[ -z "$backup" ]] || rm -f "$backup"
 
   printf 'boardctl: board %s added, serving %s\n' "$name" "$repo"
 }
@@ -456,8 +490,8 @@ except ValueError:
 if not isinstance(agents, list):
     sys.exit(3)
 # Anything but "stopped" counts as live, a state this file has never seen
-# included. Migration renames every agent, so guessing "not really running"
-# wrong strands a build under a name nothing looks for any more.
+# included. Migration moves the home under every agent, so guessing "not
+# really running" wrong leaves a build writing to a BOARD_HOME that has moved.
 print("\n".join(sorted({
     a["name"] for a in agents
     if isinstance(a, dict) and isinstance(a.get("name"), str)
@@ -481,6 +515,28 @@ migrate_home_under_root() {
     printf 'boardctl: nothing to migrate; %s is already an installation\n' "$FOREMAN_HOME"
     return 0
   fi
+  # A HALF-MIGRATED ROOT: <root>/claude holds install/ and no
+  # installation.toml, and <root> holds no install/. A move that landed and a
+  # declaration that did not. Found in review on 2026-09-14: a re-run treated
+  # <root>/claude as a fresh un-migrated home and moved it again into
+  # claude/claude. Such a root is completed by declaring it, and nothing
+  # moves. Seen from either end: this clone's own home, or the root above it.
+  local half_home=""
+  if [[ "$(basename -- "$FOREMAN_HOME")" == "$MIGRATED_INSTALLATION" \
+        && -d "$FOREMAN_HOME/install" \
+        && ! -e "$(dirname -- "$FOREMAN_HOME")/install" ]]; then
+    half_home="$FOREMAN_HOME"
+  elif [[ ! -e "$FOREMAN_HOME/install" && -d "$new_home/install" \
+          && ! -f "$new_home/installation.toml" ]]; then
+    half_home="$new_home"
+  fi
+  if [[ -n "$half_home" ]]; then
+    printf 'boardctl: %s was moved but never declared; declaring it, moving nothing\n' "$half_home"
+    declare_migrated_home "$half_home"
+    print_migrate_next_steps "$half_home" "$(dirname -- "$half_home")"
+    return 0
+  fi
+
   if [[ ! -d "$FOREMAN_HOME/install" ]]; then
     printf 'boardctl: nothing to migrate; %s holds no install/ of its own\n' "$FOREMAN_HOME"
     return 0
@@ -490,17 +546,31 @@ migrate_home_under_root() {
   live="$(live_foreman_agents)" || \
     die "migrate: could not read the Claude agent registry; refusing to move a home that may hold a live agent"
   if [[ -n "$live" ]]; then
-    # An agent's name gains the installation segment in the new layout, so a
-    # tick or a build still running under the old name goes invisible the
-    # moment this home moves: nothing looks for it, nothing stops it, and it
-    # keeps writing to a worktree under a path that has moved.
+    # NAMES ARE KEPT: the installation.toml written below says
+    # `names = "legacy"`, so every agent, branch and worktree keeps the shape
+    # it has today. The refusal stands for a different reason. install/,
+    # instances/ and tmp/ move, so a live agent's BOARD_HOME, its card
+    # history and its scratch directory move out from under it while it is
+    # still writing to them.
     printf 'boardctl: these agents are still live:\n%s\n' "$live" >&2
-    die "migrate: stop them first -- their names change shape and a live one would go invisible"
+    die "migrate: stop them first -- their names are kept, but BOARD_HOME and its scratch move under a running agent"
   fi
 
   [[ -e "$new_home" ]] && \
     die "migrate: $new_home already exists; move it aside, this never merges into one"
   mkdir -p "$new_home"
+
+  # REFUSED BEFORE THE MOVE, not after. The write below checks the new home
+  # against every sibling under this root -- one default, one legacy
+  # installation, no legacy board named like a sibling -- and a refusal after
+  # the move left <root>/claude undeclared. The dry run is that same check,
+  # reading the boards where they are now.
+  if ! "$installation_py" --write --dry-run --home "$new_home" \
+      --harness "$MIGRATED_INSTALLATION" --default --legacy-names \
+      --boards-file "$FOREMAN_HOME/boards.toml"; then
+    rmdir "$new_home"
+    die "migrate: $new_home could not be declared (see above); nothing was moved"
+  fi
 
   # mv, not a copy: install/ is the clone this script is running from. The
   # move is a rename within one directory, so the descriptor bash is reading
@@ -513,16 +583,35 @@ migrate_home_under_root() {
     printf 'boardctl: moved %s -> %s\n' "$FOREMAN_HOME/$entry" "$new_home/$entry"
   done
 
-  # The path this script invoked installation.py by went with the clone.
-  local writer="$installation_py"
-  [[ -x "$writer" ]] || writer="$new_home/install/bin/installation.py"
-  "$writer" --write --home "$new_home" \
-    --harness "$MIGRATED_INSTALLATION" --default
-  printf 'boardctl: wrote %s/installation.toml (harness %s, default)\n' \
-    "$new_home" "$MIGRATED_INSTALLATION"
+  declare_migrated_home "$new_home"
+  print_migrate_next_steps "$new_home" "$FOREMAN_HOME"
+}
 
-  # None of these can be done from here: each wrote the OLD path into a
-  # symlink, a unit file or a crontab, and only the operator can replace it.
+# declare_migrated_home <home> -- writes <home>/installation.toml as the
+# migrated Claude installation.
+#
+# --legacy-names: THE MIGRATED HOME KEEPS ITS NAMES. Its open pull requests
+# sit on branches foreman/<board>/<ticket>, and skills/board/reconcile.py
+# finds a card's pull request by that branch. Moving to the scoped shape here
+# would make every in-flight card read "no PR", and the board would dispatch a
+# fresh build on top of each open pull request.
+declare_migrated_home() {
+  local home="$1"
+  # The path this script invoked installation.py by may have gone with the clone.
+  local writer="$installation_py"
+  [[ -x "$writer" ]] || writer="$home/install/bin/installation.py"
+  "$writer" --write --home "$home" \
+    --harness "$MIGRATED_INSTALLATION" --default --legacy-names \
+    || die "migrate: $home is moved but not declared (see above); fix the refusal and re-run boardctl migrate from $home/install -- it declares that home and moves nothing again"
+  printf 'boardctl: wrote %s/installation.toml (harness %s, default, legacy names kept)\n' \
+    "$home" "$MIGRATED_INSTALLATION"
+}
+
+# print_migrate_next_steps <new_home> <old_root> -- the three steps migrate
+# cannot do. Each wrote the OLD path into a symlink, a unit file or a crontab,
+# and only the operator can replace it.
+print_migrate_next_steps() {
+  local new_home="$1" old_root="$2"
   printf 'boardctl: now run these three:\n'
   printf 'boardctl:   %s/install/bin/install-skills.sh\n' "$new_home"
   printf 'boardctl:   %s/install/bin/install-service.sh   (or point the cron line at the new path)\n' \
@@ -530,15 +619,15 @@ migrate_home_under_root() {
   # THE THIRD STEP IS THE ONE NOBODY THINKS OF. The pre-installations watchdog
   # is named plain `foreman`, the new one `foreman-claude`, so installing the
   # new one leaves BOTH enabled. The old unit's ExecStart names
-  # $FOREMAN_HOME/install/skills/board/supervise.sh, which this migrate just
-  # moved, so it wakes every ten minutes and fails -- a red unit beside a green
-  # one, on a machine whose board looks healthy. bin/install-service.sh refuses
-  # to enable the new timer until this is done.
+  # <old_root>/install/skills/board/supervise.sh, which migrate moved, so it
+  # wakes every ten minutes and fails -- a red unit beside a green one, on a
+  # machine whose board looks healthy. bin/install-service.sh refuses to enable
+  # the new timer until this is done.
   if [[ "$(uname -s)" == "Linux" ]]; then
     printf 'boardctl:   systemctl --user disable --now foreman.timer   (the pre-installations watchdog; it now points at a path that moved)\n'
   else
     printf 'boardctl:   remove the cron line that runs %s/install/skills/board/supervise.sh (that path has moved)\n' \
-      "$FOREMAN_HOME"
+      "$old_root"
   fi
 }
 

@@ -69,10 +69,16 @@ export FOREMAN_HOME
 # earlier: worktree_path joins the installation with a hyphen, so a-b's
 # worktrees match installation a's sweep glob on a shared REPO.
 #
+# LEGACY_NAMES is the third silent failure. `LEGACY_NAMES=1` in the
+# environment gives a scoped installation the legacy shapes below: its sweep
+# then globs foreman-<board>-* and reaps the worktrees of a legacy sibling
+# that serves the same repository, and its reconcile reads that sibling's pull
+# requests as its own.
+#
 # FOREMAN_HOME above is deliberately NOT in this list. An explicit home is how
 # every test in tests/ points a whole installation at a temporary directory,
 # and it selects a home rather than contradicting what that home declares.
-unset INSTALLATION IS_DEFAULT HARNESS FOREMAN_ROOT
+unset INSTALLATION IS_DEFAULT HARNESS FOREMAN_ROOT LEGACY_NAMES
 if ! _foreman_load_pairs "this installation's declaration" "$_foreman_install_root/bin/installation.py"; then
   if [[ $- == *i* ]]; then return 1; else exit 1; fi
 fi
@@ -97,7 +103,48 @@ if [[ ! "$INSTALLATION" =~ ^[A-Za-z0-9_]+$ ]]; then
   printf 'foreman: installation name %s is invalid; only letters, digits and underscore are allowed (no hyphen, no slash)\n' "$INSTALLATION" >&2
   if [[ $- == *i* ]]; then return 1; else exit 1; fi
 fi
-export FOREMAN_HOME FOREMAN_ROOT INSTALLATION HARNESS IS_DEFAULT
+
+# THE ONE PLACE A NAME'S SHAPE IS DECIDED. Every agent name, worktree, branch
+# and evidence ref below, and every glob in sweep.sh, reconcile.py and
+# watch-agents.py, reads these two segments instead of spelling the
+# installation in again.
+#
+#   scoped (every installation created with an installation.toml that does
+#   not say otherwise):
+#     foreman/<installation>/<board>/<ticket>/<role>-<attempt>
+#     foreman/<installation>/tick
+#     $REPO/.claude/worktrees/foreman-<installation>-<board>-<ticket>
+#     foreman/<installation>/<board>/<ticket>                (branch)
+#     refs/foreman/<installation>/<board>/evidence/<n>
+#
+#   legacy (a home with no installation.toml, and the home `boardctl migrate`
+#   writes with `names = "legacy"`):
+#     foreman/<board>/<ticket>/<role>-<attempt>
+#     foreman/tick
+#     $REPO/.claude/worktrees/foreman-<board>-<ticket>
+#     foreman/<board>/<ticket>                               (branch)
+#     refs/foreman/<board>/evidence/<n>
+#
+# Legacy exists because a Claude home installed before installations has open
+# pull requests on foreman/<board>/<ticket>. reconcile.py finds a card's pull
+# request by that branch, so renaming it under a live card reads as "no PR"
+# and the board builds the card again on top of the open one. The installation
+# that already exists keeps its names; bin/installation.py refuses a second
+# legacy sibling, and a legacy board named like a scoped sibling, because
+# either one makes these globs match another installation's work.
+#
+# Assigned here, never read from the environment, for the reason LEGACY_NAMES
+# is unset above. The same holds for every name composed from them:
+# NAME_SCOPE, WORKTREE_SCOPE, BOARD_NAME_PREFIX, BOARD_WORKTREE_PREFIX and
+# TICK_AGENT_NAME.
+if [[ -n "$LEGACY_NAMES" ]]; then
+  NAME_SCOPE=""
+  WORKTREE_SCOPE=""
+else
+  NAME_SCOPE="$INSTALLATION/"
+  WORKTREE_SCOPE="$INSTALLATION-"
+fi
+export FOREMAN_HOME FOREMAN_ROOT INSTALLATION HARNESS IS_DEFAULT LEGACY_NAMES NAME_SCOPE WORKTREE_SCOPE
 
 # The adapter for this installation's harness: Claude Code, Codex or OpenCode.
 # Every script that ran `claude` itself runs this instead, so one file knows
@@ -164,6 +211,14 @@ fi
 INSTANCE_HOME="$FOREMAN_HOME/instances/$INSTANCE"
 BOARD_HOME="${BOARD_HOME:-$INSTANCE_HOME}"
 
+# This board's two name roots, composed once from the scope above. Every
+# per-card name is one of these plus the ticket: the functions at the bottom of
+# this file, sweep.sh's globs, and reconcile.py and watch-agents.py, which read
+# both through reconcile.py's _load_config. Not environment-wins, for the
+# reason NAME_SCOPE is not.
+BOARD_NAME_PREFIX="foreman/$NAME_SCOPE$INSTANCE"
+BOARD_WORKTREE_PREFIX="foreman-$WORKTREE_SCOPE$INSTANCE"
+
 # ids.env is KEY=VALUE, written by bin/resolve-ids.py, never by hand and never
 # by a target repository. Read line by line rather than sourced: the same rule
 # the contract follows, for the same reason.
@@ -221,7 +276,7 @@ fi
 if ! _foreman_load_pairs "$REPO/board.toml" "$_foreman_install_root/bin/contract.py" "$REPO/board.toml"; then
   if [[ $- == *i* ]]; then return 1; else exit 1; fi
 fi
-export REPO KEY_FILE INSTANCE INSTANCE_HOME BOARD_HOME
+export REPO KEY_FILE INSTANCE INSTANCE_HOME BOARD_HOME BOARD_NAME_PREFIX BOARD_WORKTREE_PREFIX
 
 MAX_BUDGET_USD="${MAX_BUDGET_USD:-}"
 
@@ -355,16 +410,22 @@ AGENT_SKIP_PERMISSIONS="${AGENT_SKIP_PERMISSIONS-1}"
 # deliberate: a watchdog that could also dispatch would double-dispatch the
 # moment it misjudged liveness.
 #
-# The name carries the INSTALLATION and no board segment, unlike agent_name,
-# branch_name, worktree_path and evidence_ref below. There is ONE tick for
-# every board this installation serves -- it walks them in turn -- so a
-# per-board name would ask supervise.sh to keep N agents alive and let N ticks
-# dispatch against one machine-wide HOST_MAX_CONCURRENT. The installation
+# The name carries the installation scope and no board segment, unlike
+# agent_name, branch_name, worktree_path and evidence_ref below. There is ONE
+# tick for every board this installation serves -- it walks them in turn -- so
+# a per-board name would ask supervise.sh to keep N agents alive and let N
+# ticks dispatch against one machine-wide HOST_MAX_CONCURRENT. The installation
 # segment is the other half: a machine runs one tick per installation, on a
 # different harness each, and two ticks named `foreman/tick` in one registry
 # would each read the other as the one supervise.sh must stop before starting a
-# replacement.
-TICK_AGENT_NAME="${TICK_AGENT_NAME:-foreman/$INSTALLATION/tick}"
+# replacement. The legacy installation keeps `foreman/tick`; installation.py
+# allows only one of those per root, so the name stays unique.
+#
+# NOT environment-wins, unlike the knobs around it. Found in review on
+# 2026-09-14: an operator shell exporting TICK_AGENT_NAME=foreman/tick gave a
+# scoped sibling the legacy tick's name, and `supervise.sh --restart` there
+# would stop the legacy installation's live tick.
+TICK_AGENT_NAME="foreman/${NAME_SCOPE}tick"
 TICK_INTERVAL_MINUTES="${TICK_INTERVAL_MINUTES:-20}"
 
 # Wedged: mid-turn and silent. A tick genuinely working is never quiet this long.
@@ -559,17 +620,19 @@ agent_tmp_for() { BOARD_HOME="$BOARD_HOME" "$_foreman_tmp_dir_sh" "$1"; }
 # second harness -- and they then share a board name, a ticket key, a REPO and
 # so every worktree, branch and evidence ref under it. Without this segment the
 # codex installation's sweep reaps the claude installation's worktree, and its
-# dispatch pushes onto the branch a live build is committing to.
+# dispatch pushes onto the branch a live build is committing to. The legacy
+# installation goes without it; see NAME_SCOPE near the top of this file for
+# why, and for the two refusals that keep it apart from its siblings.
 #
 # The prefix is its own function because sweep.sh matches on it: everything a
 # card ever dispatched -- plan, build, review, every attempt and every resume
-# fork -- shares `foreman/<installation>/<instance>/<ticket>/`, and a second
-# spelling of that shape here or there is how a sweep starts missing sessions.
-card_agents_prefix() { printf 'foreman/%s/%s/%s/\n' "$INSTALLATION" "$INSTANCE" "$1"; }
+# fork -- shares `$BOARD_NAME_PREFIX/<ticket>/`, and a second spelling of that
+# shape here or there is how a sweep starts missing sessions.
+card_agents_prefix() { printf '%s/%s/\n' "$BOARD_NAME_PREFIX" "$1"; }
 agent_name() { printf '%s%s-%s\n' "$(card_agents_prefix "$1")" "$2" "$3"; }
-worktree_path() { printf '%s/.claude/worktrees/foreman-%s-%s-%s\n' "$REPO" "$INSTALLATION" "$INSTANCE" "$1"; }
-branch_name() { printf 'foreman/%s/%s/%s\n' "$INSTALLATION" "$INSTANCE" "$1"; }
-evidence_ref() { printf 'refs/foreman/%s/%s/evidence/%s\n' "$INSTALLATION" "$INSTANCE" "$1"; }
+worktree_path() { printf '%s/.claude/worktrees/%s-%s\n' "$REPO" "$BOARD_WORKTREE_PREFIX" "$1"; }
+branch_name() { printf '%s/%s\n' "$BOARD_NAME_PREFIX" "$1"; }
+evidence_ref() { printf 'refs/%s/evidence/%s\n' "$BOARD_NAME_PREFIX" "$1"; }
 
 # Append one line to a card's transition log. Never rewritten, only appended.
 card_log() {

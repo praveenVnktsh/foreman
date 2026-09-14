@@ -10,14 +10,14 @@ several minutes later.
 
 TWO RULES MAKE THIS SAFE.
 
-**It never reports the tick agent.** `foreman/<installation>/<instance>/tick`
-runs the loop itself, so its turn ending is the board finishing work, not work
-arriving. Emitting that would wake the loop with news of itself and spin
-forever. Any name that is not
-`foreman/<installation>/<instance>/<TICKET>/<role>-<attempt>` for THIS
-installation's THIS instance is ignored for the same reason -- including
-another instance's agents, or another installation's, which would otherwise
-wake this one on work that is not its own.
+**It never reports the tick agent.** `foreman/<installation>/tick` (or
+`foreman/tick` on the legacy installation) runs the loop itself, so its turn
+ending is the board finishing work, not work arriving. Emitting that would wake
+the loop with news of itself and spin forever. Any name that is not
+`<BOARD_NAME_PREFIX>/<TICKET>/<role>-<attempt>` for THIS installation's THIS
+instance is ignored for the same reason -- including another instance's
+agents, or another installation's, which would otherwise wake this one on work
+that is not its own.
 
 **It emits transitions, not states.** A line is written when an agent moves from
 working into a finished phase — once, on the edge. Re-reporting a finished agent
@@ -59,13 +59,20 @@ if _SKILL_DIR not in sys.path:
     sys.path.insert(0, _SKILL_DIR)
 import reconcile  # noqa: E402
 
-INSTANCE = reconcile.INSTANCE
-INSTALLATION = reconcile.INSTALLATION
 HARNESS_SH = reconcile.HARNESS_SH
+# `foreman/<installation>/<instance>` or, on the legacy installation,
+# `foreman/<instance>` -- config.sh decides which, and this process only reads
+# it. See _dispatched() for how a captured name is held against it.
+BOARD_NAME_PREFIX = reconcile.BOARD_NAME_PREFIX
 
-# foreman/<installation>/<instance>/<TICKET>/<role>-<attempt>. The tick is
-# foreman/<installation>/<instance>/tick, which has no fifth segment and
-# therefore never matches.
+# foreman/[<installation>/]<instance>/<TICKET>/<role>-<attempt>. The
+# installation segment is optional because the legacy installation's names
+# have none. The tick is foreman/[<installation>/]tick, which has no ticket
+# segment and therefore never matches.
+#
+# The optional group cannot misread one shape as the other: a TICKET needs an
+# uppercase key, a hyphen and digits, and a board or installation name may hold
+# no hyphen at all, so the segment count alone decides which group is empty.
 #
 # The team-key half of TICKET is `[A-Z0-9]+`, not `[A-Z]+`: nothing in this
 # codebase constrains a Linear team key to letters only -- bin/contract.py
@@ -84,7 +91,7 @@ HARNESS_SH = reconcile.HARNESS_SH
 # stays silent, so the board discovers the work on its next ordinary poll
 # instead of waking immediately.
 DISPATCHED = re.compile(
-    r"^foreman/([^/]+)/([^/]+)/([A-Z0-9]+-\d+)/(plan|build|review)-(\w+)$"
+    r"^foreman/(?:([^/]+)/)?([^/]+)/([A-Z0-9]+-\d+)/(plan|build|review)-(\w+)$"
 )
 
 # Phases that mean "this agent is no longer working". `done` is a completed turn;
@@ -99,12 +106,21 @@ def _dispatched(name: str) -> tuple[str, str, str] | None:
     Capture groups on the installation and instance segments are not enough on
     their own -- two installations can share one repository, so a name with the
     right instance but the wrong installation (or vice versa) still names
-    somebody else's agent. This is what actually compares BOTH captured
-    segments against INSTALLATION and INSTANCE and skips everything that does
-    not match both.
+    somebody else's agent. This is what actually compares EVERY captured
+    segment against this process's own BOARD_NAME_PREFIX and skips everything
+    that does not match all of them.
+
+    The comparison is against the whole prefix, not against INSTALLATION, so
+    the legacy shape is accepted exactly when this process is legacy. A scoped
+    process never matches a name with no installation segment, and a legacy
+    process never matches one that has it.
     """
     m = DISPATCHED.match(name)
-    if not m or m.group(1) != INSTALLATION or m.group(2) != INSTANCE:
+    if not m:
+        return None
+    installation, instance = m.group(1), m.group(2)
+    owner = f"foreman/{instance}" if installation is None else f"foreman/{installation}/{instance}"
+    if owner != BOARD_NAME_PREFIX:
         return None
     return m.group(3), m.group(4), m.group(5)
 

@@ -113,7 +113,8 @@ to say so, because the label does the routing.
 
 A home installed before installations existed has `~/.foreman/install`
 directly, with no `installation.toml`. `boardctl migrate` moves it into
-`~/.foreman/claude/`, writes `harness = "claude"` and `default = true`, and
+`~/.foreman/claude/`, writes `harness = "claude"`, `default = true` and
+`names = "legacy"`, and
 prints the three steps it cannot do for you: re-run `install-skills.sh` from
 the moved clone, re-point `install-service.sh` or your cron line at the new
 path, and disable the old watchdog -- `systemctl --user disable --now
@@ -121,6 +122,13 @@ foreman.timer`, or remove the old cron line. That last one is easy to miss and
 loud when missed: the new timer is `foreman-claude.timer`, so the old
 `foreman.timer` survives beside it and fails every ten minutes against a path
 that has moved. `install-service.sh` refuses to install the new timer while the
-old unit is still there. `migrate` itself refuses if any `foreman/` agent is
-still live, because names change shape with an installation and a live agent
-under the old name would become invisible.
+old unit is still there.
+
+**Names are kept.** The migrated installation keeps every agent, worktree and
+branch name it had: `foreman/<board>/<ticket>`, not
+`foreman/claude/<board>/<ticket>`. Your open pull requests stay on the branches
+the board looks them up by, so no in-flight card is built a second time. Only
+installations created from now on put their installation name into their
+names. `migrate` still refuses if any `foreman/` agent is live, because it
+moves the home, and with it the card history and scratch, under a running
+agent.
