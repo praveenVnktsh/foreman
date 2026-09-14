@@ -149,42 +149,29 @@ poll_step() { # <seconds already waited> <bound>
 # uses, because `state` alone cannot tell "waiting for the next tick" from
 # "wedged mid-turn".
 inspect() {
-  claude agents --json --all 2>/dev/null | python3 -c '
-import json,os,re,sys,time
-want=sys.argv[1]
-# Exit non-zero on an unreadable registry rather than returning "[]", which the
-# caller cannot tell apart from "no agents are running" — and which it would
-# answer by starting a second loop agent.
-try: agents=json.load(sys.stdin)
-except Exception: sys.exit(3)
-# A registry that is not a LIST is not an empty one. `for a in agents` over a
-# future {"agents": [...]} wrapper iterates its KEYS, matches nothing, prints
-# "{}" and exits 0 -- which this script cannot tell from "no tick agent exists"
-# and answers by starting a second loop agent beside a healthy one. Same check
-# as reconcile.load_agents(), in the copy that can double-dispatch.
-if not isinstance(agents,list): sys.exit(3)
-mine=[a for a in agents if isinstance(a,dict) and a.get("name")==want]
-if not mine:
+  local rows
+  rows="$(tick_rows)" || return 3
+  printf '%s\n' "$rows" | python3 -c '
+import json,sys,time
+rows=[l.split("\t") for l in sys.stdin.read().split("\n") if l]
+if not rows:
     print("{}"); raise SystemExit
 # --bg --resume forks and inherits the name, so several may share it.
-live=[a for a in mine if a.get("state")!="stopped"]
-a=max(live or mine, key=lambda x: x.get("startedAt") or 0)
-cwd=a.get("cwd") or ""; sid=a.get("sessionId") or ""
-idle=None
-if cwd and sid:
-    p=os.path.expanduser("~/.claude/projects/%s/%s.jsonl"%(re.sub(r"[/.]","-",cwd),sid))
-    if os.path.exists(p): idle=round((time.time()-os.path.getmtime(p))/60,1)
-started=a.get("startedAt") or 0
+live=[r for r in rows if r[2]=="yes"]
+r=max(live or rows, key=lambda r: int(r[4]))
+started=int(r[4])
 print(json.dumps({
-  "id":a.get("id"), "sessionId":sid, "state":a.get("state"),
-  "idle_minutes":idle,
+  "id":r[0], "sessionId":r[5], "state":r[1],
+  "idle_minutes": None if r[3]=="None" else float(r[3]),
   "age_hours": round((time.time()-started/1000)/3600,2) if started else None,
   "live_ticks": len(live),
 }))
-' "$TICK_AGENT_NAME"
+'
 }
 
-# EVERY agent named $TICK_AGENT_NAME, one "<id><TAB><state>" per line.
+# EVERY agent named $TICK_AGENT_NAME, one row per line, tab-separated:
+#
+#   <id>  <state>  <alive: yes|no>  <idle minutes, or None>  <startedAt ms>  <sessionId>
 #
 # THE TICK IS A SET, and every gesture that changes it acts on the whole set.
 # inspect() above collapses that set to one agent, which is what an operator
@@ -192,26 +179,77 @@ print(json.dumps({
 # agent inspect() named left every other live one running and reported success.
 # Several agents can genuinely share the name -- inspect() records that
 # `--bg --resume` forks inherit it, and run mode used to manufacture the state
-# itself -- so this is the list every mutating path works from.
-tick_agents() {
+# itself -- so this is the list every mutating path works from, and the ONE
+# place that decides whether a row is alive.
+#
+# ALIVE IS NOT "NOT STOPPED". Measured 2026-09-14: a row from ten days earlier
+# sat in the registry with `state: working`, no pid, and a transcript silent
+# for 14112 minutes. A restart stopped the real tick, found that row, asked it
+# to stop eight times over 30 seconds, and refused to start a replacement
+# beside "a tick that is still live"; every timer fire after it did the same,
+# and the board ran no tick until an operator archived the row by hand. A stop
+# cannot land on a process that does not exist, so a row like that is a corpse,
+# not a tick, and is neither waited for nor counted.
+#
+# The rule is deliberately narrow. sweep.sh records why a bare "no pid" test is
+# dangerous -- the day a live agent is listed without one, that test kills it
+# -- so a row is a corpse only when it has no pid AND its transcript is known
+# and has been silent longer than TICK_DEAD_MINUTES, or is gone and the row is
+# older than that. A row with a pid is alive whatever its transcript says; the
+# wedged branch below handles it, by stopping a process that exists. A row
+# whose transcript cannot be located (no cwd or session id) is alive: nothing
+# is known against it.
+tick_rows() {
   claude agents --json --all 2>/dev/null | python3 -c '
-import json,sys
-want=sys.argv[1]
-# Same refusal as inspect(): an unreadable or non-list registry that printed
-# nothing would read as "the tick is gone", which is the one answer that lets a
-# second tick start beside a live one.
+import json,os,re,sys,time
+want, dead_minutes = sys.argv[1], float(sys.argv[2])
+# Exit non-zero on an unreadable registry rather than returning nothing, which
+# the caller cannot tell apart from "no agents are running" -- and which it
+# would answer by starting a second loop agent.
 try: agents=json.load(sys.stdin)
 except Exception: sys.exit(3)
+# A registry that is not a LIST is not an empty one. `for a in agents` over a
+# future {"agents": [...]} wrapper iterates its KEYS, matches nothing, prints
+# nothing and exits 0 -- which this script cannot tell from "no tick agent
+# exists" and answers by starting a second loop agent beside a healthy one.
+# Same check as reconcile.load_agents(), in the copy that can double-dispatch.
 if not isinstance(agents,list): sys.exit(3)
+now=time.time()
 for a in agents:
-    if isinstance(a,dict) and a.get("name")==want:
-        print("%s\t%s"%(a.get("id") or "?", a.get("state") or "?"))
-' "$TICK_AGENT_NAME"
+    if not isinstance(a,dict) or a.get("name")!=want: continue
+    cwd=a.get("cwd") or ""; sid=a.get("sessionId") or ""
+    started=a.get("startedAt") or 0
+    idle=None; transcript=None
+    if cwd and sid:
+        p=os.path.expanduser("~/.claude/projects/%s/%s.jsonl"%(re.sub(r"[/.]","-",cwd),sid))
+        transcript=os.path.exists(p)
+        if transcript: idle=round((now-os.path.getmtime(p))/60,1)
+    alive=a.get("state")!="stopped"
+    if alive and not a.get("pid") and transcript is not None:
+        silent = idle is not None and idle > dead_minutes
+        gone = not transcript and started and (now-started/1000)/60 > dead_minutes
+        if silent or gone: alive=False
+    print("%s\t%s\t%s\t%s\t%s\t%s"%(a.get("id") or "?", a.get("state") or "?",
+          "yes" if alive else "no", "None" if idle is None else idle, started, sid))
+' "$TICK_AGENT_NAME" "$TICK_DEAD_MINUTES"
 }
 
-# The ids in a listing that are not stopped, one per line.
-live_tick_ids() { # <tick_agents listing>
-  printf '%s\n' "$1" | awk -F'\t' '$1 != "" && $2 != "stopped" { print $1 }'
+# The ids in a listing that are alive, one per line.
+live_tick_ids() { # <tick_rows listing>
+  printf '%s\n' "$1" | awk -F'\t' '$1 != "" && $3 == "yes" { print $1 }'
+}
+
+# Name every corpse in the registry, once per fire, so an operator reading the
+# log can see the row and archive it. Ignoring it silently would hide a
+# registry that is wrong, which is the second half of what went wrong: the row
+# had been there for ten days before a restart tripped over it.
+log_corpse_ticks() {
+  local rows
+  rows="$(tick_rows)" || return 0
+  printf '%s\n' "$rows" | awk -F'\t' '$1 != "" && $2 != "stopped" && $3 == "no" { print $1 "\t" $2 "\t" $4 }' \
+  | while IFS=$'\t' read -r id state idle; do
+      log "ignoring $TICK_AGENT_NAME ($id): the registry says $state, but it has no pid and its transcript is ${idle}m silent or gone; a stop cannot land on a process that does not exist. Archive the row."
+    done
 }
 
 field() { printf '%s' "$1" | python3 -c 'import json,sys; print(json.load(sys.stdin).get(sys.argv[1]) if sys.stdin else "")' "$2" 2>/dev/null || printf 'None'; }
@@ -414,7 +452,7 @@ stop_ticks() {
     return 0
   fi
   while :; do
-    if listing="$(tick_agents)"; then
+    if listing="$(tick_rows)"; then
       ids="$(live_tick_ids "$listing")"
       if [[ -z "${ids//[[:space:]]/}" ]]; then
         [[ -z "$attempted" ]] || log "confirmed: no $TICK_AGENT_NAME agent is running after ${waited}s"
@@ -439,7 +477,7 @@ stop_ticks() {
 # The live tick ids still in the registry, space-separated, for an error message.
 surviving_tick_ids() {
   local listing
-  listing="$(tick_agents)" || { printf 'unknown (the registry is unreadable)'; return 0; }
+  listing="$(tick_rows)" || { printf 'unknown (the registry is unreadable)'; return 0; }
   live_tick_ids "$listing" | tr '\n' ' ' | sed 's/ *$//'
 }
 
@@ -460,7 +498,7 @@ surviving_tick_ids() {
 confirm_started() { # <space-separated ids that were stopped>
   local stopped_ids="$1" waited=0 step listing live live_count survivors
   while :; do
-    if listing="$(tick_agents)"; then
+    if listing="$(tick_rows)"; then
       live="$(live_tick_ids "$listing")"
       live_count="$(printf '%s' "$live" | grep -c . || true)"
       if [[ "$live_count" -eq 1 ]] \
@@ -705,6 +743,7 @@ repair_tick() {
 # HOST_MAX_CONCURRENT, so that is a fault to repair and not a state to judge the
 # health of -- and this branch is what makes the count self-heal instead of
 # needing an operator to notice.
+log_corpse_ticks
 if [[ "$LIVE_TICKS" -gt 1 ]]; then
   log "$LIVE_TICKS $TICK_AGENT_NAME agents are live ($(surviving_tick_ids)); one is the only correct number"
   repair_tick
