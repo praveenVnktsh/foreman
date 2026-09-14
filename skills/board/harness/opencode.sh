@@ -7,7 +7,7 @@
 #                      [--add-dir D]... [--mcp-config F]... [--loop-minutes K]
 #                                             prints the session id
 #   opencode.sh resume --name N --cwd D --prompt-file F --skip-permissions
-#                                             prints the session id
+#                      [--mcp-config F]...    prints the session id
 #   opencode.sh list                          every agent, as a JSON list
 #   opencode.sh stop <id>                     stop one agent
 #   opencode.sh reap <older-than-seconds>     delete what finished agents left
@@ -288,6 +288,14 @@ resume() {
   [[ -n "$session" ]] || die "no agent named $DETACHED_NAME to resume"
 
   local args=(opencode run --dir "$DETACHED_CWD" --session "$session" --format json --auto)
+  # The same config spawn writes, for the same reason: a resumed agent talks to
+  # the same MCP servers. Accepted and dropped would be a resume that silently
+  # loses every tool it had.
+  if [[ ${#DETACHED_MCP_CONFIGS[@]} -gt 0 ]]; then
+    local mcp_dest="$home/mcp/opencode.json"
+    _opencode_write_mcp_config "$mcp_dest" "${DETACHED_MCP_CONFIGS[@]}"
+    args=(env "OPENCODE_CONFIG=$mcp_dest" "${args[@]}")
+  fi
   args+=("$DETACHED_PROMPT")
 
   id="$(detached_spawn "$DETACHED_NAME" "$DETACHED_CWD" "$home" "" -- "${args[@]}")" || exit 1

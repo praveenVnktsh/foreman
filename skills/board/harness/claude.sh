@@ -7,7 +7,7 @@
 #                   [--max-budget-usd N] [--settings JSON] [--loop-minutes K]
 #                                             prints the session id
 #   claude.sh resume --name N --cwd D --prompt-file F [--skip-permissions]
-#                   [--max-budget-usd N] [--settings JSON]
+#                   [--mcp-config F]... [--max-budget-usd N] [--settings JSON]
 #                                             prints the session id
 #   claude.sh list                            every agent, as a JSON list
 #   claude.sh stop <id>                       stop one agent
@@ -194,11 +194,11 @@ spawn() {
 
 resume() {
   local name="" cwd="" prompt_file="" skip="" budget="" settings="" prompt session
-  local args=()
+  local args=() mcp_configs=() config
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --skip-permissions) skip=1; shift; continue ;;
-      --name|--cwd|--prompt-file|--max-budget-usd|--settings)
+      --name|--cwd|--prompt-file|--max-budget-usd|--settings|--mcp-config)
         [[ $# -ge 2 ]] || die "resume: $1 needs a value" ;;
       *) die "resume: unknown argument: $1" ;;
     esac
@@ -213,6 +213,10 @@ resume() {
       # config.sh's CARD_AGENT_SETTINGS, which turns off the Remote Control
       # registration a card agent would otherwise leave behind forever.
       --settings) settings="$2" ;;
+      # The same MCP servers spawn takes. The codex adapter needs them on
+      # resume because codex keeps no MCP config across one; accepting the flag
+      # here keeps one contract across adapters.
+      --mcp-config) mcp_configs+=("$2") ;;
     esac
     shift 2
   done
@@ -229,6 +233,8 @@ resume() {
 
   cd "$cwd"
   args=(--bg --resume "$session")
+  # VARIADIC, so before the permission flag, by spawn's order rule.
+  for config in ${mcp_configs[@]+"${mcp_configs[@]}"}; do args+=(--mcp-config "$config"); done
   [[ -z "$budget" ]] || args+=(--max-budget-usd "$budget")
   # One value, never variadic, so it may sit anywhere before the permission flag.
   [[ -z "$settings" ]] || args+=(--settings "$settings")
