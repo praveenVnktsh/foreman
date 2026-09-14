@@ -31,6 +31,7 @@ ci_workflow = "CI"
 [deploy]
 workflow = "deploy.yml"
 step = "Deploy and verify"
+selection_step = "Choose the revision to deploy"
 [test]
 command = "true"
 TOML

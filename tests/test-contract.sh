@@ -29,6 +29,7 @@ ci_workflow = "CI"
 [deploy]
 workflow = "deploy.yml"
 step = "Deploy and verify"
+selection_step = "Choose the revision to deploy"
 [risk]
 paths = ["migrations/"]
 [test]
@@ -46,6 +47,7 @@ check "risk paths are space-joined"     "migrations/" "$(read_key "$work/full.to
 check "test command"                    "make test" "$(read_key "$work/full.toml" TEST_COMMAND)"
 check "limits are upper-cased"          "2" "$(read_key "$work/full.toml" MAX_CONCURRENT)"
 check "unset limit falls back"          "2" "$(read_key "$work/full.toml" MAX_REVIEW_ROUNDS)"
+check "deploy selection_step loads"     "Choose the revision to deploy" "$(read_key "$work/full.toml" DEPLOY_SELECTION_STEP)"
 
 # Task 6 (decisions §2): MIN_FREE_TMP_MB, MIN_FREE_REPO_MB, PROBE_TMP_MB,
 # PROBE_REPO_MB and QUICK_PROBE_MB were added to LIMITS alongside the
@@ -99,6 +101,27 @@ command = "make test"
 TOML
 check "absent deploy workflow is empty, not missing" "" "$(read_key "$work/nodeploy.toml" DEPLOY_WORKFLOW)"
 check "absent deploy step is empty, not missing"     "" "$(read_key "$work/nodeploy.toml" DEPLOY_STEP)"
+check "absent deploy selection_step is empty, not missing" "" "$(read_key "$work/nodeploy.toml" DEPLOY_SELECTION_STEP)"
+
+# An existing target's [deploy] table -- workflow and step set, but written
+# before selection_step existed -- must keep reading exactly as it always
+# has: the new key defaults to empty rather than making the whole table
+# fail to load or fall back to some other default.
+cat >"$work/deploynoselection.toml" <<'TOML'
+[linear]
+team = "PRA"
+project = "foreman"
+[checks]
+required = ["Tests"]
+ci_workflow = "CI"
+[deploy]
+workflow = "deploy.yml"
+step = "Deploy and verify"
+[test]
+command = "make test"
+TOML
+check "a [deploy] table written before selection_step existed still reads empty for it" \
+  "" "$(read_key "$work/deploynoselection.toml" DEPLOY_SELECTION_STEP)"
 
 # An explicitly empty risk list means NOTHING is high risk. It must not fall
 # back to a default -- the same distinction `HIGH_RISK_PATHS` uses `-` for.

@@ -17,6 +17,11 @@ that means production is broken indistinguishable from the one that means it is
 live. A condition that can never hold now ends the wait as its own outcome, with
 a name the caller can report: `{"satisfied": false, "outcome": "deploy-failed"}`.
 
+A satisfied wait names its outcome too. It is usually `satisfied`, but a deploy
+the target's workflow QUEUED for its next scheduled run is `deploy-queued`. The
+card's work is done even though nothing is live yet. The verdict keeps
+`verified: false` so no caller reports the commit as deployed.
+
 WHY 3 AND NOT 2. Exit 2 is argparse's own code for a usage error, and this file
 returns it for an unusable invocation too. Both of those print NOTHING on
 stdout, so a settled-and-failed code of 2 would let a mistyped command — an
@@ -133,10 +138,19 @@ def deploy_state(sha: str) -> dict:
     a DESCENDANT's run too, which is where it always actually appears — the
     overtaken merge's own run stands down, and the failure belongs to whoever
     overtook it.
+
+    A QUEUED deploy is the one terminal verdict that ends the wait as `done`.
+    The selection step read the queue and said the next scheduled run deploys
+    it, so the card's work is finished. It carries outcome `deploy-queued`, and
+    the verdict stays `verified: false` so nobody reports it as live. It is
+    checked before the generic terminal branch, which still stops a failed
+    selection (`deploy-selection-failed`) with exit 3.
     """
     verdict = reconcile.deploy_verdict(sha)
     if verdict.get("verified"):
         return {"done": True, "verdict": verdict}
+    if verdict.get("outcome") == "deploy-queued":
+        return {"done": True, "outcome": "deploy-queued", "verdict": verdict}
     if verdict.get("terminal"):
         return {"stop": True, "outcome": verdict.get("outcome") or "not-deployed",
                 "verdict": verdict,
@@ -190,7 +204,7 @@ def wait(fn, timeout: int, label: str) -> int:
     while True:
         state = fn()
         if state.get("done"):
-            return emit(True, "satisfied", label, state, 0)
+            return emit(True, state.get("outcome") or "satisfied", label, state, 0)
         # Settled, and the condition did not hold. Not a timeout — waiting longer
         # is exactly what will not help — and emphatically not `satisfied`, which
         # every caller reads as "the thing I was waiting for happened".

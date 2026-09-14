@@ -791,12 +791,16 @@ out.
 every poll. **Three exit codes, not two**, and the JSON names which one it was in
 `outcome`:
 
-- **0**, `outcome: satisfied` — the condition holds.
+- **0**, `outcome: satisfied` — the condition holds. For `deploy` only, exit 0
+  may instead carry `outcome: deploy-queued`: the target's own deploy selection
+  queued the commit for its next scheduled deploy. That is settled and enough
+  for `Done`, but `verified` is `false` — see
+  [5. Reconcile `Done`](#5-reconcile-done).
 - **1**, `outcome: budget-expired` — the budget ran out with the condition still
   open. Not an error, just the signal to end the tick and report.
 - **3** — the condition is *settled and did not hold*, and waiting longer is
   exactly what will not help. `outcome` names which: `deploy-failed`,
-  `deploy-never-ran`, `not-on-main`. Never read this as satisfied — a failed
+  `deploy-never-ran`, `deploy-selection-failed`, `not-on-main`. Never read this as satisfied — a failed
   deploy came back as `satisfied: true` for as long as `done` meant both.
 - **2** — **you called it wrong.** argparse's own code, and what an unusable
   invocation returns: a missing flag, or a `--sha` that arrived empty because the
@@ -1655,10 +1659,17 @@ each one:
 
 1. `merged: true`,
 2. `commit_on_main: true`,
-3. `deploy.verified: true`.
+3. `deploy.verified: true`, **or** `deploy.outcome: deploy-queued` — merged, on
+   `main`, and the target's own deploy selection queued it for its next
+   scheduled deploy.
 
 Point 3 is `DEPLOY_STEP` (`config.sh`, e.g. `Deploy and verify`) — the **step**
-concluding success, not the job. A stale-revision stand-down concludes
+concluding success, not the job. A target whose deploys are queued rather than
+immediate also names `DEPLOY_SELECTION_STEP` (`[deploy] selection_step` in
+`board.toml`), and `deploy-queued` comes from that step's **logged reason**, read
+from the job log. It is never inferred from a skipped deploy step: a
+`stand-down:` skips the deploy step exactly as a `queued:` does, and only the
+second one means no deploy of this commit is coming until the schedule. A stale-revision stand-down concludes
 `success` at the job level, so reading the job calls a non-deploy a deploy. A
 good deploy on a host running under systemd may also log several old services
 as `Failed with result 'exit-code'`; those are the *old* processes exiting
@@ -1686,6 +1697,12 @@ that ran and failed came back `satisfied: true` carrying `verified: false`, and
 the tick had no name for the one outcome that means production is broken:
 
 - **exit 0** (`outcome: satisfied`) — deployed. Move the card to `Done`.
+- **exit 0** (`outcome: deploy-queued`) — merged and on `main`, and the target's
+  deploy selection queued the commit for its next scheduled deploy. Move the
+  card to `Done`, and say on the card that the deploy is **queued, not verified
+  live** (`verified: false`). Quote the selection reason and the run URL from
+  the verdict. Nothing the tick does will make that deploy come sooner, so there
+  is nothing left to wait on.
 - **exit 1** (`outcome: budget-expired`) — the deploy is still coming. The card
   stays in `In Review` and the next pass — or the next tick — picks it up. Do not
   move it early and do not re-merge it: `Done` is still three observed facts,
@@ -1704,7 +1721,7 @@ squash, so a tick that merged moments ago can reconcile with `merge_commit: ""`.
 That is not a failed deploy and must never be reported as one. Reconcile again on
 the next pass, by which time the merge commit exists.
 
-Three ways to end up at exit 3, and only the first two are about production:
+Four ways to end up at exit 3, and only the first three are about production:
 
 - `deploy-failed` — the deploy script ran on the deploy host and broke. **The
   merge is on `main` and production is not running it**, which is the state the
@@ -1719,13 +1736,28 @@ Three ways to end up at exit 3, and only the first two are about production:
   deploy job was skipped in its entirety. That is what a red CI run on `main`
   produces. Step 0's guard is the thing that fixes it; say so and leave the
   card.
+- `deploy-selection-failed` — the target's `DEPLOY_SELECTION_STEP` concluded
+  `failure`: it could not decide what to deploy, so the deploy step was skipped
+  and the job is red. **Deploys on that target have stopped until someone fixes
+  the selection**, scheduled ones included. Report it loudly on the card and in
+  the tick's report, with the run URL. The workflow writes no `HALT` for this,
+  and the tick must not write one either. A later scheduled deploy that runs and
+  fails still writes `HALT` itself, as before.
 - `not-on-main` — the merge commit is not on `main` at all, so no deploy will
   ever carry it. Something is wrong with what was merged, not with the deploy
   host.
 
 A deploy that is merely *stale-revision skipped* is none of these: it is the
 normal stand-down of an overtaken merge, the descendant's deploy carries the
-commit, and the wait keeps going until its budget runs out.
+commit, and the wait keeps going until its budget runs out. **A skipped deploy
+step alone never means queued.** `deploy-queued` is read from the selection
+step's logged reason (`queued: ...`); a `stand-down: ...` reason skips the same
+step and keeps the wait open.
+
+**The board never applies the `fast-track` label**, nor any other label that
+makes a target deploy sooner. A queued card stays queued until the target's
+schedule deploys it. Fast-tracking a deploy is the operator's call, because the
+schedule exists so that a human decides when production changes out of turn.
 
 ### 6. Dispatch
 

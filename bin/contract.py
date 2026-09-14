@@ -45,6 +45,13 @@ SCALARS = [
     ("BOOTSTRAP_COMMAND", ("bootstrap", "command"), ""),
     ("DEPLOY_WORKFLOW", ("deploy", "workflow"), ""),
     ("DEPLOY_STEP", ("deploy", "step"), ""),
+    # Names the step (board.toml [deploy] step naming; the job's own step,
+    # never a fixed string) whose conclusion and logged reason distinguish a
+    # queued deploy from a stand-down and from a failed selection -- see
+    # skills/board/reconcile.py's deploy_verdict. Optional: a target that
+    # deploys on every merge, with no scheduling step to read, has nothing to
+    # name here, so absence must stay "" rather than refuse to load.
+    ("DEPLOY_SELECTION_STEP", ("deploy", "selection_step"), ""),
 ]
 
 # (key, toml path, joiner, default). A default of None marks it REQUIRED.
@@ -178,7 +185,7 @@ LIMITS = {
 KNOWN_TABLES = {
     "linear": {"team", "project"},
     "checks": {"required", "ci_workflow"},
-    "deploy": {"workflow", "step"},
+    "deploy": {"workflow", "step", "selection_step"},
     "risk": {"paths"},
     "test": {"command"},
     "bootstrap": {"command"},

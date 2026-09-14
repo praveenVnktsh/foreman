@@ -69,6 +69,7 @@ ci_workflow = "CI"                # workflow NAME, matching `name:` in the yml
 [deploy]                          # optional
 workflow = "deploy.yml"
 step = "Deploy and verify"        # the step, not the job -- see below
+selection_step = "Choose the revision to deploy"  # optional; reads a queued deploy's reason
 
 [risk]
 paths = ["migrations/"]
@@ -95,13 +96,24 @@ rejected: with no isolation between instances, a config that can run code runs
 as the operator's user beside every other instance's credentials, before
 anything has decided whether that repository is trusted.
 
-Three entries carry the reasoning that produced them and must not be flattened
+Four entries carry the reasoning that produced them and must not be flattened
 into "settings":
 
 - `deploy.step`, not `deploy.workflow` alone. A deploy job concludes `success`
   when it stands down on a stale revision, so job success is not deployment
   success. The step name is the evidence. `deploy` absent means the target has
   no deployment and merged is done.
+- `deploy.selection_step` exists because a target that queues deploys instead
+  of firing on every merge makes a *skipped* deploy step ambiguous three ways:
+  standing down because a deploy is still coming, queued until the next
+  scheduled run, or a selection that failed outright and will never resolve on
+  its own. Job success and step name can't tell those apart, so the board
+  reads the named step's own conclusion and the reason it logged to the job
+  output. A `success` conclusion whose reason begins `queued:` is Done with
+  `verified` false -- the wait is over even though nothing deployed yet. A
+  `failure` conclusion is terminal and reported to the card, never waited on.
+  `selection_step` absent leaves the old reading, where only the deploy step's
+  own conclusion is examined.
 - `risk.paths` is read from the diff, never from the ticket text. A path here
   parks the pull request for a human instead of merging it. The distinction
   worth preserving is reversibility, not sensitivity: a bad change to a service
