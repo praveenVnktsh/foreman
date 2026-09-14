@@ -40,7 +40,7 @@ flowchart TD
         bri["<b>brief.py</b><br/><small>362 lines</small><br/>write the prompt"]
         dis["<b>dispatch.sh</b><br/><small>316 lines</small><br/>worktree · bootstrap · spawn"]
         wai["<b>waitfor.py · watch-agents.py</b><br/><small>272 + 157 lines</small><br/>block until work finishes"]
-        swp["<b>sweep.sh</b><br/><small>278 lines</small><br/>reap worktrees"]
+        swp["<b>sweep.sh</b><br/><small>278 lines</small><br/>reap worktrees · forget sessions"]
         rec -->|"needs an agent"| pre
         pre -->|"fit"| bri
         bri --> dis

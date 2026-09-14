@@ -346,6 +346,17 @@ TICK_LOCK_WAIT_SECONDS="${TICK_LOCK_WAIT_SECONDS:-240}"
 # short enough that an operator waiting on a restart is not left guessing.
 TICK_STOP_TIMEOUT_SECONDS="${TICK_STOP_TIMEOUT_SECONDS:-30}"
 
+# How long a ticket-mode sweep waits for a terminal card's idle agents to leave
+# the registry after it asks `claude stop`, before leaving them and saying so.
+#
+# A background agent idles at `done` when its turn ends and nothing else ever
+# stops it, so the sweep does, under the same rule as TICK_STOP_TIMEOUT_SECONDS:
+# the stop is re-issued on every poll, and the registry -- never the exit code
+# -- says when it landed. Past the bound the agent is left, its worktree and
+# record with it, and the sweep exits non-zero. A session that lingers must not
+# read as a clean sweep.
+AGENT_STOP_TIMEOUT_SECONDS="${AGENT_STOP_TIMEOUT_SECONDS:-30}"
+
 # How long `supervise.sh --restart` waits for the REPLACEMENT tick to appear in
 # the agent registry before reporting failure.
 #
@@ -433,7 +444,13 @@ agent_tmp_for() { BOARD_HOME="$BOARD_HOME" "$_foreman_tmp_dir_sh" "$1"; }
 # by every installation on this machine, matched by prefix in reconcile.py and
 # by regex in watch-agents.py; without this segment two instances reap each
 # other's agents, and two projects may legitimately both use the team key PRA.
-agent_name() { printf 'foreman/%s/%s/%s-%s\n' "$INSTANCE" "$1" "$2" "$3"; }
+#
+# The prefix is its own function because sweep.sh matches on it: everything a
+# card ever dispatched -- plan, build, review, every attempt and every
+# `--bg --resume` fork -- shares `foreman/<instance>/<ticket>/`, and a second
+# spelling of that shape here or there is how a sweep starts missing sessions.
+card_agents_prefix() { printf 'foreman/%s/%s/\n' "$INSTANCE" "$1"; }
+agent_name() { printf '%s%s-%s\n' "$(card_agents_prefix "$1")" "$2" "$3"; }
 worktree_path() { printf '%s/.claude/worktrees/foreman-%s-%s\n' "$REPO" "$INSTANCE" "$1"; }
 branch_name() { printf 'foreman/%s/%s\n' "$INSTANCE" "$1"; }
 evidence_ref() { printf 'refs/foreman/%s/evidence/%s\n' "$INSTANCE" "$1"; }

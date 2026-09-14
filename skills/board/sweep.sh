@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Reap board worktrees for cards that are finished, and prune dead ones.
 #
-#   sweep.sh MUR-42 MUR-43        # tickets that are terminal; their trees go
+#   sweep.sh MUR-42 MUR-43        # tickets that are terminal; their idle agents
+#                                 # are stopped, and their trees and sessions go
 #   sweep.sh --orphans            # board-* trees with no live agent
 #
 # Either way it also reaps `refs/foreman/<instance>/evidence/<pid>` refs left behind by an
@@ -205,6 +206,203 @@ release_slot() {
   card_log "$ticket" '{"action":"released","by":"sweep"}'
 }
 
+# Stop a terminal card's idle agents, so the rest of the sweep can reap them.
+#
+# A background agent does not exit when its turn ends. It idles at `done` with
+# its pid intact (reconcile.py's PHASE table records the measurement), and
+# nothing in the board ever asked it to stop: the tick stops a stalled or a
+# blocked agent and no other. So a merged card's build agent sat at `done`
+# forever, its worktree protected by the liveness guard as "not (yet)
+# stopped", its row kept by `claude agents --all`, and the operator's session
+# list grew by a plan, a build and every reviewer per card.
+#
+# Only `done` and `blocked`. `done` is a turn that finished, and a terminal
+# card's turn has nothing left to say; `blocked` is a prompt nobody will
+# answer. A `working` agent is left alone, on the reasoning ticket mode leaves a
+# working agent's worktree: the caller's judgment that the card is terminal may
+# be stale, raced or wrong, and a stop it did not need costs a build.
+# forget_sessions then names the working session and leaves it.
+#
+# `claude stop` is asynchronous and can fail, so the stop is re-issued on every
+# poll and the registry, never the exit code, says when it landed -- the loop
+# supervise.sh runs for the tick, bounded by AGENT_STOP_TIMEOUT_SECONDS. An
+# agent still not stopped at the bound is left, named on stderr, and held in
+# `stop_status` for the exit code. "A session lingers" must not read as a clean
+# sweep.
+stop_status=0
+# Every agent of these tickets that is safe to stop: "<id><TAB><name>" per
+# line. Exits non-zero when the registry cannot be read, which the caller must
+# not confuse with "nothing to stop".
+stoppable_agents() { # <name prefix...>
+  claude agents --json --all 2>/dev/null | python3 -c '
+import json,sys
+prefixes=sys.argv[1:]
+try: agents=json.loads(sys.stdin.read())
+except ValueError: sys.exit(3)
+if not isinstance(agents,list): sys.exit(3)
+for a in agents:
+    if not isinstance(a,dict): continue
+    name=a.get("name") or ""
+    if not any(name.startswith(p) for p in prefixes): continue
+    if a.get("state") not in ("done","blocked"): continue
+    print("%s\t%s"%(a.get("id") or "", name))
+' "$@"
+}
+
+stop_card_agents() { # <ticket...>
+  local prefixes=() ticket listing id name waited=0 asked="" poll_seconds=2
+  for ticket in "$@"; do prefixes+=("$(card_agents_prefix "$ticket")"); done
+  while :; do
+    if ! listing="$(stoppable_agents ${prefixes[@]+"${prefixes[@]}"})"; then
+      printf 'foreman: could not read the agent registry; stopping no session\n' >&2
+      stop_status=1
+      return 0
+    fi
+    [[ -n "${listing//[[:space:]]/}" ]] || return 0
+    if [[ -n "$BOARD_DRY_RUN" ]]; then
+      while IFS=$'\t' read -r id name; do
+        [[ -n "$id" ]] && printf 'DRY RUN: would stop session %s (%s)\n' "$name" "$id"
+      done <<<"$listing"
+      return 0
+    fi
+    if [[ "$waited" -ge "$AGENT_STOP_TIMEOUT_SECONDS" ]]; then
+      while IFS=$'\t' read -r id name; do
+        [[ -n "$id" ]] && printf 'foreman: leaving session %s (%s) -- claude stop did not land in %ss\n' \
+          "$name" "$id" "$AGENT_STOP_TIMEOUT_SECONDS" >&2
+      done <<<"$listing"
+      stop_status=1
+      return 0
+    fi
+    while IFS=$'\t' read -r id name; do
+      [[ -n "$id" ]] || continue
+      case " $asked " in
+        *" $id "*) ;;
+        *) printf 'stopping session %s (%s)\n' "$name" "$id"; asked="$asked $id" ;;
+      esac
+      # The registry below decides whether this landed; the exit code cannot.
+      claude stop "$id" >/dev/null 2>&1 || true
+    done <<<"$listing"
+    sleep "$poll_seconds"
+    waited=$((waited + poll_seconds))
+  done
+}
+
+# Forget a terminal card's finished sessions.
+#
+# A `claude --bg` agent that stops leaves two things behind that nothing here
+# reaped: its record under `~/.claude/jobs/<id>/`, which is what `claude agents
+# --all` lists a stopped agent from, and its transcripts under
+# `~/.claude/projects/`. Measured 2026-09-13 on Claude Code 2.1.228: `claude
+# stop` writes `state: stopped` into the record, no subcommand removes it, and
+# removing the directory is what clears the listing. The worktree went, the
+# scratch went, the branch went, and every plan, build and review session of
+# every card ever built stayed listed as a stopped agent -- and in the
+# operator's session list -- forever.
+#
+# Ticket mode only, for the reason the slot is released here and nowhere else:
+# the caller has just judged the card terminal, and a terminal card is the one
+# whose sessions have no reader left. `--orphans` never forgets a session. A
+# card that is not terminal may still be diagnosed from its transcript
+# (reconcile.py's `death`) or resumed into it.
+#
+# Scoped three ways, each a rule this file already applies to worktrees:
+# - by name prefix, so it is this instance's sessions for this ticket and never
+#   a sibling board's, the tick's, or ABC-10's when asked about ABC-1;
+# - only a session whose record says `stopped`, the tie-goes-to-leaving-it rule
+#   --orphans applies to a worktree;
+# - a transcript directory goes only when the session ran in one of this
+#   instance's throwaway worktrees. A dispatch run by hand from the repository
+#   root shares that directory with whoever else worked there, so its record
+#   goes, its transcripts stay, and the sweep says so.
+#
+# The Python lists and the shell removes, so each can be read on its own. A
+# listing that fails is held in `forget_status` and reported at the end, the
+# way reap_evidence_refs is, so a record this cannot read costs the forgetting
+# and never the slot release that follows it.
+forget_status=0
+forget_sessions() {
+  local ticket="$1" jobs_dir="$HOME/.claude/jobs"
+  local listing id state name cwd transcripts forgotten=0
+  [[ -d "$jobs_dir" ]] || return 0
+  if ! listing="$(python3 - "$jobs_dir" "$(card_agents_prefix "$ticket")" <<'PY'
+import json, os, re, sys
+jobs, prefix = sys.argv[1], sys.argv[2]
+failed = 0
+for short in sorted(os.listdir(jobs)):
+    if not os.path.isdir(os.path.join(jobs, short)):
+        continue
+    path = os.path.join(jobs, short, "state.json")
+    try:
+        with open(path) as fh:
+            record = json.load(fh)
+    except (OSError, ValueError) as exc:
+        print(f"foreman: could not read {path} ({exc}); leaving that session", file=sys.stderr)
+        failed = 1
+        continue
+    if not isinstance(record, dict):
+        print(f"foreman: {path} is not a JSON object; leaving that session", file=sys.stderr)
+        failed = 1
+        continue
+    name = record.get("name") or ""
+    if not name.startswith(prefix):
+        continue
+    cwd = record.get("cwd") or ""
+    # Where Claude Code files the session's transcript: the cwd with every `/`
+    # and `.` replaced by `-`, the same rule reconcile.py's transcript_path
+    # applies.
+    transcripts = os.path.join(os.path.expanduser("~/.claude/projects"), re.sub(r"[/.]", "-", cwd)) if cwd else ""
+    print("\t".join([short, record.get("state") or "?", name, cwd, transcripts]))
+sys.exit(failed)
+PY
+  )"; then
+    forget_status=1
+  fi
+  while IFS=$'\t' read -r id state name cwd transcripts; do
+    [[ -n "$id" ]] || continue
+    [[ "$id" != */* && "$id" != .* ]] || die "refusing to remove $jobs_dir/$id -- not a session id"
+    if [[ "$state" != "stopped" ]]; then
+      printf 'foreman: leaving session %s (%s) -- it is not (yet) stopped\n' "$name" "$id" >&2
+      continue
+    fi
+    if [[ -n "$BOARD_DRY_RUN" ]]; then
+      printf 'DRY RUN: would forget session %s (%s)\n' "$name" "$id"
+    else
+      rm -rf "${jobs_dir:?}/${id:?}"
+      printf 'forgot session %s (%s)\n' "$name" "$id"
+      forgotten=$((forgotten + 1))
+    fi
+    remove_transcripts "$name" "$cwd" "$transcripts"
+  done <<<"$listing"
+  if [[ "$forgotten" -gt 0 ]]; then
+    card_log "$ticket" "$(printf '{"action":"forgot","by":"sweep","sessions":%d}' "$forgotten")"
+  fi
+  return 0
+}
+
+# remove_transcripts <session name> <cwd it ran in> <its transcript directory>
+remove_transcripts() {
+  local name="$1" cwd="$2" dir="$3"
+  [[ -n "$dir" && -d "$dir" ]] || return 0
+  case "$dir" in
+    "$HOME"/.claude/projects/?*) ;;
+    *) die "refusing to remove $dir -- not a transcript directory" ;;
+  esac
+  case "$cwd" in
+    "$REPO"/.claude/worktrees/foreman-"$INSTANCE"-*) ;;
+    *)
+      printf 'foreman: leaving transcripts in %s -- %s ran outside a foreman worktree, so that directory is shared\n' \
+        "$dir" "$name" >&2
+      return 0
+      ;;
+  esac
+  if [[ -n "$BOARD_DRY_RUN" ]]; then
+    printf 'DRY RUN: would remove transcripts %s\n' "$dir"
+    return 0
+  fi
+  rm -rf "$dir"
+  printf 'removed transcripts %s\n' "$dir"
+}
+
 [[ "${1:-}" == "--orphans" || $# -gt 0 ]] || die "usage: sweep.sh <TICKET...> | --orphans"
 
 # Read ONCE, and read the same way, for BOTH modes. This used to be built only
@@ -254,11 +452,21 @@ if [[ "${1:-}" == "--orphans" ]]; then
     remove_agent_tmp "$tmp"
   done
 else
+  # The stops change the answer the liveness read above gave, so it is asked
+  # again once they have landed -- and refused again if it cannot be read, for
+  # the reason it was refused the first time.
+  stop_card_agents "$@"
+  if ! live_worktrees >"$LIVE_FILE"; then
+    die "could not read live agents after stopping the cards' agents; refusing to sweep"
+  fi
   for ticket in "$@"; do
     remove_tree_unless_live "$(worktree_path "$ticket")"
     for extra in "$REPO"/.claude/worktrees/foreman-"$INSTANCE"-"$ticket"-*/; do
       [[ -d "$extra" ]] && remove_tree_unless_live "${extra%/}"
     done
+    # Before the release, so `released` stays the card's last history line --
+    # card_holds_slot reads only that one.
+    forget_sessions "$ticket"
     release_slot "$ticket"
   done
 fi
@@ -276,3 +484,7 @@ find "$BOARD_HOME"/cards/*/reviews -type f -mtime +30 -delete 2>/dev/null || tru
 
 [[ "$reap_status" -eq 0 ]] \
   || die "could not reap leaked evidence refs (see above); refs/foreman/$INSTANCE/evidence/* is unswept"
+[[ "$forget_status" -eq 0 ]] \
+  || die "could not read every session record under $HOME/.claude/jobs (see above); a finished session may still be listed"
+[[ "$stop_status" -eq 0 ]] \
+  || die "a terminal card's agent did not stop (see above); its worktree, record and transcripts are left for a later sweep"
