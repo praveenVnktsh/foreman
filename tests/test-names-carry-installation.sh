@@ -122,9 +122,20 @@ echo "do the thing" > "$prompt_file"
 # run_dispatch <foreman_home> <ticket> -- the DRY RUN line, or empty on a
 # non-zero exit (dispatch_fixture_run's own "swallow and let the caller's own
 # assertion fail" rule).
+#
+# NOT `env -i`. CI's actions/setup-python puts a python3 on PATH that dies with
+# "error while loading shared libraries: libpython3.12.so.1.0" once
+# LD_LIBRARY_PATH is stripped, and dispatch.sh reaches python3 at config.sh's
+# first line. Measured on this test's first CI run: the dispatch died there and
+# the claim failed with nothing wrong in the names. tests/lib/dispatch-fixture.sh
+# derives the whole toolchain for the same reason. This claim needs no
+# allowlist, so it keeps the caller's environment and removes only the names
+# that would decide the worktree path in its place: config.sh reads REPO,
+# BOARD_HOME and FOREMAN_TMP_ROOT with the environment winning.
 run_dispatch() {
   local home="$1" ticket="$2"
-  env -i HOME="$root" FOREMAN_HOME="$home" FOREMAN_INSTANCE=demo \
+  env -u REPO -u BOARD_HOME -u FOREMAN_TMP_ROOT \
+    HOME="$root" FOREMAN_HOME="$home" FOREMAN_INSTANCE=demo \
     PATH="$stub_dir:$PATH" BOARD_DRY_RUN=1 \
     "$shim_root/skills/board/dispatch.sh" \
     --ticket "$ticket" --role build --attempt 1 --prompt-file "$prompt_file" \
