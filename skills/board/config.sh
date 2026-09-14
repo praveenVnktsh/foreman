@@ -387,6 +387,28 @@ WAIT_DEPLOY_SECONDS="${WAIT_DEPLOY_SECONDS:-600}"
 # synchronous run.
 WAIT_BUILD_SECONDS="${WAIT_BUILD_SECONDS:-0}"
 
+# Settings every dispatched card agent -- plan, build, review, and a resumed
+# build -- starts with, as the JSON string `claude --settings` takes. The tick
+# does NOT get these; see below.
+#
+# `disableRemoteControl`: a `claude --bg` session registers a Remote Control
+# session with the operator's claude.ai account, and that registration
+# outlives the process. Measured 2026-09-14 on Claude Code 2.1.270: every
+# agent one board had ever spawned, 932 of them, was still listed in the
+# desktop app as "Remote Control · offline" after its process, its
+# `~/.claude/jobs` record and its transcript were all gone. No CLI command,
+# setting or API removes one; only archiving each by hand in the app does, and
+# sweep.sh cannot reach it. So the registration has to not happen, at the one
+# place every spawn passes through.
+#
+# Card agents only. The tick is the one session worth attaching to from a
+# phone -- it is what runs the board -- and it is one row that restarts
+# rarely. A card costs three to six rows every time it is built, and those are
+# what filled the list. Passed per spawn rather than written into the
+# operator's settings.json, so their own sessions on the machine keep Remote
+# Control too.
+CARD_AGENT_SETTINGS='{"disableRemoteControl":true}'
+
 # When set, mutating operations print what they would do and exit.
 BOARD_DRY_RUN="${BOARD_DRY_RUN:-}"
 

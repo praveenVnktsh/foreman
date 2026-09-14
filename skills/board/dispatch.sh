@@ -229,7 +229,7 @@ if [[ -n "$RESUME" ]]; then
   [[ -d "$WORKTREE" ]] || die "worktree $WORKTREE is gone; cannot resume $NAME.
 Dispatch fresh (drop --resume, use the next attempt number) instead."
   cd "$WORKTREE"
-  claude --bg --resume "$SESSION" "$@" "$PROMPT" >/dev/null
+  claude --bg --resume "$SESSION" --settings "$CARD_AGENT_SETTINGS" "$@" "$PROMPT" >/dev/null
   card_log "$TICKET" "$(printf '{"action":"resume","name":"%s","session":"%s"}' "$NAME" "$SESSION")"
   printf '%s\n' "$SESSION"
   exit 0
@@ -315,6 +315,7 @@ cd "$WORKTREE"
 claude --bg \
   --name "$NAME" \
   --model "$MODEL" \
+  --settings "$CARD_AGENT_SETTINGS" \
   --add-dir "$BOARD_HOME" \
   "$@" \
   "$PROMPT" >/dev/null
