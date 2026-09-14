@@ -173,8 +173,8 @@ harness.sh spawn  --name N --cwd D --model M --prompt-file F
                   [--max-budget-usd N] [--settings JSON] [--loop-minutes K]
                                                          prints the session id
 harness.sh resume --name N --cwd D --prompt-file F
-                  [--skip-permissions] [--max-budget-usd N] [--settings JSON]
-                                                         prints the session id
+                  [--mcp-config F] [--skip-permissions] [--max-budget-usd N]
+                  [--settings JSON]                      prints the session id
 harness.sh list                                          prints a JSON list
 harness.sh stop   <id>
 harness.sh transcript <cwd> <session-id>                 prints a path
@@ -201,6 +201,11 @@ it on its orphan pass with the same retention window it applies to review
 worktrees, so finished records, logs and wrappers under `agents/` do not
 accumulate for the life of the installation. Claude's registry is Claude's to
 age out, so its adapter answers with a no-op.
+
+`--mcp-config F` is accepted on `resume` as well as `spawn`, because a resumed
+agent reconnects to the same MCP servers and codex keeps no MCP config across a
+resume. `dispatch.sh` does not pass it on either path today; the tick is the
+only caller that passes one, and the tick is never resumed.
 
 `--settings JSON` is Claude Code's per-session settings. `dispatch.sh` passes
 config.sh's `CARD_AGENT_SETTINGS` on every card agent, spawned or resumed, to
@@ -243,8 +248,16 @@ is inside die together.
 
 - Codex: `codex exec --cd D -m M --dangerously-bypass-approvals-and-sandbox
   --json PROMPT`; resume is `codex exec resume <sessionId>`. MCP servers are
-  passed as `-c mcp_servers.<name>.command=...` overrides translated from the
-  shared `mcp.json`. `skills-dir` is `~/.codex/skills`.
+  written to a profile file at 0600, translated from the shared `mcp.json`,
+  never passed as `-c` overrides that would put a credential in the argv. The
+  flag that layers the file is read from `codex exec --help`, because codex
+  renamed it: `--profile-v2` on 0.133.0, `--profile` on 0.154.0. A codex with
+  neither is refused. Every harness command runs with stdin from `/dev/null`,
+  because `codex exec` waits on an open stdin. A remote server carries only `url` and one
+  `Authorization: Bearer <token>` header; the token reaches codex in the
+  environment variable `FOREMAN_MCP_<NAME>_BEARER`, which the profile names in
+  `bearer_token_env_var`. Any other header is refused by name. `skills-dir`
+  is `~/.codex/skills`.
 - OpenCode: `opencode run --dir D -m M --auto --format json PROMPT`; resume is
   `--session <sessionId>`. MCP servers are written as an OpenCode config file
   under `$FOREMAN_HOME/agents/` translated from `mcp.json`, and the harness is
