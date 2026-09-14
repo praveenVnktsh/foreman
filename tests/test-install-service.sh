@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Claim: install-service.sh refuses to install a watchdog for nothing, names
 # every unit after the installation it watches, refuses to stand beside the
-# pre-installations watchdog, and its dry run describes exactly what it would
-# write.
+# pre-installations watchdog while it can still run, and its dry run describes
+# exactly what it would write.
 #
 # The refusal matters more than it looks. An enabled timer with no board
 # declared wakes every ten minutes forever to find no work, and that is
@@ -23,7 +23,19 @@ bad() { printf 'FAIL %s\n' "$1" >&2; fail=1; }
 
 mkdir -p "$work/bin" "$work/repo"
 printf '#!/usr/bin/env bash\nprintf "Linux\\n"\n' > "$work/bin/uname"
-printf '#!/usr/bin/env bash\nexit 0\n' > "$work/bin/systemctl"
+# is-enabled and is-active answer from files under $work/unit-state, so a claim
+# sets the legacy watchdog's state by writing one. An absent file answers as
+# systemd does for a unit it has never loaded. Every other verb succeeds silently.
+mkdir -p "$work/unit-state"
+cat > "$work/bin/systemctl" <<STUB
+#!/usr/bin/env bash
+[[ "\$1" == --user ]] && shift
+case "\$1" in
+  is-enabled) cat "$work/unit-state/\$2.enabled" 2>/dev/null || echo not-found ;;
+  is-active)  cat "$work/unit-state/\$2.active" 2>/dev/null || echo inactive ;;
+esac
+exit 0
+STUB
 printf '#!/usr/bin/env bash\nexit 0\n' > "$work/bin/loginctl"
 chmod +x "$work/bin/uname" "$work/bin/systemctl" "$work/bin/loginctl"
 
@@ -72,6 +84,11 @@ rm -rf "$skills/board"
 # --- skills linked
 link_our_skills
 out="$(run --dry-run)"
+
+case "$out" in
+  *"pre-installations watchdog"*) bad "refused with no legacy unit file: $out" ;;
+  *) ok "no legacy unit file is not refused" ;;
+esac
 
 case "$out" in
   *"Type=oneshot"*) ok "the service is a oneshot, not a long-running unit" ;;
@@ -157,9 +174,10 @@ esac
 # minutes forever beside a board that is otherwise healthy.
 mkdir -p "$work/.config/systemd/user"
 printf '[Unit]\nDescription=old foreman\n' > "$work/.config/systemd/user/foreman.timer"
+echo enabled > "$work/unit-state/foreman.timer.enabled"
 out="$(run --dry-run)"
 case "$out" in
-  *"pre-installations watchdog"*) ok "refuses to install beside the pre-installations watchdog" ;;
+  *"pre-installations watchdog, and it can still run"*) ok "refuses to install beside the pre-installations watchdog" ;;
   *) bad "installed beside the pre-installations watchdog: $out" ;;
 esac
 case "$out" in
@@ -173,6 +191,31 @@ if [[ -f "$work/.config/systemd/user/foreman.timer" ]]; then
 else
   bad "deleted a unit file the operator did not ask to delete"
 fi
-rm -f "$work/.config/systemd/user/foreman.timer"
+
+# --- a disabled, inactive legacy unit file does not refuse
+#
+# `systemctl disable` leaves the unit file behind. On 2026-09-14 an operator
+# who disabled the old timer, as the refusal told them to, was refused again
+# for as long as the file they were told to keep existed.
+echo disabled > "$work/unit-state/foreman.timer.enabled"
+out="$(run --dry-run)"
+case "$out" in
+  *"can still run"*) bad "refused a disabled, inactive legacy watchdog: $out" ;;
+  *"saw $work/.config/systemd/user/foreman.timer"*"foreman-claude.timer"*)
+    ok "a disabled, inactive legacy unit is named and not refused" ;;
+  *) bad "did not name the disabled legacy unit it saw: $out" ;;
+esac
+
+# --- a disabled legacy watchdog that is still running refuses
+#
+# `disable` without `--now` leaves the timer armed until it is stopped, so a
+# second watchdog keeps firing beside the new one.
+echo active > "$work/unit-state/foreman.timer.active"
+out="$(run --dry-run)"
+case "$out" in
+  *"can still run"*) ok "refuses beside a disabled legacy watchdog that is still active" ;;
+  *) bad "installed beside a legacy watchdog that is still active: $out" ;;
+esac
+rm -f "$work/.config/systemd/user/foreman.timer" "$work/unit-state"/*
 
 exit "$fail"

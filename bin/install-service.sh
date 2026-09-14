@@ -107,14 +107,52 @@ UNIT_DIR="$HOME/.config/systemd/user"
 #
 # NOTHING IS DELETED HERE. The operator did not ask for a file to be removed,
 # and a unit file is the only record of what the old watchdog was.
+#
+# So the refusal asks whether the old watchdog can still RUN, not whether its
+# file exists. `systemctl disable` removes the enablement symlink and leaves the
+# unit file in place. On 2026-09-14, while migrating a live machine, an
+# operator did what this message said -- disable, then run again -- and was
+# refused again, because the check was `-e` on the file this message told them
+# to keep. Nothing short of deleting that file got past it.
+#
+# Only the timer's enablement is asked. The legacy service has no [Install]
+# section, so is-enabled reports it `static` for ever, and that state would
+# refuse a machine where nothing can start it. Both units' activity is asked: a
+# fire already running is a second watchdog until it exits.
+#
+# Every other answer refuses, an empty one included. is-enabled reports
+# enabled, enabled-runtime, linked, linked-runtime, alias, static, indirect,
+# generated and transient for a unit that something can still start; is-active
+# reports active, activating, reloading and deactivating for one still running.
+# A state this list has not met is not one to guess about.
+legacy_enablement() { systemctl --user is-enabled foreman.timer 2>/dev/null || true; }
+legacy_activity() { systemctl --user is-active "$1" 2>/dev/null || true; }
+legacy_can_run() {
+  case "$(legacy_enablement)" in
+    disabled|masked|not-found) ;;
+    *) return 0 ;;
+  esac
+  local unit
+  for unit in foreman.timer foreman.service; do
+    case "$(legacy_activity "$unit")" in
+      inactive|failed) ;;
+      *) return 0 ;;
+    esac
+  done
+  return 1
+}
 for legacy in foreman.service foreman.timer; do
   [[ -e "$UNIT_DIR/$legacy" ]] || continue
-  die "$UNIT_DIR/$legacy is the pre-installations watchdog, and it is still installed.
+  if legacy_can_run; then
+    die "$UNIT_DIR/$legacy is the pre-installations watchdog, and it can still run.
+systemd reports foreman.timer '$(legacy_enablement)' and '$(legacy_activity foreman.timer)', foreman.service '$(legacy_activity foreman.service)'.
 It runs the install/ directory that migration moved, so it fails every fire, and
 enabling $UNIT_NAME.timer beside it would leave two watchdogs on this machine.
 Disable it first, then run this again:
   systemctl --user disable --now foreman.timer
 The unit files are left where they are; remove them by hand once you are sure."
+  fi
+  printf 'install-service: saw %s/%s, the pre-installations watchdog; it is disabled and inactive, so it is left alone.\n' "$UNIT_DIR" "$legacy"
 done
 
 service_unit() {
