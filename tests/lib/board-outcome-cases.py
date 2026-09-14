@@ -55,18 +55,49 @@ def deploy_job(conclusion: str) -> dict:
     ]}]}
 
 
+SELECTION_STEP = "Choose the revision to deploy"
+
+
+def selection_job(job_id: int, selection: str, deploy: str) -> dict:
+    """A deploy run whose one job holds the selection step and the deploy step.
+
+    The job carries a `databaseId` because the selection's reason is only in
+    that job's log: `gh run view --json jobs` has no step outputs.
+    """
+    return {"jobs": [{"databaseId": job_id, "steps": [
+        {"name": "Set up job", "conclusion": "success"},
+        {"name": SELECTION_STEP, "conclusion": selection},
+        {"name": reconcile.DEPLOY_STEP, "conclusion": deploy},
+    ]}]}
+
+
+def job_log(reason: str) -> str:
+    """A raw job log as GitHub serves it: a timestamp, one space, the content."""
+    stamp = "2026-09-14T22:09:28.8742176Z"
+    return "\r\n".join(f"{stamp} {line}" for line in (
+        "##[group]Run scripts/choose-revision.sh", "deploy=false",
+        f"revision={B}", f"reason={reason}",
+    )) + "\r\n"
+
+
+def log_fetches(w: "World") -> list[list[str]]:
+    return [c for c in w.calls if c[:2] == ["gh", "api"] and c[2].endswith("/logs")]
+
+
 class World:
     """The only `gh` and `git` these functions get to see.
 
     `views` maps a run id to what `gh run view` answers; a missing id answers
     None, which is the lookup FAILING rather than the run having no deploy step.
+    `logs` maps a job id to its raw log; a missing id is `gh api` failing.
     """
 
     def __init__(self, *, deploy_runs=(), views=None, ancestors=(),
                  ci_runs=(), attempt=1, prs=(), diff=(0, ""),
-                 ls_remote=(2, ""), compare=(0, "[]")):
+                 ls_remote=(2, ""), compare=(0, "[]"), logs=None):
         self.deploy_runs = deploy_runs
         self.views = views or {}
+        self.logs = logs or {}
         self.ancestors = set(ancestors)
         self.ci_runs = ci_runs
         self.attempt = attempt
@@ -105,6 +136,13 @@ class World:
         # than quietly collect this answer.
         if args[:2] == ["gh", "api"] and "/compare/" in args[2]:
             return self.compare
+        # The exact path reconcile.selection_reason asks for, so a reader that
+        # fetched some other job's log, or the run's, hits the AssertionError.
+        prefix, suffix = "repos/{owner}/{repo}/actions/jobs/", "/logs"
+        if (len(args) == 3 and args[:2] == ["gh", "api"]
+                and args[2].startswith(prefix) and args[2].endswith(suffix)):
+            job_id = int(args[2][len(prefix):-len(suffix)])
+            return (0, self.logs[job_id]) if job_id in self.logs else (1, "")
         raise AssertionError(f"unstubbed run: {args}")
 
     def install(self):
@@ -120,9 +158,9 @@ class World:
         return self
 
 
-def gh_run(rid, head, status="completed", conclusion="success"):
+def gh_run(rid, head, status="completed", conclusion="success", event="workflow_run"):
     return {"databaseId": rid, "headSha": head, "status": status,
-            "conclusion": conclusion, "url": f"https://gh/run/{rid}"}
+            "conclusion": conclusion, "url": f"https://gh/run/{rid}", "event": event}
 
 
 A = "a" * 40   # the card's merge commit
@@ -207,6 +245,92 @@ check(not v["terminal"] and v["reason"].endswith("yet"),
 check(not any(c[:3] == ["gh", "run", "view"] for c in w.calls),
       "ancestry is checked before the network round trip")
 
+# --- deploy_verdict with a selection step ------------------------------------
+#
+# The target's deploy workflow now QUEUES merges for a scheduled run. Its
+# selection step says why in a `reason=` line that only the job log holds. A
+# skipped deploy step looks the same whether the run queued the commit or stood
+# down for a descendant, so every case below turns on the reason being READ.
+
+QUEUED = "queued: nothing up to aaaaaaa is labelled fast-track; the next scheduled run deploys it"
+STAND_DOWN = "stand-down: a newer revision is already on its way"
+
+print("==> a run that queued this commit is terminal, and it read the reason to say so")
+w = World(deploy_runs=[gh_run(1, A)],
+          views={1: selection_job(77, "success", "skipped")},
+          logs={77: job_log(QUEUED)}).install()
+v = reconcile.deploy_verdict(A)
+check(v.get("terminal") and v.get("outcome") == "deploy-queued",
+      "a queued run is terminal as deploy-queued", json.dumps(v))
+check(v["verified"] is False, "and it is never verified", json.dumps(v))
+check(len(log_fetches(w)) == 1 and log_fetches(w)[0][2].endswith("/jobs/77/logs"),
+      "the reason came from the selection job's log", str(log_fetches(w)))
+
+print("==> a stand-down skip reads its reason and still waits")
+w = World(deploy_runs=[gh_run(1, A)],
+          views={1: selection_job(77, "success", "skipped")},
+          logs={77: job_log(STAND_DOWN)}).install()
+v = reconcile.deploy_verdict(A)
+check(not v["terminal"] and v.get("outcome") is None,
+      "a stand-down is not terminal", json.dumps(v))
+check((v.get("selection_reason") or "").startswith("stand-down:"),
+      "the reason was read, not inferred from the skip", json.dumps(v))
+
+print("==> a skipped deploy whose log cannot be read never reads as queued")
+w = World(deploy_runs=[gh_run(1, A)],
+          views={1: selection_job(77, "success", "skipped")},
+          logs={}).install()
+v = reconcile.deploy_verdict(A)
+check(not v["terminal"] and v.get("outcome") != "deploy-queued",
+      "an unreadable log keeps the wait open", json.dumps(v))
+check(len(log_fetches(w)) == 1 and "could not read" in v["reason"],
+      "it tried the log and says it could not read the reason", v["reason"])
+
+print("==> a selection that failed is terminal, and no log is fetched for it")
+w = World(deploy_runs=[gh_run(1, A)],
+          views={1: selection_job(77, "failure", "skipped")},
+          logs={77: job_log(QUEUED)}).install()
+v = reconcile.deploy_verdict(A)
+check(v.get("terminal") and v.get("outcome") == "deploy-selection-failed",
+      "a failed selection is deploy-selection-failed", json.dumps(v))
+check(v["verified"] is False, "and it is not verified", json.dumps(v))
+check(not log_fetches(w), "a failed selection has no reason worth a log fetch",
+      str(log_fetches(w)))
+
+print("==> a scheduled run's deploy on a descendant verifies, past a newer queued run")
+# The scheduled run is what deploys a queued commit, so a run list filtered to
+# `workflow_run` would never see the answer. The newer queued run is terminal,
+# and it must still lose to a deploy that happened.
+w = World(
+    deploy_runs=[gh_run(3, B), gh_run(2, B, event="schedule")],
+    views={3: selection_job(79, "success", "skipped"),
+           2: selection_job(78, "success", "success")},
+    logs={79: job_log(QUEUED)},
+    ancestors={(A, B)},
+).install()
+v = reconcile.deploy_verdict(A)
+check(v["verified"] is True, "the scheduled descendant deploy verifies", json.dumps(v))
+check([c[2] for c in log_fetches(w)] == ["repos/{owner}/{repo}/actions/jobs/79/logs"],
+      "the newer run was read as queued first, and the deploy still won",
+      str(log_fetches(w)))
+list_calls = [c for c in w.calls if c[:3] == ["gh", "run", "list"]]
+check(len(list_calls) == 1 and not any(a.startswith("--event") for a in list_calls[0]),
+      "gh run list does not filter by event", str(list_calls))
+
+print("==> an older failure still beats a newer queued run")
+w = World(
+    deploy_runs=[gh_run(2, B), gh_run(1, B)],
+    views={2: selection_job(78, "success", "skipped"),
+           1: selection_job(77, "success", "failure")},
+    logs={78: job_log(QUEUED)},
+    ancestors={(A, B)},
+).install()
+v = reconcile.deploy_verdict(A)
+check(v["terminal"] and v["outcome"] == "deploy-failed" and "run 1" in v["reason"],
+      "the broken production is the answer, naming the older run", json.dumps(v))
+check([c[2] for c in log_fetches(w)] == ["repos/{owner}/{repo}/actions/jobs/78/logs"],
+      "the queued run was read, and lost on rank", str(log_fetches(w)))
+
 
 # --- waitfor.deploy_state / wait --------------------------------------------
 
@@ -260,6 +384,36 @@ reconcile.commit_on_main = lambda sha: None
 state = waitfor.deploy_state(A)
 check(not state.get("done") and not state.get("stop"),
       "an unanswerable git keeps waiting", json.dumps(state))
+
+print("==> a queued deploy is exit 0 and satisfied, named deploy-queued")
+World(deploy_runs=[gh_run(1, A)],
+      views={1: selection_job(77, "success", "skipped")},
+      logs={77: job_log(QUEUED)}).install()
+state = waitfor.deploy_state(A)
+check(state.get("done") is True, "the queued state is done", json.dumps(state))
+code, out = wait_once(state)
+check(code == 0 and out["satisfied"] is True and out["outcome"] == "deploy-queued",
+      "a queued deploy satisfies the wait under its own outcome", json.dumps(out))
+
+print("==> a stand-down on main keeps waiting")
+World(deploy_runs=[gh_run(1, A)],
+      views={1: selection_job(77, "success", "skipped")},
+      logs={77: job_log(STAND_DOWN)}).install()
+# On main, so the not-on-main stop cannot be what keeps this from `done`.
+reconcile.commit_on_main = lambda sha: True
+state = waitfor.deploy_state(A)
+check(not state.get("done") and not state.get("stop"),
+      "a stand-down neither satisfies nor stops the wait", json.dumps(state))
+check((state.get("verdict", {}).get("selection_reason") or "").startswith("stand-down:"),
+      "and it waits on a reason it read", json.dumps(state))
+
+print("==> a failed selection is exit 3 and never satisfied")
+World(deploy_runs=[gh_run(1, A)],
+      views={1: selection_job(77, "failure", "skipped")}).install()
+code, out = wait_once(waitfor.deploy_state(A))
+check(code == 3 and out["satisfied"] is False
+      and out["outcome"] == "deploy-selection-failed",
+      "a failed selection stops the wait under its own outcome", json.dumps(out))
 
 
 # --- main_ci_state ----------------------------------------------------------

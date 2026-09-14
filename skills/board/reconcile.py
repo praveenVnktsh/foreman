@@ -26,9 +26,11 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 import sys
 import time
+from dataclasses import dataclass
 from datetime import datetime, timezone
 
 def _load_config() -> dict[str, str]:
@@ -41,7 +43,8 @@ def _load_config() -> dict[str, str]:
     """
     keys = (
         "REPO", "BOARD_HOME", "REQUIRED_CHECKS", "HIGH_RISK_PATHS",
-        "DEPLOY_WORKFLOW", "DEPLOY_STEP", "CI_WORKFLOW", "INSTANCE",
+        "DEPLOY_WORKFLOW", "DEPLOY_STEP", "DEPLOY_SELECTION_STEP", "CI_WORKFLOW",
+        "INSTANCE",
         "FOREMAN_HOME", "HOST_SLOT_STALE_MINUTES", "INSTALLATION", "HARNESS_SH",
         "BOARD_NAME_PREFIX", "BOARD_WORKTREE_PREFIX",
     )
@@ -69,6 +72,10 @@ REQUIRED_CHECKS = set(c for c in _CFG["REQUIRED_CHECKS"].split("|") if c)
 HIGH_RISK_PATHS = _CFG["HIGH_RISK_PATHS"].split()
 DEPLOY_WORKFLOW = _CFG["DEPLOY_WORKFLOW"]
 DEPLOY_STEP = _CFG["DEPLOY_STEP"]
+# The step that decides whether a deploy run deploys at all. Optional: empty
+# means the target deploys every carrying run it can, and the old reading of
+# DEPLOY_STEP alone applies unchanged. See _not_deployed for what it changes.
+DEPLOY_SELECTION_STEP = _CFG["DEPLOY_SELECTION_STEP"]
 # No fallback here, deliberately -- `checks.ci_workflow` is REQUIRED and
 # non-empty in bin/contract.py (SCALARS' default of None, refused if blank),
 # so an empty CI_WORKFLOW reaching this process means an environment override
@@ -448,7 +455,9 @@ def _explains_better(candidate: dict, current: dict | None) -> bool:
 
     So rank the answers instead: a deploy that broke beats any other terminal
     answer, any terminal answer beats one that keeps waiting, and ties go to the
-    newer run. Preferring a terminal answer can end a wait a tick early when a
+    newer run. `deploy-queued` and `deploy-selection-failed` are ordinary
+    terminal answers: an older run whose deploy broke still beats a newer run
+    that only queued, because production is broken whatever the queue says. Preferring a terminal answer can end a wait a tick early when a
     newer stand-down really did have a deploy still coming; that costs a card one
     tick, because nothing is ever marked `Done` on a terminal-but-unverified
     answer and the next tick re-derives all of it. Missing a broken production
@@ -459,23 +468,89 @@ def _explains_better(candidate: dict, current: dict | None) -> bool:
     return current is None or rank(candidate) > rank(current)
 
 
-def _not_deployed(r: dict, head: str, sha: str, state: str, concl: str | None) -> dict:
+@dataclass(frozen=True)
+class RunSteps:
+    """What one `gh run view --json jobs` said about a deploy run's steps.
+
+    `state` is "ok" (DEPLOY_STEP exists; `deploy` is its conclusion, "" while
+    unfinished), "absent" (the run completed without DEPLOY_STEP) or
+    "unreadable" (`gh run view` failed; nothing else here is known).
+    `selection` is DEPLOY_SELECTION_STEP's conclusion, None when that step is
+    not configured or not in the run. `selection_job` is the databaseId of the
+    job holding it, which is what the job log is fetched by.
+    """
+
+    state: str
+    deploy: str | None = None
+    selection: str | None = None
+    selection_job: int | None = None
+
+
+# One raw job-log line: an ISO-8601 timestamp, one space, then the content.
+_LOG_TIMESTAMP = re.compile(r"^\d{4}-\d{2}-\d{2}T\S+ ")
+_REASON_PREFIX = "reason="
+
+
+def selection_reason(job_id: int | None) -> str | None:
+    """The selection step's `reason=` value, read from the job log, or None.
+
+    None means the reason could not be read: no job id, a failed `gh api`, or a
+    log with no `reason=` line. The caller must never read None as "queued".
+
+    The step writes its outputs through `tee -a "$GITHUB_OUTPUT"`, so the log
+    holds them and `gh run view --json jobs` does not. The LAST `reason=` line
+    wins, because the log also carries anything the script printed before it
+    settled. A line without a timestamp is read as bare content.
+    """
+    if job_id is None:
+        return None
+    code, log = run(["gh", "api", f"repos/{{owner}}/{{repo}}/actions/jobs/{job_id}/logs"],
+                    cwd=REPO)
+    if code != 0:
+        return None
+    found = None
+    for line in log.splitlines():
+        content = _LOG_TIMESTAMP.sub("", line.lstrip("\ufeff").rstrip("\r"), count=1)
+        if content.startswith(_REASON_PREFIX):
+            found = content[len(_REASON_PREFIX):].strip()
+    return found or None
+
+
+def _not_deployed(r: dict, head: str, sha: str, steps: RunSteps,
+                  reason: str | None = None) -> dict:
     """Why one run that carries `sha` did not deploy it, and whether that is final.
 
-    Final means: this answer cannot improve by waiting. Two shapes are final and
-    they are different things.
+    Final means: this answer cannot improve by waiting. Four shapes are final.
 
       * `failure` — the deploy script ran on the deploy host and broke. Production
         is in whatever state it left behind, and the tick must say so now.
       * no DEPLOY_STEP at all — the deploy job was skipped in its entirety, which
         is what a red CI run on `main` produces (the deploy workflow gates the job
         on the CI run concluding success). That run will never deploy anything.
+      * DEPLOY_SELECTION_STEP concluded `failure` (`deploy-selection-failed`) —
+        the workflow could not choose a revision, so nothing deploys until a
+        person looks. It writes no HALT, so the card is the only place it shows.
+      * the selection succeeded and its `reason` (read from the log by the
+        caller, passed in) starts with `queued:` (`deploy-queued`) — the target
+        holds this commit for its next scheduled deploy. That is the target's
+        policy working, so it satisfies the card without verifying it.
 
     Everything else keeps the wait alive: a `skipped` STEP is the stale-revision
     stand-down with a descendant's deploy still coming, and an unreadable run
-    taught us nothing at all.
+    taught us nothing at all. The queue is read, never inferred from `skipped`,
+    because a `stand-down:` skip looks identical at the step level. A reason
+    that could not be read keeps the wait open too: queued on missing evidence
+    would move a card to `Done` for a deploy that may never be scheduled.
     """
     where = "" if head == sha else f" of descendant {head[:12]}"
+    state, concl = steps.state, steps.deploy
+    if steps.selection == "failure":
+        return {
+            "verified": False, "terminal": True, "outcome": "deploy-selection-failed",
+            "reason": f"deploy run {r['databaseId']}{where}: {DEPLOY_SELECTION_STEP} "
+                      f"failed; deploys have stopped until it is fixed",
+            "url": r.get("url"),
+        }
     if state == "unreadable":
         return {
             "verified": False, "terminal": False,
@@ -499,7 +574,28 @@ def _not_deployed(r: dict, head: str, sha: str, state: str, concl: str | None) -
     }
     if concl == "failure":
         verdict["outcome"] = "deploy-failed"
+    if not _selection_decided_skip(steps):
+        return verdict
+    if reason is None:
+        verdict["reason"] += f"; could not read the {DEPLOY_SELECTION_STEP} reason"
+        return verdict
+    verdict["selection_reason"] = reason
+    if reason.startswith("queued:"):
+        verdict.update(
+            terminal=True, outcome="deploy-queued",
+            reason=f"deploy run {r['databaseId']}{where} queued this commit: {reason}",
+        )
     return verdict
+
+
+def _selection_decided_skip(steps: RunSteps) -> bool:
+    """Did the selection step succeed and the deploy step then skip?
+
+    Only this shape has a reason worth a log fetch. The fetch is a round trip
+    per run, so every other shape must not pay it.
+    """
+    return (steps.selection == "success" and steps.state == "ok"
+            and steps.deploy == "skipped")
 
 
 def deploy_verdict(sha: str) -> dict:
@@ -513,6 +609,11 @@ def deploy_verdict(sha: str) -> dict:
     says whether the question is settled. The pair is what lets waitfor.py stop
     on a deploy that ran and BROKE — which is neither satisfied nor still coming
     — instead of polling it for the whole budget on every tick, forever.
+
+    With DEPLOY_SELECTION_STEP set, two more terminal outcomes exist:
+    `deploy-queued` (satisfied, not verified) and `deploy-selection-failed`.
+    _not_deployed describes both. A successful DEPLOY_STEP on the commit or a
+    descendant still verifies first, whatever event started the run.
 
     A target that declares no `[deploy]` at all (DEPLOY_WORKFLOW == "") has
     nowhere for a commit to deploy TO — board.toml's own comment and the design
@@ -529,6 +630,14 @@ def deploy_verdict(sha: str) -> dict:
     if not sha:
         return {"verified": False, "terminal": True, "outcome": "no-merge-commit",
                 "reason": "no merge commit"}
+    # No `--event`: a scheduled run deploys queued commits, and it verifies them
+    # like any other run.
+    #
+    # `--limit 20` still reaches far enough. A queuing target adds one run per CI
+    # completion on `main` plus six scheduled runs a day: at ~80 merges a week
+    # that is ~11 + 6 = ~18 runs a day. The wait starts minutes after the merge,
+    # and its answer is the commit's own run or a descendant's, which are the
+    # newest runs in the list. Twenty runs cover about a day.
     runs = run_json(
         ["gh", "run", "list", "--workflow", DEPLOY_WORKFLOW, "--limit", "20",
          "--json", "databaseId,headSha,conclusion,status,url"],
@@ -543,31 +652,35 @@ def deploy_verdict(sha: str) -> dict:
         return {"verified": False, "terminal": False,
                 "reason": f"could not list {DEPLOY_WORKFLOW} runs; gh failed"}
 
-    def step_conclusion(run: dict) -> tuple[str, str | None]:
-        """`(state, conclusion)` for one run's DEPLOY_STEP.
+    def run_steps(run: dict) -> RunSteps:
+        """DEPLOY_STEP and DEPLOY_SELECTION_STEP for one run, from one round trip.
 
         A bare `None` meant two opposite things and the caller could not tell
         them apart: `gh run view` failed, so nothing was learned; or the run
         completed with no DEPLOY_STEP at all, which is the deploy job being
         skipped outright because CI went red on the squash. The first must never
         stop a wait, and the second always should — that run will never deploy
-        anything, however long anyone waits on it.
-
-        - `("ok", <conclusion>)`  — the step exists and concluded (or is "" when
-          it has not concluded yet).
-        - `("absent", None)`      — the run completed without the step existing.
-        - `("unreadable", None)`  — `gh run view` failed; we learned nothing.
+        anything, however long anyone waits on it. `RunSteps.state` keeps them
+        apart.
         """
         detail = run_json(
             ["gh", "run", "view", str(run["databaseId"]), "--json", "jobs"], cwd=REPO
         )
         if detail is None:
-            return ("unreadable", None)
+            return RunSteps("unreadable")
+        deploy = selection = selection_job = None
+        found_deploy = False
         for job in detail.get("jobs", []):
             for step in job.get("steps", []):
-                if step.get("name") == DEPLOY_STEP:
-                    return ("ok", step.get("conclusion"))
-        return ("absent", None)
+                name = step.get("name")
+                if name == DEPLOY_STEP and not found_deploy:
+                    found_deploy, deploy = True, step.get("conclusion")
+                elif DEPLOY_SELECTION_STEP and name == DEPLOY_SELECTION_STEP \
+                        and selection is None:
+                    selection = step.get("conclusion") or ""
+                    selection_job = job.get("databaseId")
+        return RunSteps("ok" if found_deploy else "absent", deploy,
+                        selection, selection_job)
 
     # WHICH REVISION DID A RUN ACTUALLY DEPLOY?
     #
@@ -613,7 +726,7 @@ def deploy_verdict(sha: str) -> dict:
                 if _explains_better(running, unverified):
                     unverified = running
             continue
-        # Ancestry first, steps second. `step_conclusion` is a `gh run view`
+        # Ancestry first, steps second. `run_steps` is a `gh run view`
         # round trip per run; this is a local merge-base. Asking the network
         # about runs that could not carry this commit whatever they concluded
         # turned a 1-2 call verdict into 20 — and waitfor polls this every 10s
@@ -624,14 +737,16 @@ def deploy_verdict(sha: str) -> dict:
             code, _ = run(["git", "merge-base", "--is-ancestor", sha, head], cwd=REPO)
             if code != 0:
                 continue
-        state, concl = step_conclusion(r)
-        if state != "ok" or concl != "success":
+        steps = run_steps(r)
+        if steps.state != "ok" or steps.deploy != "success":
             # Records why this run did not verify, without letting it contribute
             # an attribution. Which non-success it was decides everything:
             # `skipped` is a stand-down with a descendant still coming, `failure`
             # is the deploy script breaking on the deploy host, and no step at all
             # is the deploy job never having run. deploy_state needs to tell them apart.
-            candidate = _not_deployed(r, head, sha, state, concl)
+            reason = (selection_reason(steps.selection_job)
+                      if _selection_decided_skip(steps) else None)
+            candidate = _not_deployed(r, head, sha, steps, reason)
             if _explains_better(candidate, unverified):
                 unverified = candidate
             continue
