@@ -48,10 +48,9 @@ fixture_board_toml "$fixture"
 home="$work_dir/home"
 fixture_add_instance "$home" alpha "$fixture"
 
-# Every worktree name starts at the INSTALLATION. The fixture home declares no
-# installation.toml, so bin/installation.py reads it as the lone Claude
-# installation and the segment is `claude`.
-wt="$fixture/.claude/worktrees/foreman-claude-alpha-PRA-1"
+# The fixture home declares no installation.toml, so bin/installation.py reads
+# it as the lone Claude installation with legacy names: no installation segment.
+wt="$fixture/.claude/worktrees/foreman-alpha-PRA-1"
 mkdir -p "$wt"
 
 lockfile="$fixture/.git/board-worktree.lock"

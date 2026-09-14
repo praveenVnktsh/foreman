@@ -456,8 +456,8 @@ except ValueError:
 if not isinstance(agents, list):
     sys.exit(3)
 # Anything but "stopped" counts as live, a state this file has never seen
-# included. Migration renames every agent, so guessing "not really running"
-# wrong strands a build under a name nothing looks for any more.
+# included. Migration moves the home under every agent, so guessing "not
+# really running" wrong leaves a build writing to a BOARD_HOME that has moved.
 print("\n".join(sorted({
     a["name"] for a in agents
     if isinstance(a, dict) and isinstance(a.get("name"), str)
@@ -490,12 +490,14 @@ migrate_home_under_root() {
   live="$(live_foreman_agents)" || \
     die "migrate: could not read the Claude agent registry; refusing to move a home that may hold a live agent"
   if [[ -n "$live" ]]; then
-    # An agent's name gains the installation segment in the new layout, so a
-    # tick or a build still running under the old name goes invisible the
-    # moment this home moves: nothing looks for it, nothing stops it, and it
-    # keeps writing to a worktree under a path that has moved.
+    # NAMES ARE KEPT: the installation.toml written below says
+    # `names = "legacy"`, so every agent, branch and worktree keeps the shape
+    # it has today. The refusal stands for a different reason. install/,
+    # instances/ and tmp/ move, so a live agent's BOARD_HOME, its card
+    # history and its scratch directory move out from under it while it is
+    # still writing to them.
     printf 'boardctl: these agents are still live:\n%s\n' "$live" >&2
-    die "migrate: stop them first -- their names change shape and a live one would go invisible"
+    die "migrate: stop them first -- their names are kept, but BOARD_HOME and its scratch move under a running agent"
   fi
 
   [[ -e "$new_home" ]] && \
@@ -516,9 +518,14 @@ migrate_home_under_root() {
   # The path this script invoked installation.py by went with the clone.
   local writer="$installation_py"
   [[ -x "$writer" ]] || writer="$new_home/install/bin/installation.py"
+  # --legacy-names: THE MIGRATED HOME KEEPS ITS NAMES. Its open pull requests
+  # sit on branches foreman/<board>/<ticket>, and skills/board/reconcile.py
+  # finds a card's pull request by that branch. Moving to the scoped shape
+  # here would make every in-flight card read "no PR", and the board would
+  # dispatch a fresh build on top of each open pull request.
   "$writer" --write --home "$new_home" \
-    --harness "$MIGRATED_INSTALLATION" --default
-  printf 'boardctl: wrote %s/installation.toml (harness %s, default)\n' \
+    --harness "$MIGRATED_INSTALLATION" --default --legacy-names
+  printf 'boardctl: wrote %s/installation.toml (harness %s, default, legacy names kept)\n' \
     "$new_home" "$MIGRATED_INSTALLATION"
 
   # None of these can be done from here: each wrote the OLD path into a

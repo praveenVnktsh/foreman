@@ -121,12 +121,14 @@ and refuses to overwrite one that exists. It is the one new operator command.
 `boardctl migrate` gains a second step, after the `instance.env` step it already
 has. When the home holds `install/` directly and no `installation.toml`:
 
-1. Refuse if any `foreman/` agent is live in the Claude registry. Names change
-   shape below, and a live agent under the old name would become invisible.
+1. Refuse if any `foreman/` agent is live in the Claude registry. Names are
+   kept (step 3), but the home, its card history and its scratch move under a
+   running agent.
 2. Move `install`, `boards.toml`, `instances`, `installed-skills`,
    `replaced-skills`, `tmp` and `supervise.lock` into `~/.foreman/claude/`.
-3. Write `~/.foreman/claude/installation.toml` with `harness = "claude"` and
-   `default = true`.
+3. Write `~/.foreman/claude/installation.toml` with `harness = "claude"`,
+   `default = true` and `names = "legacy"`, so every name keeps its shape. See
+   "The legacy installation keeps the old names" below.
 4. Print the two things it cannot do: re-run `install-skills.sh` from the new
    path so the links point at the moved clone, and re-run `install-service.sh`
    or fix the cron line, because both name the old path.
@@ -308,6 +310,43 @@ the board starts at the installation:
 `sweep.sh`'s globs, `watch-agents.py`'s `DISPATCHED` regex and `reconcile.py`'s
 prefix all gain the segment. The worktree directory stays under `.claude/` on
 every harness: it is a path, not a dependency.
+
+### The legacy installation keeps the old names
+
+**One installation per root may keep the "Was" column.** `installation.toml`
+takes `names = "scoped"` (the default) or `names = "legacy"`, and
+`installation.py` emits it as `LEGACY_NAMES`.
+
+- **Who is legacy.** A home with no `installation.toml` -- the un-migrated
+  layout -- and the home `boardctl migrate` writes, through
+  `installation.py --write --legacy-names`. Every installation created with
+  `install.sh` is scoped.
+- **Why.** The Claude installation that existed before this design has open
+  pull requests on `foreman/<board>/<ticket>`. `reconcile.py`'s `pr_for` runs
+  `gh pr list --head <branch>`. Renaming the branch shape under those cards
+  makes every one read "no agent, no PR", and the board dispatches a fresh
+  build on top of an open pull request. An un-migrated home is legacy too, so
+  a machine that pulls this code before it runs `migrate` is safe in between.
+- **One fact, one place.** `config.sh` composes `NAME_SCOPE` (`""` or
+  `<installation>/`) and `WORKTREE_SCOPE` (`""` or `<installation>-`) once,
+  and from them `BOARD_NAME_PREFIX` and `BOARD_WORKTREE_PREFIX`. Every name
+  function, every `sweep.sh` glob, `reconcile.py` and `watch-agents.py` read
+  those. `LEGACY_NAMES` is unset before the load, like `INSTALLATION`, so an
+  exported `LEGACY_NAMES=1` cannot give a scoped installation the legacy
+  shapes and let it reap a sibling's worktrees.
+
+Two refusals, both in `installation.py` on every read, beside the one-default
+check, because that is the one reader that already walks every sibling:
+
+- **More than one legacy sibling.** Two legacy installations share every name,
+  from `foreman/tick` to every branch on a repository they both serve.
+- **A legacy board named like a scoped sibling installation.** The missing
+  segment reopens the hole the segment closed. A legacy board `codex` sweeps
+  `foreman-codex-*` and deletes branches under `foreman/codex/*`, which is
+  exactly where the scoped installation `codex` cuts its worktrees and pushes
+  its branches. The legacy sibling's boards are read through
+  `boards.py --file <home>/boards.toml --list`, never a second parse; a
+  sibling with no `boards.toml` yet declares no boards.
 
 ## The host ceiling
 

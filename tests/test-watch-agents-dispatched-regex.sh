@@ -56,13 +56,14 @@ def check(ok, what, detail=""):
         print(f"    FAIL: {what} {detail}")
 
 
-# INSTANCE is "demo", from FOREMAN_INSTANCE above. INSTALLATION is "claude":
-# this home declares no installation.toml, so bin/installation.py reads it as
-# the lone Claude installation, and every dispatched name starts there.
-digit_team = "foreman/claude/demo/AB2-7/build-1"
-letters_only_team = "foreman/claude/demo/PRA-7/build-1"
-tick_agent = "foreman/claude/tick"
-other_instance = "foreman/claude/other/AB2-7/build-1"
+# INSTANCE is "demo", from FOREMAN_INSTANCE above. This home declares no
+# installation.toml, so bin/installation.py reads it as the lone Claude
+# installation with legacy names, and no dispatched name carries an
+# installation segment.
+digit_team = "foreman/demo/AB2-7/build-1"
+letters_only_team = "foreman/demo/PRA-7/build-1"
+tick_agent = "foreman/tick"
+other_instance = "foreman/other/AB2-7/build-1"
 
 check(watch_agents._dispatched(letters_only_team) == ("PRA-7", "build", "1"),
       "a letters-only team key still matches (no regression)",
@@ -81,7 +82,7 @@ check(watch_agents._dispatched(other_instance) is None,
 # Every role dispatch.sh will spawn. A role this regex does not know finishes
 # without waking the board at all.
 for role in ("plan", "build", "review"):
-    name = f"foreman/claude/demo/PRA-7/{role}-1"
+    name = f"foreman/demo/PRA-7/{role}-1"
     check(watch_agents._dispatched(name) == ("PRA-7", role, "1"),
           f"a {role} agent matches DISPATCHED",
           repr(watch_agents._dispatched(name)))

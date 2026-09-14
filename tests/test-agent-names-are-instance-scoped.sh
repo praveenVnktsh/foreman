@@ -9,11 +9,12 @@
 # the format: a test that only checks one instance's names passes on a regex
 # that matches both. Every case here compares alpha's output against beta's.
 #
-# Every name also starts at the INSTALLATION, one level above the board. This
-# home declares no installation.toml, so bin/installation.py reads it as the
-# lone Claude installation and that segment is `claude` throughout. The
-# separation this file is about is the board segment; the installation segment
-# has tests/test-names-carry-installation.sh.
+# This home declares no installation.toml, so bin/installation.py reads it as
+# the lone Claude installation with legacy names, which carry no installation
+# segment. The separation this file is about is the board segment. The
+# installation segment has tests/test-names-carry-installation.sh, and the
+# legacy shape beside a scoped sibling has
+# tests/test-migrated-claude-keeps-its-names.sh.
 set -euo pipefail
 
 here="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
@@ -67,8 +68,8 @@ branch_beta="$(ask_fn beta branch_name PRA-1)"
 evref_alpha="$(ask_fn alpha evidence_ref 12345)"
 evref_beta="$(ask_fn beta evidence_ref 12345)"
 
-check "alpha build agent has the expected shape" "foreman/claude/alpha/PRA-1/build-1" "$build_agent_alpha"
-check "beta build agent has the expected shape"  "foreman/claude/beta/PRA-1/build-1"  "$build_agent_beta"
+check "alpha build agent has the expected shape" "foreman/alpha/PRA-1/build-1" "$build_agent_alpha"
+check "beta build agent has the expected shape"  "foreman/beta/PRA-1/build-1"  "$build_agent_beta"
 # The tick is the ONE name that is deliberately NOT board-scoped. There is a
 # single tick for the machine, walking every board a slice at a time, so two
 # boards resolving the same tick name is the design and not a collision.
@@ -76,10 +77,10 @@ check "beta build agent has the expected shape"  "foreman/claude/beta/PRA-1/buil
 # Every other name below still carries the board, and that is what this file is
 # really protecting: `claude agents` is one flat registry, so a shared
 # agent/branch/worktree/evidence name would let one board reap another's work.
-check "alpha resolves the shared tick name" "foreman/claude/tick" "$tick_alpha"
-check "beta resolves the same shared tick"  "foreman/claude/tick" "$tick_beta"
-check "alpha branch has the expected shape" "foreman/claude/alpha/PRA-1" "$branch_alpha"
-check "alpha evidence ref has the expected shape" "refs/foreman/claude/alpha/evidence/12345" "$evref_alpha"
+check "alpha resolves the shared tick name" "foreman/tick" "$tick_alpha"
+check "beta resolves the same shared tick"  "foreman/tick" "$tick_beta"
+check "alpha branch has the expected shape" "foreman/alpha/PRA-1" "$branch_alpha"
+check "alpha evidence ref has the expected shape" "refs/foreman/alpha/evidence/12345" "$evref_alpha"
 
 check_ne "alpha and beta build agents differ" "$build_agent_alpha" "$build_agent_beta"
 check "alpha and beta share one tick"        "$tick_alpha"        "$tick_beta"
@@ -119,10 +120,10 @@ ns = {"__file__": path}
 exec(src.split("\ndef poll")[0], ns)
 _dispatched = ns["_dispatched"]
 cases = [
-    "foreman/claude/alpha/PRA-1/build-1",
-    "foreman/claude/beta/PRA-1/build-1",
-    "foreman/claude/tick",
-    "foreman/claude/alpha/PRA-1/review-2a",
+    "foreman/alpha/PRA-1/build-1",
+    "foreman/beta/PRA-1/build-1",
+    "foreman/tick",
+    "foreman/alpha/PRA-1/review-2a",
 ]
 print("|".join("1" if _dispatched(c) is not None else "0" for c in cases))
 PY
@@ -160,13 +161,13 @@ PY
 }
 
 cross_instance="$(run_reconcile_probe alpha \
-  "foreman/claude/alpha/PRA-1/build-1|foreman/claude/beta/PRA-1/build-1" PRA-1)"
+  "foreman/alpha/PRA-1/build-1|foreman/beta/PRA-1/build-1" PRA-1)"
 check "reconcile's prefix for alpha excludes beta's agents" \
-  "foreman/claude/alpha/PRA-1/build-1" "$cross_instance"
+  "foreman/alpha/PRA-1/build-1" "$cross_instance"
 
 prefix_substring="$(run_reconcile_probe alpha \
-  "foreman/claude/alpha/PRA-1/build-1|foreman/claude/alpha/PRA-10/build-1|foreman/claude/alpha/PRA-11/build-1" PRA-1)"
+  "foreman/alpha/PRA-1/build-1|foreman/alpha/PRA-10/build-1|foreman/alpha/PRA-11/build-1" PRA-1)"
 check "reconcile's prefix for PRA-1 excludes PRA-10 and PRA-11 (prefix, not substring)" \
-  "foreman/claude/alpha/PRA-1/build-1" "$prefix_substring"
+  "foreman/alpha/PRA-1/build-1" "$prefix_substring"
 
 exit "$fail"

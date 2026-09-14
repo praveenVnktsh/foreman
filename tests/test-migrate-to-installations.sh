@@ -132,6 +132,36 @@ else
 fi
 
 # =============================================================================
+# Case: migrate writes names = "legacy"
+#
+# The migrated home has open pull requests on foreman/<board>/<ticket>, and
+# reconcile.py finds a card's pull request by that branch. A migrate that
+# wrote the scoped shape would make every in-flight card read "no PR", and the
+# board would build each one again on top of its open pull request.
+# =============================================================================
+if grep -qx 'names = "legacy"' "$op1/.foreman/claude/installation.toml" 2>/dev/null; then
+  ok 'migrate writes names = "legacy"'
+else
+  not_ok "migrate writes names = \"legacy\": toml=$(cat "$op1/.foreman/claude/installation.toml" 2>&1)"
+fi
+
+# =============================================================================
+# Case: after migrating, config.sh's branch_name for a board is still
+# foreman/<board>/<ticket>
+#
+# Read through the moved clone's own config.sh, which is what the tick sources,
+# so the claim covers the loader, the declaration and the shape together.
+# =============================================================================
+branch="$(env -u FOREMAN_HOME -u LEGACY_NAMES FOREMAN_INSTANCE=demo bash -c \
+  ". '$op1/.foreman/claude/install/skills/board/config.sh' >/dev/null; branch_name PRA-1" \
+  2>"$work_dir/branch.err" || true)"
+if [[ "$branch" == "foreman/demo/PRA-1" ]]; then
+  ok "after migrating, config.sh's branch_name for a board is still foreman/<board>/<ticket>"
+else
+  not_ok "after migrating, config.sh's branch_name for a board is still foreman/<board>/<ticket>: got '$branch' err=$(cat "$work_dir/branch.err")"
+fi
+
+# =============================================================================
 # Case: a second migrate is a no-op that says so
 #
 # Run from the MOVED clone: the one at $FOREMAN_HOME/install is gone, exactly

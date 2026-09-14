@@ -43,6 +43,7 @@ def _load_config() -> dict[str, str]:
         "REPO", "BOARD_HOME", "REQUIRED_CHECKS", "HIGH_RISK_PATHS",
         "DEPLOY_WORKFLOW", "DEPLOY_STEP", "CI_WORKFLOW", "INSTANCE",
         "FOREMAN_HOME", "HOST_SLOT_STALE_MINUTES", "INSTALLATION", "HARNESS_SH",
+        "BOARD_NAME_PREFIX", "BOARD_WORKTREE_PREFIX",
     )
     script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.sh")
     printf = 'printf "%s\\0" ' + " ".join(f'"${k}"' for k in keys)
@@ -90,6 +91,15 @@ if not _CFG["CI_WORKFLOW"]:
 CI_WORKFLOW = _CFG["CI_WORKFLOW"]
 FOREMAN_HOME = _CFG["FOREMAN_HOME"]
 INSTALLATION = _CFG["INSTALLATION"]
+# The two name roots config.sh composes for this board, legacy or scoped:
+# `foreman/<installation>/<board>` or `foreman/<board>`, and the worktree
+# basename `foreman-<installation>-<board>` or `foreman-<board>`. Read, never
+# recomposed here. The live Claude installation keeps the legacy shapes
+# because its open pull requests sit on legacy branches, and a copy of the
+# shape here that disagreed with config.sh would look those up under a branch
+# that does not exist.
+BOARD_NAME_PREFIX = _CFG["BOARD_NAME_PREFIX"]
+BOARD_WORKTREE_PREFIX = _CFG["BOARD_WORKTREE_PREFIX"]
 # The adapter for this installation's harness. config.sh refuses to export a
 # path that is not executable, so nothing here re-checks it.
 HARNESS_SH = _CFG["HARNESS_SH"]
@@ -201,9 +211,10 @@ def agents_for(agents: list[dict], ticket: str) -> list[dict]:
     # this reads is one flat list for the machine, and two installations may
     # serve one repository on different harnesses -- so without the segment the
     # codex tick would match the claude tick's build agent for the same ticket
-    # and read its phase as its own. config.sh:agent_name composes the same
-    # four parts; this must match it exactly or a card reports no agents at all.
-    prefix = f"foreman/{INSTALLATION}/{INSTANCE}/{ticket}/"
+    # and read its phase as its own. config.sh:card_agents_prefix is the same
+    # BOARD_NAME_PREFIX plus the ticket; this must match it exactly or a card
+    # reports no agents at all.
+    prefix = f"{BOARD_NAME_PREFIX}/{ticket}/"
     out = []
     for a in agents:
         name = a.get("name") or ""
@@ -299,12 +310,14 @@ def branch_for(ticket: str) -> str:
     what dispatch.sh actually cuts finds nothing — and a miss reads as an
     absence: the card has no pull request, on evidence about the wrong branch.
 
-    That is why the INSTALLATION segment is here too: config.sh:branch_name
-    gained it so two installations sharing a repository stop pushing onto one
-    branch, and a copy here that had not gained it would find no pull request
-    for any card on any installation.
+    That is why the prefix is read from config.sh and not spelled here. When
+    config.sh:branch_name gained the installation segment, a copy here would
+    have had to gain it in the same commit. The legacy installation then kept
+    the old shape for its open pull requests, and a copy here that had gained
+    the segment would have found none of them -- and the board would have
+    built every one of those cards again.
     """
-    return f"foreman/{INSTALLATION}/{INSTANCE}/{ticket}"
+    return f"{BOARD_NAME_PREFIX}/{ticket}"
 
 
 def pr_for(ticket: str) -> dict | None:
@@ -1570,11 +1583,11 @@ def death_report(path: str | None) -> dict | None:
 
 def reconcile(ticket: str, agents: list[dict]) -> dict:
     pr = pr_for(ticket)
-    # Composed exactly as config.sh:worktree_path composes it, installation
-    # first: dispatch.sh cuts the directory and sweep.sh reaps it, and a path
-    # missing the segment here reports "no worktree" for every live build.
+    # Composed from config.sh's BOARD_WORKTREE_PREFIX, as config.sh:worktree_path
+    # composes it: dispatch.sh cuts the directory and sweep.sh reaps it, and a
+    # path of another shape here reports "no worktree" for every live build.
     worktree = os.path.join(
-        REPO, ".claude", "worktrees", f"foreman-{INSTALLATION}-{INSTANCE}-{ticket}"
+        REPO, ".claude", "worktrees", f"{BOARD_WORKTREE_PREFIX}-{ticket}"
     )
     entries = history(ticket)
     mine = agents_for(agents, ticket)

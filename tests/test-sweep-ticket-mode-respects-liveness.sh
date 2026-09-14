@@ -32,11 +32,11 @@ fixture_board_toml "$fixture"
 home="$work_dir/home"
 fixture_add_instance "$home" alpha "$fixture"
 
-# Every worktree and agent name starts at the INSTALLATION. The fixture home
-# declares no installation.toml, so bin/installation.py reads it as the lone
-# Claude installation and the segment is `claude`.
-live_wt="$fixture/.claude/worktrees/foreman-claude-alpha-PRA-1"
-dead_wt="$fixture/.claude/worktrees/foreman-claude-alpha-PRA-2"
+# The fixture home declares no installation.toml, so bin/installation.py reads
+# it as the lone Claude installation with legacy names: no installation
+# segment in any worktree or agent name.
+live_wt="$fixture/.claude/worktrees/foreman-alpha-PRA-1"
+dead_wt="$fixture/.claude/worktrees/foreman-alpha-PRA-2"
 mkdir -p "$live_wt" "$dead_wt"
 
 # PRA-1's build agent is still "working"; PRA-2's is "stopped".
@@ -46,8 +46,8 @@ cat > "$stub_dir/claude" <<STUB
 #!/usr/bin/env bash
 cat <<JSON
 [
-  {"name": "foreman/claude/alpha/PRA-1/build-1", "state": "working", "cwd": "$live_wt"},
-  {"name": "foreman/claude/alpha/PRA-2/build-1", "state": "stopped", "cwd": "$dead_wt"}
+  {"name": "foreman/alpha/PRA-1/build-1", "state": "working", "cwd": "$live_wt"},
+  {"name": "foreman/alpha/PRA-2/build-1", "state": "stopped", "cwd": "$dead_wt"}
 ]
 JSON
 STUB

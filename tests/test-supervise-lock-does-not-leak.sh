@@ -100,7 +100,7 @@ chmod +x "$home/.local/bin/claude"
 run_out="$(HOME="$home" FOREMAN_HOME="$home/.foreman" FOREMAN_INSTANCE=demo \
   SUPERVISE_LOCK="$board_home/supervise.lock" "$supervise" 2>&1)" \
   || { bad "supervise.sh exited non-zero: $run_out"; exit "$fail"; }
-grep -q "started foreman/claude/tick" <<<"$run_out" \
+grep -q "started foreman/tick" <<<"$run_out" \
   || bad "supervise.sh did not report starting the tick agent: $run_out"
 
 # The real-world symptom, checked FIRST and time-critical: the stub's

@@ -114,8 +114,8 @@ usage() {
 # keeps the lot.
 #
 # SIGKILL cannot be trapped, so this is half the fix. The other half is
-# `sweep.sh`, which reaps `refs/foreman/<instance>/evidence/<pid>` for any pid
-# that is no longer alive.
+# `sweep.sh`, which reaps config.sh's `evidence_ref <pid>` for any pid that is
+# no longer alive.
 EVIDENCE_REF=""
 # The read buffer, for the microseconds in which it still has a name. See
 # `open_buffer`: once it is unlinked the kernel owns its lifetime and this is

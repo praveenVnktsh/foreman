@@ -245,13 +245,12 @@ else
 $out"
 fi
 
-# Every name starts at the INSTALLATION. This home declares no
-# installation.toml, so bin/installation.py reads it as the lone Claude
-# installation and the segment is `claude`.
-if spawned "foreman/claude/demo/$TICKET/plan-1"; then
+# This home declares no installation.toml, so bin/installation.py reads it as
+# the lone Claude installation with legacy names: no installation segment.
+if spawned "foreman/demo/$TICKET/plan-1"; then
   ok "the plan block spawns a plan agent for the card"
 else
-  bad "the plan block spawned no agent named foreman/claude/demo/$TICKET/plan-1"
+  bad "the plan block spawned no agent named foreman/demo/$TICKET/plan-1"
 fi
 
 if [[ -f "$work/p.md" ]] && grep -q 'foreman:plan round=1 consumed=' "$work/p.md"; then
@@ -270,7 +269,7 @@ else
 $(cat "$work/p.md" 2>/dev/null)"
 fi
 
-plan_worktree="$target/.claude/worktrees/foreman-claude-demo-$TICKET-plan-1"
+plan_worktree="$target/.claude/worktrees/foreman-demo-$TICKET-plan-1"
 if [[ -d "$plan_worktree" ]]; then
   ok "the plan block cuts the worktree dispatch.sh names for a plan agent"
 else
@@ -359,10 +358,10 @@ else
 $out"
 fi
 
-if spawned "foreman/claude/demo/$TICKET/build-1"; then
+if spawned "foreman/demo/$TICKET/build-1"; then
   ok "the build block spawns a build agent for the card"
 else
-  bad "the build block spawned no agent named foreman/claude/demo/$TICKET/build-1"
+  bad "the build block spawned no agent named foreman/demo/$TICKET/build-1"
 fi
 
 if grep -q 'frobnicates on demand' "$work/b.md" 2>/dev/null; then

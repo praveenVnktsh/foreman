@@ -90,6 +90,26 @@ of this one. A path composed against the wrong one reads a sibling's boards with
 this installation's credential, so compose against the variable and never
 against `~/.foreman` by hand.
 
+**Names come in two shapes, and `config.sh` decides which.** Every name below
+is written `foreman/[<installation>/]<board>/...`: the bracketed segment is
+present on a scoped installation and absent on the legacy one.
+
+| Name | Scoped | Legacy |
+|---|---|---|
+| card agent | `foreman/<installation>/<board>/<TICKET>/<role>-<attempt>` | `foreman/<board>/<TICKET>/<role>-<attempt>` |
+| tick | `foreman/<installation>/tick` | `foreman/tick` |
+| worktree | `$REPO/.claude/worktrees/foreman-<installation>-<board>-<TICKET>` | `$REPO/.claude/worktrees/foreman-<board>-<TICKET>` |
+| branch | `foreman/<installation>/<board>/<TICKET>` | `foreman/<board>/<TICKET>` |
+| evidence ref | `refs/foreman/<installation>/<board>/evidence/<pid>` | `refs/foreman/<board>/evidence/<pid>` |
+
+The **legacy** installation is the Claude home installed before installations
+existed: a home with no `installation.toml`, or the one `boardctl migrate`
+wrote with `names = "legacy"`. It keeps the old names because its open pull
+requests sit on the old branches, and a card is matched to its pull request by
+branch. **Every other installation is scoped.** Take a name from `config.sh`
+(`agent_name`, `worktree_path`, `branch_name`, `evidence_ref`,
+`TICK_AGENT_NAME`) and never type one by hand.
+
 ### Configure each board in a subshell
 
 ```bash
@@ -488,7 +508,7 @@ Monitor(command="FOREMAN_INSTANCE=<board> ~/.foreman/<installation>/install/skil
 
 One per board, and the board named in the description, because
 `watch-agents.py` reports only the agents of the board in its own environment —
-`foreman/<installation>/<board>/<TICKET>/<role>-<attempt>` and nothing else. Arm
+`foreman/[<installation>/]<board>/<TICKET>/<role>-<attempt>` and nothing else. Arm
 one for every board that is not halted. Naming the board in the description is what lets a
 Monitor left over from a removed board be told from a live one.
 
@@ -622,7 +642,7 @@ claude attach <id>                             # Claude installations only: watc
 adapter carries no attach verb, because neither Codex nor OpenCode has anything
 to attach to. On those, read the tick's own output instead:
 `"$HARNESS_SH" transcript <cwd> <session-id>` prints the file, and the session
-id is the one `"$HARNESS_SH" list` reports for `foreman/<installation>/tick`.
+id is the one `"$HARNESS_SH" list` reports for `TICK_AGENT_NAME`.
 
 **`--restart` is how you pick up newly pulled install code, or replace a tick
 that looks wrong.** It stops the tick agent and nothing else. Every in-flight
@@ -696,7 +716,7 @@ sits inside `supervise.sh`, around a check-and-spawn that really is synchronous.
 
 What replaces it for the tick itself is that there is only ever **one** loop
 agent per installation, kept that way by name: `TICK_AGENT_NAME` is
-`foreman/<installation>/tick`, so every board this installation serves runs
+`foreman/[<installation>/]tick`, so every board this installation serves runs
 under the one name and `supervise.sh` keeps exactly one of it alive. The
 installation segment is what lets a machine run several ticks without any of
 them counting, stopping or restarting another's. The per-card agent names carry
@@ -2042,7 +2062,7 @@ costs, so the tie goes to leaving it.
 **Ticket mode also stops and forgets the card's sessions.** A background agent
 idles at `done` when its turn ends, and nothing else ever stops it. So a sweep
 for a terminal card first asks `"$HARNESS_SH" stop` of every agent named
-`foreman/<installation>/<board>/<T>/…` that is `done` or `blocked`, and waits up
+`foreman/[<installation>/]<board>/<T>/…` that is `done` or `blocked`, and waits up
 to `AGENT_STOP_TIMEOUT_SECONDS` for the adapter's `list` to agree. On a Claude
 installation it then removes every stopped session's record under
 `~/.claude/jobs/` — what `claude agents --all` and the operator's session list
@@ -2057,7 +2077,7 @@ not terminal may still be diagnosed from its transcript (`reconcile.py` →
 count, before `released`. A stop that does not land in time leaves the session
 in place and makes the sweep exit non-zero, so report it on the tick.
 
-Either form also reaps `refs/foreman/<installation>/<board>/evidence/<pid>`
+Either form also reaps `refs/foreman/[<installation>/]<board>/evidence/<pid>`
 refs left by an `evidence.sh` that was killed between its fetch and its
 cleanup — a stopped tick, or one whose budget expired mid-read. It traps what it
 can, which leaves SIGKILL; nothing else touches that namespace, and a leaked ref
@@ -2065,7 +2085,7 @@ pins every object its fetch brought with it. A ref whose pid is still alive is a
 read in flight and is left alone.
 
 That reap is the last defence there, so it is not allowed to fail quietly: a
-sweep that cannot list its own `refs/foreman/<installation>/<board>/evidence/*`,
+sweep that cannot list its own `refs/foreman/[<installation>/]<board>/evidence/*`,
 or cannot delete a ref it found, names the problem on stderr and
 **exits non-zero** — the same distinction
 `--orphans` makes about the agent list. The rest of the sweep still ran; what
