@@ -19,6 +19,9 @@
 #                               line per FOREMAN_MCP_*_BEARER in its environment
 #         HARNESS_STUB_PROFILES per codex invocation that layered a profile
 #                               file, one `layered <path>` line
+#         HARNESS_STUB_SHELL    per codex invocation, `<VARIABLE> <cksum>` for
+#                               each FOREMAN_MCP_* (and the version control
+#                               variable) a model-run command would still see
 #       and reads HARNESS_STUB_CODEX_VERSION (0.133.0 or 0.154.0, default
 #       0.133.0) at run time to choose which codex it acts as.
 #
@@ -69,6 +72,7 @@ _harness_stub_prelude() { # <state_dir>
   printf 'STUB_ARGV=%q\n' "$1/argv"
   printf 'STUB_BEARER=%q\n' "$1/bearer"
   printf 'STUB_PROFILES=%q\n' "$1/profiles"
+  printf 'STUB_SHELL=%q\n' "$1/shell-env"
   printf 'STUB_EVENT_SECONDS=%q\n' "$_HARNESS_STUB_EVENT_SECONDS"
 }
 
@@ -90,6 +94,8 @@ harness_stub_install() { # <bin_dir> <state_dir>
   HARNESS_STUB_ARGV="$state/argv"
   HARNESS_STUB_BEARER="$state/bearer"
   HARNESS_STUB_PROFILES="$state/profiles"
+  HARNESS_STUB_SHELL="$state/shell-env"
+  : >"$HARNESS_STUB_SHELL" || return 1
   : >"$HARNESS_STUB_RUNS" || return 1
   : >"$HARNESS_STUB_ARGV" || return 1
   : >"$HARNESS_STUB_BEARER" || return 1
@@ -288,8 +294,11 @@ THREAD="thread-$$"
 #
 # `codex exec resume` REFUSES `--profile-v2` after the word `resume` ("error:
 # unexpected argument '--profile-v2' found", codex-cli 0.133.0, 2026-09-14),
-# and accepts it before. The stub refuses the same way, so an adapter that put
-# the flag in the wrong place fails here instead of on the operator's machine.
+# and accepts it before. 0.154.0 does the same with `-p/--profile`:
+# `codex exec -p NAME resume --help` exits 0, `codex exec resume -p NAME
+# --help` exits 2 (target machine, 2026-09-14). The stub refuses the same way
+# on both, so an adapter that put the flag in the wrong place fails here
+# instead of on the operator's machine.
 #
 # A flag this version does not layer a profile with is refused too: 0.154.0
 # has no `--profile-v2`, and 0.133.0's `--profile` reads a config.toml table
@@ -349,6 +358,46 @@ for variable in $(compgen -e); do
       ;;
   esac
 done
+
+# What a command the model runs would see. Real codex hands each shell command
+# its environment minus `[shell_environment_policy] exclude` globs (measured
+# 2026-09-14 on 0.154.0). The stub drops every variable matching the loaded
+# profile's `exclude = [...]` globs, then records `<VARIABLE> <cksum>` for what
+# is left, never a value. HARNESS_STUB_CODEX_VERSION is recorded as well when
+# set, as the control: a view that recorded nothing at all would make "the
+# bearer variable is absent" true by construction.
+EXCLUDES=""
+if [ -n "$PROFILE" ]; then
+  EXCLUDES="$(sed -n 's/^exclude = \[\(.*\)\]$/\1/p' "$PROFILE_FILE" | tr ',' ' ' | tr -d '"')"
+fi
+# No globbing while the globs are split and matched: `FOREMAN_MCP_*` would
+# otherwise expand against the files in the agent's cwd.
+set -f
+for variable in $(compgen -e); do
+  case "$variable" in
+    FOREMAN_MCP_*|HARNESS_STUB_CODEX_VERSION) ;;
+    *) continue ;;
+  esac
+  hidden=""
+  for glob in $EXCLUDES; do
+    case "$variable" in $glob) hidden=1 ;; esac
+  done
+  [ -n "$hidden" ] && continue
+  eval "value=\${$variable}"
+  printf '%s %s\n' "$variable" "$(printf '%s' "$value" | cksum)" >>"$STUB_SHELL"
+done
+set +f
+
+# One MCP error event per remote server, naming its url, the way a 401 from
+# the server might surface in the --json stream. ASSUMPTION: the shape of
+# real codex error output for a failed MCP server was NOT measured. The event
+# is here so the test can show the log holds the url and never the token;
+# it proves what this stub prints, not what codex prints.
+if [ -n "$PROFILE" ]; then
+  sed -n 's/^url = "\(.*\)"$/\1/p' "$PROFILE_FILE" | while IFS= read -r url; do
+    printf '{"type":"error","message":"MCP client failed to start: HTTP 401 Unauthorized, url: %s"}\n' "$url"
+  done
+fi
 
 printf '{"type":"thread.started","thread_id":"%s"}\n' "$THREAD"
 

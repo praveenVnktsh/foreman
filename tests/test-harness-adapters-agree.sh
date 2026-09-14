@@ -306,12 +306,31 @@ for harness in claude codex opencode; do
 
     : >"$HARNESS_STUB_ARGV"
     : >"$HARNESS_STUB_BEARER"
-    if run_adapter spawn --name bearer --cwd "$agent_cwd" --model stub-model \
+    if bearer_session="$(run_adapter spawn --name bearer --cwd "$agent_cwd" --model stub-model \
         --prompt-file "$prompt" --skip-permissions --mcp-config "$bearer_json" \
-        >/dev/null 2>"$bearer_err"; then
+        2>"$bearer_err")"; then
       ok "$harness spawn accepts a remote mcp server with an Authorization: Bearer header"
     else
       bad "$harness spawn with an Authorization: Bearer header: $(cat "$bearer_err")"
+    fi
+
+    # codex hands its environment to every command the model runs, so the
+    # token printed under `env` until the profile excluded it.
+    if grep -qxF 'exclude = ["FOREMAN_MCP_*"]' "$bearer_profile" 2>/dev/null; then
+      ok "$harness spawn writes the FOREMAN_MCP_* shell environment exclude into the profile"
+    else
+      bad "$harness spawn left exclude = [\"FOREMAN_MCP_*\"] out of $bearer_profile"
+    fi
+
+    # The stub prints an MCP error event naming the server url. Real codex
+    # error output for a failing MCP server was NOT measured, so this proves
+    # only that nothing between the harness and the log adds the token.
+    bearer_log="$(run_adapter transcript "$agent_cwd" "${bearer_session:-none}" 2>/dev/null)"
+    if [[ -n "$bearer_log" ]] && grep -qF "https://example.invalid/mcp" "$bearer_log" \
+        && ! grep -q "$bearer_canary" "$bearer_log"; then
+      ok "$harness log holds the MCP error event's url and not the bearer token"
+    else
+      bad "$harness log at '$bearer_log' lacks the MCP error url or holds the bearer token"
     fi
 
     if grep -qF "bearer_token_env_var = \"$bearer_variable\"" "$bearer_profile" 2>/dev/null; then
@@ -326,10 +345,12 @@ for harness in claude codex opencode; do
       ok "$harness spawn keeps a bearer token out of the profile"
     fi
 
+    # What this proves is the ADAPTER: the stub never prints the token, so a
+    # real codex writing it into its own --json log would not fail here.
     if grep -rq "$bearer_canary" "$FOREMAN_HOME/agents"; then
-      bad "$harness spawn wrote a bearer token under $FOREMAN_HOME/agents"
+      bad "$harness adapter wrote the bearer token under $FOREMAN_HOME/agents"
     else
-      ok "$harness spawn keeps a bearer token out of every file under agents/"
+      ok "$harness adapter writes the bearer token into no file under agents/"
     fi
 
     if grep -q "$bearer_canary" "$HARNESS_STUB_ARGV"; then
@@ -396,6 +417,8 @@ for harness in claude codex opencode; do
       esac
       : >"$HARNESS_STUB_ARGV"
       : >"$HARNESS_STUB_PROFILES"
+      : >"$HARNESS_STUB_BEARER"
+      : >"$HARNESS_STUB_SHELL"
       if env HARNESS_STUB_CODEX_VERSION="$codex_version" "$adapter" spawn \
           --name "layer-$codex_version" --cwd "$agent_cwd" --model stub-model \
           --prompt-file "$prompt" --skip-permissions --mcp-config "$bearer_json" \
@@ -405,6 +428,36 @@ for harness in claude codex opencode; do
         ok "$harness $codex_version spawn layers the MCP profile through $layer_flag"
       else
         bad "$harness $codex_version spawn did not layer the MCP profile through $layer_flag: $(cat "$bearer_err") argv: $(cat "$HARNESS_STUB_ARGV")"
+      fi
+
+      # codex holds the token; a command the model runs does not. The version
+      # variable is the control that shows the shell view was recorded at all.
+      if grep -qxF "$bearer_seen" "$HARNESS_STUB_BEARER" \
+          && grep -q "^HARNESS_STUB_CODEX_VERSION " "$HARNESS_STUB_SHELL" \
+          && ! grep -q "^$bearer_variable " "$HARNESS_STUB_SHELL"; then
+        ok "$harness $codex_version hides $bearer_variable from commands the model runs while codex holds it"
+      else
+        bad "$harness $codex_version shell view: $(cat "$HARNESS_STUB_SHELL") codex view: $(cat "$HARNESS_STUB_BEARER")"
+      fi
+
+      # Resume on the same version: the flag goes BEFORE `resume`, which both
+      # versions (and so the stub) require. Polled: resume returns before the
+      # detached stub has run.
+      : >"$HARNESS_STUB_ARGV"
+      : >"$HARNESS_STUB_PROFILES"
+      env HARNESS_STUB_CODEX_VERSION="$codex_version" "$adapter" resume \
+        --name "layer-$codex_version" --cwd "$agent_cwd" --prompt-file "$prompt" \
+        --skip-permissions --mcp-config "$bearer_json" >/dev/null 2>"$bearer_err"
+      tries=0
+      while [[ "$tries" -lt "$POLL_TRIES" ]] && ! grep -qxF "layered $bearer_profile" "$HARNESS_STUB_PROFILES"; do
+        sleep "$POLL_SECONDS"
+        tries=$(( tries + 1 ))
+      done
+      if grep -qF -- " $layer_flag foreman-$INSTALLATION resume " "$HARNESS_STUB_ARGV" \
+          && grep -qxF "layered $bearer_profile" "$HARNESS_STUB_PROFILES"; then
+        ok "$harness $codex_version resume layers the MCP profile through $layer_flag before resume"
+      else
+        bad "$harness $codex_version resume did not layer the MCP profile through $layer_flag before resume: $(cat "$bearer_err") argv: $(cat "$HARNESS_STUB_ARGV")"
       fi
     done
 
