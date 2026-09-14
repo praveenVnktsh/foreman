@@ -391,8 +391,17 @@ if ! cd "$AGENT_CWD"; then
   exit 1
 fi
 
+# stdin from /dev/null on every run of the harness, spawn and resume, codex and
+# opencode alike. `codex exec ... --json PROMPT` with stdin left open prints
+# "Reading additional input from stdin..." and waits for an EOF that never
+# comes: on codex-cli 0.154.0 over ssh it sat 180 seconds with no event, and
+# `list` would call it `working` the whole time. Today this wrapper already
+# gets /dev/null twice over: detached_spawn redirects it, and a non-interactive
+# shell gives any `... &` stdin from /dev/null anyway. Both live in another
+# function, and a harness that hangs here hangs with no error to find, so the
+# rule is stated where the harness runs.
 if [ -z "$LOOP_SECONDS" ]; then
-  "$@"
+  "$@" </dev/null
   _detached_record_set "$RECORD" exit "$?"
   exit 0
 fi
@@ -404,7 +413,7 @@ fi
 # here: detached_stop records one, and a death with none recorded already reads
 # as stopped.
 while :; do
-  "$@" || true
+  "$@" </dev/null || true
   sleep "$LOOP_SECONDS"
 done
 WRAPPER_BODY
@@ -930,7 +939,7 @@ detached_parse_resume() {
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --skip-permissions) skip=1; shift; continue ;;
-      --name|--cwd|--prompt-file|--settings)
+      --name|--cwd|--prompt-file|--settings|--mcp-config)
         [[ $# -ge 2 ]] || die "resume: $1 needs a value" ;;
       --max-budget-usd) _detached_refuse_budget resume ;;
       *) die "resume: unknown argument: $1" ;;
@@ -939,6 +948,10 @@ detached_parse_resume() {
       --name) DETACHED_NAME="$2" ;;
       --cwd) DETACHED_CWD="$2" ;;
       --prompt-file) DETACHED_PROMPT_FILE="$2" ;;
+      # A resumed agent reconnects to the same MCP servers a fresh one starts,
+      # and neither harness keeps a session's MCP config across a resume: codex
+      # reads its servers from the profile each run names.
+      --mcp-config) DETACHED_MCP_CONFIGS+=("$2") ;;
       # Dropped, as on spawn.
       --settings) : ;;
     esac

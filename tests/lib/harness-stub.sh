@@ -15,6 +15,12 @@
 #         HARNESS_STUB_MARKER   create this file to end every agent's work
 #         HARNESS_STUB_RUNS     one line per harness invocation
 #         HARNESS_STUB_ARGV     one line per invocation, holding its whole argv
+#         HARNESS_STUB_BEARER   per codex invocation, one `<VARIABLE> <cksum>`
+#                               line per FOREMAN_MCP_*_BEARER in its environment
+#         HARNESS_STUB_PROFILES per codex invocation that layered a profile
+#                               file, one `layered <path>` line
+#       and reads HARNESS_STUB_CODEX_VERSION (0.133.0 or 0.154.0, default
+#       0.133.0) at run time to choose which codex it acts as.
 #
 # ## The marker is the whole clock
 #
@@ -61,6 +67,8 @@ _harness_stub_prelude() { # <state_dir>
   # that a secret never became a command-line argument. Separate from
   # STUB_RUNS, which counts passes and must stay one line per run.
   printf 'STUB_ARGV=%q\n' "$1/argv"
+  printf 'STUB_BEARER=%q\n' "$1/bearer"
+  printf 'STUB_PROFILES=%q\n' "$1/profiles"
   printf 'STUB_EVENT_SECONDS=%q\n' "$_HARNESS_STUB_EVENT_SECONDS"
 }
 
@@ -80,8 +88,12 @@ harness_stub_install() { # <bin_dir> <state_dir>
   HARNESS_STUB_MARKER="$state/marker"
   HARNESS_STUB_RUNS="$state/runs"
   HARNESS_STUB_ARGV="$state/argv"
+  HARNESS_STUB_BEARER="$state/bearer"
+  HARNESS_STUB_PROFILES="$state/profiles"
   : >"$HARNESS_STUB_RUNS" || return 1
   : >"$HARNESS_STUB_ARGV" || return 1
+  : >"$HARNESS_STUB_BEARER" || return 1
+  : >"$HARNESS_STUB_PROFILES" || return 1
 
   {
     printf '%s\n' '#!/usr/bin/env bash'
@@ -219,12 +231,46 @@ CLAUDE_STUB
 # `codex exec --json` prints one JSON object per line and returns when the turn
 # ends; there is no background mode and no registry. detached.sh supplies both,
 # so what this stub owes the adapter is the event stream and an exit.
+#
+# It acts as one of two measured versions, chosen by HARNESS_STUB_CODEX_VERSION
+# (default 0.133.0). Read from the environment on purpose, unlike the paths
+# above: the adapter reads `codex exec --help` in its own process and runs
+# `codex exec` from detached.sh's wrapper, which inherits the adapter's
+# environment, so both invocations see the same version.
+STUB_VERSION="${HARNESS_STUB_CODEX_VERSION:-0.133.0}"
+case "$STUB_VERSION" in
+  # 0.133.0: `--profile-v2` layers the profile file; `--profile` is the old
+  # [profiles.<name>] table in config.toml.
+  0.133.0) LAYER_FLAG=--profile-v2 ;;
+  # 0.154.0: `--profile-v2` is gone; `-p/--profile` layers the profile file.
+  0.154.0) LAYER_FLAG=--profile ;;
+  *) printf 'codex-stub: no such stub version %s\n' "$STUB_VERSION" >&2; exit 2 ;;
+esac
+
 printf '%s\n' "$*" >>"$STUB_ARGV"
 case "${1:-}" in
-  --version) printf 'codex-cli 0.0.0-stub\n'; exit 0 ;;
+  --version) printf 'codex-cli %s\n' "$STUB_VERSION"; exit 0 ;;
   exec) ;;
   *) exit 0 ;;
 esac
+
+# The two help entries the adapter reads to pick its flag, worded as each
+# version words them.
+if [ "${2:-}" = --help ]; then
+  if [ "$STUB_VERSION" = 0.133.0 ]; then
+    printf '%s\n' \
+      '  -p, --profile <CONFIG_PROFILE>' \
+      '          Configuration profile from config.toml to specify default options' \
+      '' \
+      '      --profile-v2 <CONFIG_PROFILE_V2>' \
+      '          Layer $CODEX_HOME/<name>.config.toml on top of the base user config'
+  else
+    printf '%s\n' \
+      '  -p, --profile <CONFIG_PROFILE_V2>' \
+      '          Layer $CODEX_HOME/<name>.config.toml on top of the base user config'
+  fi
+  exit 0
+fi
 
 printf 'codex\n' >>"$STUB_RUNS"
 
@@ -232,7 +278,6 @@ printf 'codex\n' >>"$STUB_RUNS"
 # the log for exactly it. `codex exec resume <id>` continues that thread, so it
 # names the id it was handed rather than minting another.
 THREAD="thread-$$"
-if [ "${2:-}" = resume ]; then THREAD="${3:-$THREAD}"; fi
 
 # `--profile-v2 <name>` layers $CODEX_HOME/<name>.config.toml, which is where
 # codex.sh puts the MCP servers so that no credential ever becomes an argv
@@ -240,21 +285,70 @@ if [ "${2:-}" = resume ]; then THREAD="${3:-$THREAD}"; fi
 # warning, every MCP server simply absent -- so an adapter that passed the flag
 # without writing the file would look healthy and reach Linear never. This stub
 # is deliberately STRICTER than the real binary on exactly that point.
+#
+# `codex exec resume` REFUSES `--profile-v2` after the word `resume` ("error:
+# unexpected argument '--profile-v2' found", codex-cli 0.133.0, 2026-09-14),
+# and accepts it before. The stub refuses the same way, so an adapter that put
+# the flag in the wrong place fails here instead of on the operator's machine.
+#
+# A flag this version does not layer a profile with is refused too: 0.154.0
+# has no `--profile-v2`, and 0.133.0's `--profile` reads a config.toml table
+# that holds no MCP servers. Either would leave every MCP server absent.
 PROFILE=""
+RESUMING=""
 while [ $# -gt 0 ]; do
   case "$1" in
-    --profile-v2) PROFILE="${2:-}" ;;
+    --profile-v2|--profile|-p)
+      FLAG="$1"
+      [ "$FLAG" = -p ] && FLAG=--profile
+      if [ "$FLAG" != "$LAYER_FLAG" ]; then
+        printf 'codex-stub %s: %s does not layer $CODEX_HOME/<name>.config.toml on this version\n' \
+          "$STUB_VERSION" "$1" >&2
+        exit 2
+      fi
+      if [ -n "$RESUMING" ]; then
+        printf "codex-stub: error: unexpected argument '%s' found\n" "$1" >&2
+        exit 2
+      fi
+      PROFILE="${2:-}" ;;
+    resume) RESUMING=1; THREAD="${2:-$THREAD}" ;;
+    # The prompt follows `--`, and a prompt holding the word resume is not the
+    # subcommand.
+    --) break ;;
   esac
   shift
 done
 if [ -n "$PROFILE" ]; then
   PROFILE_FILE="${CODEX_HOME:-$HOME/.codex}/$PROFILE.config.toml"
   if [ ! -r "$PROFILE_FILE" ]; then
-    printf 'codex-stub: --profile-v2 %s names %s, which is not there\n' \
-      "$PROFILE" "$PROFILE_FILE" >&2
+    printf 'codex-stub: %s %s names %s, which is not there\n' \
+      "$LAYER_FLAG" "$PROFILE" "$PROFILE_FILE" >&2
     exit 1
   fi
+  # What the test reads to claim the MCP profile reached codex.
+  printf 'layered %s\n' "$PROFILE_FILE" >>"$STUB_PROFILES"
 fi
+
+# Real codex reads stdin to EOF before its first event when stdin is open
+# ("Reading additional input from stdin..."), and on 0.154.0 waited 180
+# seconds with no event. The stub blocks the same way, so a harness command
+# run with an open stdin never reaches thread.started here either.
+printf 'Reading additional input from stdin...\n' >&2
+cat >/dev/null
+
+# A remote server's bearer token reaches codex as the environment variable its
+# profile names in `bearer_token_env_var`, and in no other way. Recorded as
+# `<VARIABLE> <cksum of the value>`, never the value: this state directory is
+# what the test greps to prove the token is written down nowhere. Recorded
+# before thread.started, so a spawn that has returned has already recorded it.
+for variable in $(compgen -e); do
+  case "$variable" in
+    FOREMAN_MCP_*_BEARER)
+      eval "value=\${$variable}"
+      printf '%s %s\n' "$variable" "$(printf '%s' "$value" | cksum)" >>"$STUB_BEARER"
+      ;;
+  esac
+done
 
 printf '{"type":"thread.started","thread_id":"%s"}\n' "$THREAD"
 

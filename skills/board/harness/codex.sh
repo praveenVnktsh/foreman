@@ -7,7 +7,7 @@
 #                  [--add-dir D]... [--mcp-config F]... [--loop-minutes K]
 #                                             prints the session id
 #   codex.sh resume --name N --cwd D --prompt-file F --skip-permissions
-#                                             prints the session id
+#                   [--mcp-config F]...       prints the session id
 #   codex.sh list                             every agent, as a JSON list
 #   codex.sh stop <id>                        stop one agent
 #   codex.sh reap <older-than-seconds>        delete what finished agents left
@@ -56,6 +56,24 @@
 #                              tests/lib/harness-stub.sh refuses one, and why
 #                              spawn below never passes the flag without having
 #                              written the file.
+#                              RENAMED in codex-cli 0.154.0, measured on the
+#                              target machine 2026-09-14: `codex exec --help`
+#                              there has no `--profile-v2`, and
+#                              `-p, --profile <CONFIG_PROFILE_V2>` carries the
+#                              same "Layer ..." description. On 0.133.0,
+#                              `-p, --profile` is the OLD mechanism, reading
+#                              `[profiles.<name>]` out of config.toml. One fixed
+#                              spelling is wrong on one of the two versions, so
+#                              _codex_profile_flag reads the help text instead.
+#   stdin                     `codex exec ... --json PROMPT` with stdin left
+#                              open prints "Reading additional input from
+#                              stdin..." and waits for EOF. On 0.154.0 over ssh
+#                              it sat 180 seconds with no event; with
+#                              `< /dev/null` it exited 0 and printed
+#                              thread.started, turn.started, item.completed and
+#                              turn.completed. 0.133.0 printed the same line on
+#                              this Mac. detached.sh's wrapper runs every
+#                              harness command with stdin from /dev/null.
 #   --json                    one JSON object per event line on stdout. Running
 #                              `codex exec --json 'say hi'` while logged in on
 #                              this machine printed a `thread.started` event
@@ -71,9 +89,17 @@
 # run against a throwaway CODEX_HOME and the config.toml they wrote is exactly
 # the shape _codex_write_profile generates -- `command`, `args` and an
 # `[mcp_servers.<name>.env]` sub-table for a local server, a bare `url` for a
-# remote one. `bearer_token_env_var` is the only other remote key codex knows;
-# it has no way to carry arbitrary HTTP headers, so a remote server whose
-# mcp.json entry has `headers` is REFUSED rather than started without them.
+# remote one. For a remote server codex carries `url` and
+# `bearer_token_env_var` and nothing else: `codex mcp add --help` offers
+# `--bearer-token-env-var <ENV_VAR>`, "Optional environment variable to read
+# for a bearer token. Only valid with streamable HTTP". So a remote entry whose
+# `headers` are exactly one `Authorization: Bearer <token>` becomes `url` plus
+# `bearer_token_env_var = "FOREMAN_MCP_<NAME>_BEARER"`, and the token reaches
+# codex in that variable -- see _codex_prepare_mcp. Any other header, a second
+# header, or another Authorization scheme is REFUSED by name rather than the
+# server started without it. The shared mcp.json on the one live machine holds
+# exactly such a bearer entry, and the old blanket refusal of `headers` meant a
+# codex tick could never start there.
 #
 # ## Why a profile file, and never `-c mcp_servers.<name>.env.KEY=...`
 #
@@ -166,7 +192,44 @@ def toml_string(value):
     return "".join(out)
 
 
+# `Bearer <token>`: the scheme in any case, as HTTP compares it, one space, and
+# a token of visible ASCII. The token rule is narrower than "no whitespace" on
+# purpose: the token travels back to the shell as one line of stdout, so a
+# token that could hold a newline or a NUL could forge a second pair.
+BEARER = re.compile(r"(?i:bearer) ([\x21-\x7e]+)")
+
+
+def bearer_variable(server):
+    # FOREMAN_MCP_<NAME>_BEARER, NAME uppercased with every character that
+    # cannot sit in an environment variable name turned into an underscore.
+    return "FOREMAN_MCP_%s_BEARER" % re.sub(r"[^A-Z0-9]", "_", server.upper())
+
+
+def bearer_token(path, name, headers):
+    # The one header codex 0.133.0 can carry for a remote server is a bearer
+    # token, through `bearer_token_env_var`. Any other header is REFUSED by
+    # name: starting the server without it would hand the model an
+    # unauthenticated connection, and nothing would say so.
+    where = "%s.mcpServers.%s.headers" % (path, name)
+    if not isinstance(headers, dict) or not all(isinstance(v, str) for v in headers.values()):
+        sys.exit("foreman: %s must be an object of strings" % where)
+    for header in headers:
+        if header.lower() != "authorization":
+            sys.exit("foreman: %s.%s cannot be carried; codex 0.133.0 takes only an Authorization: Bearer header for a remote server, and starting this server without %s would hand the model an unauthenticated connection" % (where, header, header))
+    if not headers:
+        return None
+    if len(headers) > 1:
+        sys.exit("foreman: %s has more than one Authorization header (%s); codex carries exactly one bearer token" % (where, ", ".join(sorted(headers))))
+    header, value = next(iter(headers.items()))
+    match = BEARER.fullmatch(value)
+    if not match:
+        # The value is never echoed: it is the credential.
+        sys.exit("foreman: %s.%s is not `Bearer <token>`; codex 0.133.0 carries only a bearer token for a remote server, and starting this server without %s would hand the model an unauthenticated connection" % (where, header, header))
+    return match.group(1)
+
+
 servers = {}
+bearers = {}
 for path in sources:
     with open(path) as handle:
         try:
@@ -210,9 +273,14 @@ for path in sources:
             url = entry.get("url")
             if not isinstance(url, str) or not url:
                 sys.exit("foreman: %s.mcpServers.%s.url is missing or not a non-empty string" % (path, name))
-            if entry.get("headers"):
-                sys.exit("foreman: %s.mcpServers.%s has headers; codex 0.133.0 carries only url and bearer_token_env_var, and starting this server without its headers would hand the model an unauthenticated connection" % (path, name))
             lines.append("url = %s" % toml_string(url))
+            token = bearer_token(path, name, entry.get("headers", {}))
+            if token is not None:
+                variable = bearer_variable(name)
+                if variable in bearers:
+                    sys.exit("foreman: two mcp servers map to the environment variable %s; rename one so each bearer token has its own" % variable)
+                bearers[variable] = token
+                lines.append("bearer_token_env_var = %s" % toml_string(variable))
         else:
             sys.exit("foreman: %s.mcpServers.%s has neither command nor url; cannot translate it" % (path, name))
 
@@ -247,7 +315,98 @@ handle = os.fdopen(os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), "w
 with handle:
     handle.write("\n".join(body))
 os.replace(tmp, dest)
+
+# The bearer tokens go back to the shell on stdout, one `<VARIABLE> <token>`
+# line each, and nowhere else. See _codex_export_bearers for why a pipe.
+for variable, token in bearers.items():
+    print(variable, token)
 ' "$@"
+}
+
+# The flag that layers $CODEX_HOME/<name>.config.toml on THIS codex, read from
+# `codex exec --help` once per spawn or resume. See the header: 0.133.0 spells
+# it `--profile-v2`, 0.154.0 spells it `--profile`, and 0.133.0's `--profile`
+# is a different mechanism that would load no MCP servers at all -- silently.
+#
+# `--profile` is chosen only when its OWN help entry says "Layer
+# $CODEX_HOME/<name>.config.toml". A codex that has neither is REFUSED: it has
+# no way to receive the MCP servers, and a tick started without them cannot
+# move a single card.
+_codex_profile_flag() {
+  local help flag
+  # stdin from /dev/null for the reason the header records: codex exec waits on
+  # an open stdin.
+  help="$(codex exec --help </dev/null 2>&1)" \
+    || die "codex exec --help failed, so which flag layers a profile file is unknown: $help"
+  flag="$(printf '%s\n' "$help" | python3 -c '
+import re, sys
+
+LAYER = "Layer $CODEX_HOME/<name>.config.toml"
+# An option entry starts on a line indented a few columns with the flag
+# itself; its description lines are indented further. Keyed by long flag.
+HEADER = re.compile(r"^ {2,6}(?:-[A-Za-z], )?(--[A-Za-z0-9-]+)")
+
+entries = {}
+current = None
+for line in sys.stdin:
+    match = HEADER.match(line)
+    if match:
+        current = match.group(1)
+        entries[current] = line
+    elif current is not None:
+        entries[current] += line
+
+if "--profile-v2" in entries:
+    print("--profile-v2")
+elif LAYER in entries.get("--profile", ""):
+    print("--profile")
+else:
+    sys.exit(1)
+')" || die "this codex has no flag that layers \$CODEX_HOME/<name>.config.toml (codex exec --help shows neither --profile-v2 nor a --profile described as \"Layer \$CODEX_HOME/<name>.config.toml\"), so it cannot receive the MCP servers"
+  printf '%s' "$flag"
+}
+
+# Write the profile and export every bearer token it names into THIS shell's
+# environment, where detached_spawn's `nohup` child inherits it.
+#
+# ## Why the token is in the codex process environment, and nowhere else
+#
+# codex 0.133.0 has one way to receive a remote server's bearer token: the
+# variable `bearer_token_env_var` names. So the token has to be in codex's
+# environment. There it is readable through /proc/<pid>/environ (or `ps -E`)
+# only by the same user -- the user who already owns mcp.json at 0600. Every
+# other place it could travel is worse and is ruled out:
+#
+#   - argv: readable by every user through /proc/<pid>/cmdline and `ps`.
+#   - `env NAME=token codex ...`, the way opencode.sh hands the wrapper
+#     OPENCODE_CONFIG: detached_spawn writes that argv verbatim into
+#     agents/<id>.sh at 0644, forever.
+#   - the profile: codex would read the token from the file only if it could
+#     carry one, and it cannot.
+#   - the agent record and the log: nothing that writes them sees the
+#     environment.
+#
+# The translator hands the pairs back on stdout, captured in memory, rather
+# than through a temp file: no path to create at the right mode, and nothing to
+# delete on every failure path. It admits only visible-ASCII tokens, so one
+# line is one pair and the capture cannot drop a NUL.
+_codex_prepare_mcp() { # <profile> <mcp.json>...
+  local profile="$1" pairs line variable
+  shift
+  pairs="$(_codex_write_profile "$(_codex_home_dir)/$profile.config.toml" "$@")" || exit 1
+  # Split on newlines by parameter expansion, not an unquoted `for`: a token
+  # may hold `*` or `?`, which a glob would expand against the cwd.
+  while [[ -n "$pairs" ]]; do
+    line="${pairs%%$'\n'*}"
+    if [[ "$line" == "$pairs" ]]; then pairs=""; else pairs="${pairs#*$'\n'}"; fi
+    variable="${line%% *}"
+    # The translator only ever names this shape. Anything else is refused
+    # rather than exported, because an export of a stray name could replace
+    # PATH for the harness.
+    [[ "$variable" =~ ^FOREMAN_MCP_[A-Z0-9_]+_BEARER$ && "$line" == *" "* ]] \
+      || die "the MCP translation returned a line that is not a bearer variable; refusing to export it"
+    export "$variable=${line#* }"
+  done
 }
 
 # Poll the agent's log for the `thread.started` event and pull `thread_id` out
@@ -327,11 +486,11 @@ spawn() {
   args+=(--dangerously-bypass-approvals-and-sandbox)
 
   if [[ ${#DETACHED_MCP_CONFIGS[@]} -gt 0 ]]; then
-    local profile profile_file
+    local profile flag
     profile="$(_codex_profile_name)" || exit 1
-    profile_file="$(_codex_home_dir)/$profile.config.toml"
-    _codex_write_profile "$profile_file" "${DETACHED_MCP_CONFIGS[@]}"
-    args+=(--profile-v2 "$profile")
+    flag="$(_codex_profile_flag)" || exit 1
+    _codex_prepare_mcp "$profile" "${DETACHED_MCP_CONFIGS[@]}"
+    args+=("$flag" "$profile")
   fi
 
   # `--json` and the prompt come last: `--profile-v2`, unlike claude's
@@ -353,7 +512,26 @@ resume() {
   session="$(detached_newest "$home" name "$DETACHED_NAME" sessionId)" || exit 1
   [[ -n "$session" ]] || die "no agent named $DETACHED_NAME to resume"
 
-  local args=(exec resume "$session" --dangerously-bypass-approvals-and-sandbox)
+  # `--profile-v2` goes BEFORE `resume`. `codex exec resume` has no such flag of
+  # its own and refuses it after the subcommand ("unexpected argument
+  # '--profile-v2' found"); `codex exec --profile-v2 <name> resume` parses,
+  # verified against codex-cli 0.133.0 on 2026-09-14.
+  #
+  # ASSUMPTION -- could not verify. That the parent's `--profile-v2` also LOADS
+  # the profile's MCP servers on resume was not observed: with no login on this
+  # machine, a probe server's launch left no line in the output on resume or,
+  # this time, on spawn either, so the probe could not tell the two apart.
+  # ASSUMPTION -- could not verify. That 0.154.0 accepts `-p/--profile` before
+  # `resume` the way 0.133.0 accepts `--profile-v2` there: no 0.154.0 here.
+  local args=(exec)
+  if [[ ${#DETACHED_MCP_CONFIGS[@]} -gt 0 ]]; then
+    local profile flag
+    profile="$(_codex_profile_name)" || exit 1
+    flag="$(_codex_profile_flag)" || exit 1
+    _codex_prepare_mcp "$profile" "${DETACHED_MCP_CONFIGS[@]}"
+    args+=("$flag" "$profile")
+  fi
+  args+=(resume "$session" --dangerously-bypass-approvals-and-sandbox)
   args+=(--json -- "$DETACHED_PROMPT")
 
   # No --loop-minutes here, same as claude.sh's resume: the spec's own verb

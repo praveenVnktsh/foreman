@@ -285,6 +285,153 @@ for harness in claude codex opencode; do
     bad "$harness spawn with a remote mcp server: $(cat "$remote_err")"
   fi
 
+  # A remote server behind a bearer token, the shape the shared mcp.json takes
+  # on the one live machine. codex.sh used to refuse every entry with
+  # `headers`, so a codex tick could never start there. codex carries a bearer
+  # token only through `bearer_token_env_var`, so the token must reach the
+  # codex process as that variable and must be written down nowhere: not the
+  # argv, not the profile, not agents/. Codex only, because the translation
+  # into an environment variable is codex's alone.
+  if [[ "$harness" == codex ]]; then
+    bearer_canary=SECRET_BEARER_CANARY
+    bearer_variable=FOREMAN_MCP_BOARD_REMOTE_BEARER
+    # What the stub records for a variable holding the canary: a checksum,
+    # never the value.
+    bearer_seen="$bearer_variable $(printf '%s' "$bearer_canary" | cksum)"
+    bearer_profile="${CODEX_HOME:-$HOME/.codex}/foreman-$INSTALLATION.config.toml"
+    bearer_json="$work/$harness/mcp-bearer.json"
+    printf '{"mcpServers": {"board-remote": {"type": "http", "url": "https://example.invalid/mcp", "headers": {"Authorization": "Bearer %s"}}}}\n' \
+      "$bearer_canary" >"$bearer_json"
+    bearer_err="$work/$harness/bearer.err"
+
+    : >"$HARNESS_STUB_ARGV"
+    : >"$HARNESS_STUB_BEARER"
+    if run_adapter spawn --name bearer --cwd "$agent_cwd" --model stub-model \
+        --prompt-file "$prompt" --skip-permissions --mcp-config "$bearer_json" \
+        >/dev/null 2>"$bearer_err"; then
+      ok "$harness spawn accepts a remote mcp server with an Authorization: Bearer header"
+    else
+      bad "$harness spawn with an Authorization: Bearer header: $(cat "$bearer_err")"
+    fi
+
+    if grep -qF "bearer_token_env_var = \"$bearer_variable\"" "$bearer_profile" 2>/dev/null; then
+      ok "$harness spawn names the bearer token's environment variable in the profile"
+    else
+      bad "$harness spawn left bearer_token_env_var = \"$bearer_variable\" out of $bearer_profile"
+    fi
+
+    if grep -q "$bearer_canary" "$bearer_profile" 2>/dev/null; then
+      bad "$harness spawn wrote a bearer token into the profile $bearer_profile"
+    else
+      ok "$harness spawn keeps a bearer token out of the profile"
+    fi
+
+    if grep -rq "$bearer_canary" "$FOREMAN_HOME/agents"; then
+      bad "$harness spawn wrote a bearer token under $FOREMAN_HOME/agents"
+    else
+      ok "$harness spawn keeps a bearer token out of every file under agents/"
+    fi
+
+    if grep -q "$bearer_canary" "$HARNESS_STUB_ARGV"; then
+      bad "$harness spawn put a bearer token in the harness argv"
+    else
+      ok "$harness spawn keeps a bearer token out of the harness argv"
+    fi
+
+    if grep -qxF "$bearer_seen" "$HARNESS_STUB_BEARER"; then
+      ok "$harness spawn hands the bearer token to codex in $bearer_variable"
+    else
+      bad "$harness spawn did not hand codex $bearer_variable holding the token; the stub saw: $(cat "$HARNESS_STUB_BEARER")"
+    fi
+
+    # A resumed agent reconnects to the same server, so it needs the same
+    # variable. Polled: resume returns before the detached stub has run.
+    : >"$HARNESS_STUB_BEARER"
+    run_adapter resume --name bearer --cwd "$agent_cwd" --prompt-file "$prompt" \
+      --skip-permissions --mcp-config "$bearer_json" >/dev/null 2>"$bearer_err"
+    tries=0
+    while [[ "$tries" -lt "$POLL_TRIES" ]] && ! grep -qxF "$bearer_seen" "$HARNESS_STUB_BEARER"; do
+      sleep "$POLL_SECONDS"
+      tries=$(( tries + 1 ))
+    done
+    if grep -qxF "$bearer_seen" "$HARNESS_STUB_BEARER"; then
+      ok "$harness resume hands the bearer token to codex in $bearer_variable"
+    else
+      bad "$harness resume did not hand codex $bearer_variable holding the token: $(cat "$bearer_err")"
+    fi
+
+    # Refusals name the header, because the header is what the operator edits.
+    two_headers="$work/$harness/mcp-two-headers.json"
+    printf '%s\n' '{"mcpServers": {"board-remote": {"type": "http", "url": "https://example.invalid/mcp", "headers": {"Authorization": "Bearer x", "X-Tenant": "acme"}}}}' >"$two_headers"
+    if run_adapter spawn --name twoheaders --cwd "$agent_cwd" --model stub-model \
+        --prompt-file "$prompt" --skip-permissions --mcp-config "$two_headers" \
+        >/dev/null 2>"$bearer_err"; then
+      bad "$harness spawn accepted a remote mcp server with a header codex cannot carry"
+    elif grep -q "X-Tenant" "$bearer_err"; then
+      ok "$harness spawn refuses a remote mcp server with a second header, naming it"
+    else
+      bad "$harness spawn refused a second header without naming it: $(cat "$bearer_err")"
+    fi
+
+    basic="$work/$harness/mcp-basic.json"
+    printf '%s\n' '{"mcpServers": {"board-remote": {"type": "http", "url": "https://example.invalid/mcp", "headers": {"Authorization": "Basic x"}}}}' >"$basic"
+    if run_adapter spawn --name basic --cwd "$agent_cwd" --model stub-model \
+        --prompt-file "$prompt" --skip-permissions --mcp-config "$basic" \
+        >/dev/null 2>"$bearer_err"; then
+      bad "$harness spawn accepted an Authorization header that is not Bearer"
+    elif grep -q "Authorization" "$bearer_err"; then
+      ok "$harness spawn refuses an Authorization: Basic header, naming it"
+    else
+      bad "$harness spawn refused Authorization: Basic without naming it: $(cat "$bearer_err")"
+    fi
+
+    # codex renamed the flag that layers a profile file: `--profile-v2` on
+    # 0.133.0, `--profile` on 0.154.0, where 0.133.0's `--profile` is another
+    # mechanism. One fixed spelling loses every MCP server on one of the two.
+    # `env`, not a prefix assignment, for the leak the reap claims record.
+    for codex_version in 0.133.0 0.154.0; do
+      case "$codex_version" in
+        0.133.0) layer_flag=--profile-v2 ;;
+        0.154.0) layer_flag=--profile ;;
+      esac
+      : >"$HARNESS_STUB_ARGV"
+      : >"$HARNESS_STUB_PROFILES"
+      if env HARNESS_STUB_CODEX_VERSION="$codex_version" "$adapter" spawn \
+          --name "layer-$codex_version" --cwd "$agent_cwd" --model stub-model \
+          --prompt-file "$prompt" --skip-permissions --mcp-config "$bearer_json" \
+          >/dev/null 2>"$bearer_err" \
+        && grep -qF -- " $layer_flag foreman-$INSTALLATION " "$HARNESS_STUB_ARGV" \
+        && grep -qxF "layered $bearer_profile" "$HARNESS_STUB_PROFILES"; then
+        ok "$harness $codex_version spawn layers the MCP profile through $layer_flag"
+      else
+        bad "$harness $codex_version spawn did not layer the MCP profile through $layer_flag: $(cat "$bearer_err") argv: $(cat "$HARNESS_STUB_ARGV")"
+      fi
+    done
+
+    # A codex that waits on an open stdin. The adapter is handed a stdin that
+    # stays open -- a fifo with a writer that never closes it -- and the agent
+    # must still finish. Measured 2026-09-14: with all three `</dev/null` in
+    # detached.sh removed this claim STILL passes, because a non-interactive
+    # shell gives an asynchronous list (`nohup ... &`) stdin from /dev/null on
+    # its own. So it does not pin the redirects; it catches a spawn that ever
+    # hands the harness the caller's stdin explicitly, which is the hang codex
+    # 0.154.0 showed over ssh.
+    stdin_fifo="$work/$harness/stdin.fifo"
+    mkfifo "$stdin_fifo"
+    sleep 120 >"$stdin_fifo" &
+    stdin_holder=$!
+    if env HARNESS_STUB_CODEX_VERSION=0.154.0 "$adapter" spawn --name stdinreader \
+        --cwd "$agent_cwd" --model stub-model --prompt-file "$prompt" \
+        --skip-permissions <"$stdin_fifo" >/dev/null 2>"$bearer_err" \
+      && wait_for_state stdinreader done; then
+      ok "$harness spawn reaches done when codex reads stdin to EOF"
+    else
+      bad "$harness spawn with an open stdin never reached done: $(cat "$bearer_err")"
+    fi
+    # `wait` reaps it here, so bash prints no "Terminated" job notice later.
+    { kill "$stdin_holder"; wait "$stdin_holder"; } 2>/dev/null || true
+  fi
+
   if [[ -n "$(run_adapter skills-dir)" ]]; then ok "$harness skills-dir prints a path"
   else bad "$harness skills-dir prints a path"; fi
 
