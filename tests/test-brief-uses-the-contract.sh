@@ -79,8 +79,12 @@ git_q -C "$target" push -q origin main
 home="$work/home"
 fixture_add_instance "$home" demo "$target"
 
+# FOREMAN_HOME is named explicitly here and in every other run below. config.sh
+# no longer derives it from $HOME: it asks bin/installation.py, which reads the
+# home as the parent of this clone. An explicit home is what that derivation
+# yields to, and it is how this file stays pointed at its temporary directory.
 ask_brief() { # subcommand and args...
-  env HOME="$home" FOREMAN_INSTANCE=demo "$brief" "$@"
+  env HOME="$home" FOREMAN_HOME="$home/.foreman" FOREMAN_INSTANCE=demo "$brief" "$@"
 }
 
 # ============================================================================
@@ -119,7 +123,7 @@ fi
 # -- asked of it directly here, not re-typed as a format string, which is
 # exactly the drift that left a live prompt naming `board/{ticket}` after
 # every other branch moved to foreman/<instance>/<ticket>.
-expected_branch="$(env HOME="$home" FOREMAN_INSTANCE=demo \
+expected_branch="$(env HOME="$home" FOREMAN_HOME="$home/.foreman" FOREMAN_INSTANCE=demo \
   bash -c ". '$board_dir/config.sh' >/dev/null; branch_name \"\$1\"" _ "$TICKET")"
 [[ -n "$expected_branch" ]] || bad "could not compute the expected branch name from config.sh itself"
 if [[ "$prompt" == *"$expected_branch"* ]]; then
@@ -355,11 +359,23 @@ shim_root="$work/shim-repo"
 mkdir -p "$shim_root/bin" "$shim_root/skills/board"
 ln -s "$root/bin/contract.py" "$shim_root/bin/contract.py"
 ln -s "$root/bin/boards.py" "$shim_root/bin/boards.py"
+# config.sh reads this installation's declaration before anything else, from
+# THIS root's bin/ -- a shim without it refuses at config.sh's first line.
+ln -s "$root/bin/installation.py" "$shim_root/bin/installation.py"
+# config.sh sources its pair reader from THIS root's bin/ on its first line.
+ln -s "$root/bin/load-pairs.sh" "$shim_root/bin/load-pairs.sh"
 ln -s "$root/bin/tmp-dir.sh" "$shim_root/bin/tmp-dir.sh"
 shim="$shim_root/skills/board"
 ln -s "$board_dir/config.sh" "$shim/config.sh"
 ln -s "$board_dir/dispatch.sh" "$shim/dispatch.sh"
 ln -s "$board_dir/withlock.py" "$shim/withlock.py"
+# dispatch.sh refuses when it cannot count the machine's slots, so the shim
+# needs the counter; without it every dispatch here died at the gate.
+ln -s "$board_dir/reconcile.py" "$shim/reconcile.py"
+# config.sh checks that the adapter for this installation's harness is
+# executable under THIS root and refuses there rather than at the spawn. Linked
+# as a whole directory, so a fourth harness needs no second edit here.
+ln -s "$board_dir/harness" "$shim/harness"
 cat > "$shim/preflight.py" <<'PY'
 #!/usr/bin/env python3
 import sys
@@ -373,7 +389,11 @@ run_dispatch() { # ticket role attempt repo [ref]
   printf 'Do the thing for %s.\n' "$ticket" > "$pfile"
   local extra=()
   [[ -n "$ref" ]] && extra=(--ref "$ref")
-  env HOME="$home" FOREMAN_INSTANCE=demo REPO="$repo" \
+  # The ceilings are raised out of the way: this test dispatches several
+  # cards on one board to read their briefs, and the fixture's MAX_CONCURRENT
+  # is 1. The gate itself is test-dispatch-holds-the-cap.sh's claim.
+  env HOME="$home" FOREMAN_HOME="$home/.foreman" FOREMAN_INSTANCE=demo REPO="$repo" \
+    MAX_CONCURRENT=9 HOST_MAX_CONCURRENT=9 \
     PATH="$bin_dir:$PATH" CLAUDE_STUB_REGISTRY="$claude_registry" \
     "$shim/dispatch.sh" --ticket "$ticket" --role "$role" --attempt "$attempt" \
       ${extra[@]+"${extra[@]}"} --prompt-file "$pfile"
@@ -381,11 +401,22 @@ run_dispatch() { # ticket role attempt repo [ref]
 
 registry_has_name() { grep -q "\"name\": \"$1\"" "$claude_registry"; }
 
+# The agent name is asked of config.sh's OWN agent_name, never retyped here --
+# the same drift the branch check above guards against, one level down. It
+# gained an installation segment when one machine started running several
+# installations, and a format string copied into this file would have kept
+# looking for the name nothing spawns any more.
+expected_agent_name() { # ticket role attempt
+  env HOME="$home" FOREMAN_HOME="$home/.foreman" FOREMAN_INSTANCE=demo \
+    bash -c ". '$board_dir/config.sh' >/dev/null; agent_name \"\$1\" \"\$2\" \"\$3\"" \
+      _ "$1" "$2" "$3"
+}
+
 # --- 3. a contract with no bootstrap command dispatches without running one -
 
 t3="ACME-30"
 if session3="$(run_dispatch "$t3" build 1 "$target" 2>"$work/err3.log")"; then
-  if [[ -n "$session3" ]] && registry_has_name "foreman/demo/$t3/build-1"; then
+  if [[ -n "$session3" ]] && registry_has_name "$(expected_agent_name "$t3" build 1)"; then
     ok "a contract with no bootstrap command dispatches without running one"
   else
     bad "dispatch reported success but never reached the agent spawn for $t3:
@@ -428,7 +459,7 @@ if session4="$(run_dispatch "$t4" build 1 "$target2" 2>"$work/err4.log")"; then
 $(cat "$work/err4.log")"
 else
   err4="$(cat "$work/err4.log")"
-  if registry_has_name "foreman/demo/$t4/build-1"; then
+  if registry_has_name "$(expected_agent_name "$t4" build 1)"; then
     bad "the bootstrap command failed but an agent was spawned anyway (a blind agent):
 $err4"
   elif [[ "$err4" == *"$t4"* && "$err4" == *"attempt budget"* ]]; then
@@ -444,7 +475,7 @@ fi
 
 t5="ACME-32"
 if session5="$(run_dispatch "$t5" review 1 "$target2" "$seed_sha2" 2>"$work/err5.log")"; then
-  if [[ -n "$session5" ]] && registry_has_name "foreman/demo/$t5/review-1"; then
+  if [[ -n "$session5" ]] && registry_has_name "$(expected_agent_name "$t5" review 1)"; then
     ok "bootstrap never runs for a review dispatch, even one whose contract's bootstrap would fail"
   else
     bad "review dispatch reported success but never reached the agent spawn for $t5:

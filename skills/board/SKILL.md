@@ -9,9 +9,13 @@ Linear is the control plane. **The operator decides what gets built** by moving
 a card from `Backlog` into `Todo`. That move is the dispatch authorisation.
 This skill does everything after it.
 
-**One tick works every board on this machine**, a slice at a time each. There is
-no per-board tick agent any more, so everything below happens once per board per
-pass — see [Boards](#boards) before running anything.
+**One tick works every board this installation serves**, a slice at a time
+each. There is no per-board tick agent any more, so everything below happens
+once per board per pass — see [Boards](#boards) before running anything.
+
+**This machine may run several installations**, one per coding-agent harness,
+serving these same boards. You are one of them. A label on the card says whose
+it is, and you touch nothing else — see [1. Adopt](#1-adopt).
 
 The operator is usually not present when this runs. Nothing here may wait for
 them.
@@ -24,7 +28,7 @@ You are the tick. You hold no state. Everything you need, you re-derive:
 | Which board is this card on? | the slice you are in; never guess |
 | What column is this card in? | Linear (MCP) |
 | Does the code exist, is it green, is it merged? | `gh`, `git` |
-| Is an agent still alive? | `claude agents --json --all` |
+| Is an agent still alive? | `"$HARNESS_SH" list` |
 | Why did a dead agent die? | `reconcile.py` → `death` |
 | What happened on earlier ticks? | `$BOARD_HOME/cards/<T>/history.jsonl` |
 | Can this machine build at all? | `preflight.py` |
@@ -39,26 +43,33 @@ to be right about. Never answer it by reading a file in `$REPO`, and never by
 guaranteed to have refreshed since the tick's own last merge. `evidence.sh`
 fetches, then answers. See [Refuting a blocking finding](#refuting-a-blocking-finding).
 
+`"$HARNESS_SH"` is this installation's harness adapter, exported by `config.sh`.
+Every question about an agent goes through it — `list`, `stop`, `transcript` —
+because this machine may run Claude Code, Codex and OpenCode side by side, one
+per installation, and only the adapter knows how its own CLI spells any of it.
+Never run `claude` by name.
+
 **The sidecar under `$BOARD_HOME` is a cache, never truth.** Delete it and the
 next tick must still reconstruct every card's position from Linear + `gh` +
-`claude agents`. If you ever find yourself needing a fact that exists *only* in
-the sidecar, the design has drifted — say so in the report.
+`"$HARNESS_SH" list`. If you ever find yourself needing a fact that exists *only*
+in the sidecar, the design has drifted — say so in the report.
 
 ## Boards
 
-A board is one repository this machine builds. `~/.foreman/boards.toml` declares
-every board, and `boards.py` is the only thing that reads it:
+A board is one repository this machine builds. `$FOREMAN_HOME/boards.toml`
+declares every board this installation serves, and `boards.py` is the only thing
+that reads it:
 
 ```bash
-~/.foreman/install/bin/boards.py --list | tr '\0' '\n'    # every board here
-~/.foreman/install/bin/boards.py <board> | tr '\0' '\n'   # its REPO and KEY_FILE
+~/.foreman/<installation>/install/bin/boards.py --list | tr '\0' '\n'    # every board here
+~/.foreman/<installation>/install/bin/boards.py <board> | tr '\0' '\n'   # its REPO and KEY_FILE
 ```
 
 Both forms emit NUL-separated fields, hence the `tr`. Two answers are not the
 same and must not be treated the same:
 
-- **Nothing printed by `--list`** — this machine declares no boards yet. That is
-  a true and quiet answer. Report it in one line and stop.
+- **Nothing printed by `--list`** — this installation declares no boards yet.
+  That is a true and quiet answer. Report it in one line and stop.
 - **A non-zero exit** — `boards.toml` is missing, is not valid TOML, or names a
   repository that is not a directory. `boards.py` says which on stderr. Stop the
   tick and quote it. A board list that failed to load is not an empty one, and
@@ -69,11 +80,21 @@ rare board in a different Linear workspace. The Linear team and project come
 from that repository's own `board.toml`. The repository declares itself; the
 machine declares only where to find it.
 
+**Two homes, and they are not the same directory.** `$FOREMAN_ROOT` is
+`~/.foreman`, the machine root: it holds `linear.key` and `mcp.json`, shared by
+every installation on this machine, and one directory per installation.
+`$FOREMAN_HOME` is this installation's own, `~/.foreman/<installation>` — its
+clone under `install/`, its `boards.toml`, its `instances/<board>/`, its lock
+and its scratch. `config.sh` exports both, along with `INSTALLATION`, the name
+of this one. A path composed against the wrong one reads a sibling's boards with
+this installation's credential, so compose against the variable and never
+against `~/.foreman` by hand.
+
 ### Configure each board in a subshell
 
 ```bash
 ( export FOREMAN_INSTANCE=<board>
-  . ~/.foreman/install/skills/board/config.sh
+  . ~/.foreman/<installation>/install/skills/board/config.sh
   cd "$REPO"
   # ...this board's slice... )
 ```
@@ -134,7 +155,7 @@ either worked or named as skipped.
 order `boards.py --list` printed:
 
 ```bash
-~/.foreman/install/skills/board/reconcile.py --board-order
+~/.foreman/<installation>/install/skills/board/reconcile.py --board-order
 ```
 
 It prints
@@ -155,7 +176,7 @@ the starved board at the front.
 whether the board has anything to do:
 
 ```bash
-~/.foreman/install/skills/board/reconcile.py --served <board>
+~/.foreman/<installation>/install/skills/board/reconcile.py --served <board>
 ```
 
 It writes `$FOREMAN_HOME/instances/<board>/last-served` and prints nothing.
@@ -223,7 +244,7 @@ table says what each knob *means* and `config.sh` says what it *is*:
 
 ```bash
 ( export FOREMAN_INSTANCE=<board>
-  . ~/.foreman/install/skills/board/config.sh
+  . ~/.foreman/<installation>/install/skills/board/config.sh
   printf '%-22s %s\n' MAX_CONCURRENT "$MAX_CONCURRENT" \
     MAX_BUILD_ATTEMPTS "$MAX_BUILD_ATTEMPTS" MAX_PLAN_ATTEMPTS "$MAX_PLAN_ATTEMPTS" \
     MAX_PLAN_ROUNDS "$MAX_PLAN_ROUNDS" \
@@ -262,10 +283,13 @@ A number carried from one slice into the next is the previous board's answer.
 `HOST_MAX_CONCURRENT` bounds the same thing across boards: two boards each
 dispatching up to their own `MAX_CONCURRENT` can still jointly exceed what one
 machine's RAM and disk can sustain. `$B/reconcile.py --host-slots` counts it for
-every board `boards.toml` declares, reading each one's
-`~/.foreman/instances/<board>/cards/`, and reports
-`{"instances": {<board>: n, ...}, "total": N}` — the JSON key keeps the runtime
-directory's name. Check `total` against `HOST_MAX_CONCURRENT` in step 6,
+every board every installation under `$FOREMAN_ROOT` declares, reading each
+one's `<installation home>/instances/<board>/cards/`, and reports
+`{"instances": {<installation>/<board>: n, ...}, "total": N}`. The key carries
+the installation because two installations may serve one repository, and one
+machine is what `HOST_MAX_CONCURRENT` is a number for — a count of this
+installation alone would let each of them fill a ceiling written for the
+machine. Check `total` against `HOST_MAX_CONCURRENT` in step 6,
 alongside that board's own free-slot count, before dispatching anything. A card stops
 counting when its history's last entry is `{"action":"released",...}` — logged
 at `Done` and at every `board-failed` exit, see steps 2, 3 and 5 — or, failing
@@ -319,8 +343,16 @@ absence is never fatal. When a board has no `ids.env`, or an id this slice needs
 is empty, re-resolve it and source `config.sh` again:
 
 ```bash
-~/.foreman/install/bin/resolve-ids.py --instance <board>
+~/.foreman/<installation>/install/bin/resolve-ids.py --instance <board> \
+  --installation "$INSTALLATION"
 ```
+
+**`--installation` is required, and it is this installation's own name.** The
+resolver creates `foreman:<installation>` on that board's team and writes it to
+`ids.env` as `LABEL_INSTALLATION`, so the name it resolves has to be the name
+the dispatch step later applies. Pass `$INSTALLATION` from `config.sh` and never
+a name typed here: a label resolved under one name and written under another
+routes every card to an installation that does not exist.
 
 Then carry on with the slice. Never hand-write an id, never fall back to
 matching a state or a label by name, and never pass over the board in silence: a
@@ -341,6 +373,7 @@ filter is also what keeps one board's slice out of another board's cards.
 | `needs-merge` | `LABEL_NEEDS_MERGE` | you | green and reviewed, high-risk — **the operator's** merge |
 | `board-failed` | `LABEL_BOARD_FAILED` | you | out of attempts or rounds, moved to `Needs Human`, needs re-triage |
 | `needs-plan` | `LABEL_NEEDS_PLAN` | **the operator** | park in `Plan` when the plan lands; **their** sign-off releases it — step 2 |
+| `foreman:<installation>` | `LABEL_INSTALLATION` | you, or the operator | which installation on this machine owns the card — step 1 and step 6 |
 
 The first four are the board's own: you write them and a human reads them.
 **`needs-plan` runs the other way** — the operator writes it, only the board
@@ -348,7 +381,15 @@ reads it, and it is the one label in this table you may never add or remove.
 Removing it is how the operator signs a plan off, so a board that could remove
 it would be approving its own plans.
 
-`resolve-ids.py` creates any of the five that do not already exist on that
+**`foreman:<installation>` is a routing fact and not a verdict.** One machine
+runs several installations, each on its own coding-agent harness and each
+serving these same boards, and this label says which of them the card is. The
+operator applies it to send a card to a particular harness; you apply your own
+in step 6, to the card you are about to take. Never apply a sibling's, and never
+remove one — the label is what stops two installations building one ticket
+twice.
+
+`resolve-ids.py` creates any of the six that do not already exist on that
 board's team, and writes their ids into that board's `ids.env` alongside the
 state ids below. It creates `needs-plan` too, despite the board never writing
 it: a label the operator is expected to apply has to exist before they can apply
@@ -408,7 +449,7 @@ it is on you:
 
 - Linear MCP: **read only.** No state change, no comment, no label, no new issue.
 - `gh`: no `pr merge`, no `pr comment`, no `update-branch`, no pushes.
-- No `claude stop`.
+- No `"$HARNESS_SH" stop`.
 
 Instead, print one line per intended action, in order, prefixed `WOULD:` — the
 card, the action, and the evidence that justifies it. Then stop. Reading
@@ -417,20 +458,38 @@ reasoning is real and only the writes are withheld.
 
 ## How this is invoked
 
+**Everything in this section is Claude Code's, and only a Claude installation
+has it.** `/loop` and the Monitor tool are that harness's own; neither Codex nor
+OpenCode has anything like them, and the adapter carries no verb for either.
+Read `$HARNESS` — `config.sh` exports it — before following any of it:
+
+- **On a `claude` installation**, this section applies as written.
+- **On a `codex` or `opencode` installation, arm nothing and type no `/loop`.**
+  The cadence is the adapter's `--loop-minutes` wrapper instead:
+  `supervise.sh` passes `--loop-minutes $TICK_INTERVAL_MINUTES` to
+  `"$HARNESS_SH" spawn`, and the adapter runs the board prompt, waits that many
+  minutes, and runs it again — one fresh session per pass, because those
+  harnesses return when the turn ends. Nothing is edge-triggered there: a
+  dispatched agent that finishes wakes nothing, and this tick discovers it on
+  its next pass, from `"$HARNESS_SH" list` like every other fact. **Slower, not
+  wrong** — every pass re-derives the whole picture anyway, which is what makes
+  a lost edge survivable on Claude too. The cost is up to one interval of
+  latency on a finished agent.
+
 **The board is woken by events, with a slow heartbeat underneath it.** One
 `/loop /board` with *no interval* — dynamic pacing — works every board on this
 machine, and it arms a persistent Monitor **per board** that fires the moment
 one of that board's dispatched agents comes back:
 
 ```bash
-Monitor(command="FOREMAN_INSTANCE=<board> ~/.foreman/install/skills/board/watch-agents.py",
+Monitor(command="FOREMAN_INSTANCE=<board> ~/.foreman/<installation>/install/skills/board/watch-agents.py",
         persistent=True, description="board agents finishing: <board>")
 ```
 
 One per board, and the board named in the description, because
 `watch-agents.py` reports only the agents of the board in its own environment —
-`foreman/<board>/<TICKET>/<role>-<attempt>` and nothing else. Arm one for every
-board that is not halted. Naming the board in the description is what lets a
+`foreman/<installation>/<board>/<TICKET>/<role>-<attempt>` and nothing else. Arm
+one for every board that is not halted. Naming the board in the description is what lets a
 Monitor left over from a removed board be told from a live one.
 
 `watch-agents.py` emits one line per agent **transition** into a finished phase,
@@ -451,8 +510,8 @@ Some things no agent completion can ever report:
   boards again finds it.
 
 The board is level-triggered by design: every tick re-lists the boards and
-re-derives the whole picture from Linear, `gh` and `claude agents`. That is what
-makes a lost edge survivable, and it is why the fallback exists rather than
+re-derives the whole picture from Linear, `gh` and `"$HARNESS_SH" list`. That is
+what makes a lost edge survivable, and it is why the fallback exists rather than
 being tuned away.
 
 **The heartbeat's pace is picked when you type the `/loop` invocation, not
@@ -476,9 +535,9 @@ make computed a staleness number nothing read.
 ### Restarting after the session dies
 
 The loop and the Monitor live in a Claude session and die with it. **Dispatched
-agents do not** — `claude --bg` parents them to the `claude daemon`, which is
-parented to init, so a build survives the session that started it. Everything
-else the board needs is on disk or in Linear.
+agents do not** — the adapter's `spawn` detaches every agent from the caller, so
+a build survives the session that started it. Everything else the board needs is
+on disk or in Linear.
 
 In a new session, from anywhere:
 
@@ -489,14 +548,19 @@ In a new session, from anywhere:
 That is the whole restart, for every board at once. No particular working
 directory is needed: each slice `cd`s into its own board's `$REPO`, and every
 path this skill names is absolute. The first tick re-lists the boards and
-re-derives every card's position from Linear, `gh` and `claude agents` —
-including agents an earlier session spawned, because the agent registry is
-per-machine, not per-session. Then arm one Monitor per board and set the
+re-derives every card's position from Linear, `gh` and `"$HARNESS_SH" list` —
+including agents an earlier session spawned, because the adapter's registry is
+per-installation, not per-session. Then arm one Monitor per board and set the
 heartbeat as above.
 
 Type it with **no interval**. An interval switches `/loop` into fixed-interval
 cron mode, which polls and never arms the Monitor — that is the polling design
 this replaced.
+
+**On a `codex` or `opencode` installation there is nothing to type**, because
+there is no `/loop` and no session to restart into: `supervise.sh` is the
+restart, and the adapter's `--loop-minutes` wrapper is the loop. See the top of
+this section.
 
 Nothing needs to be cleaned up first. A worktree whose agent is gone is swept by
 step 8, and a card whose agent died is diagnosed by `death` in step 2. **Do not**
@@ -506,17 +570,25 @@ whole point of holding no state.
 To survive session death entirely, use `supervise.sh` plus the cron watchdog
 below instead of a session loop.
 
-Cron runs a watchdog — never a tick — and there is **one entry for the machine**,
-not one per board:
+Cron runs a watchdog — never a tick — and there is **one entry per
+installation**, never one per board:
 
 ```bash
-*/10 * * * * $HOME/.foreman/install/skills/board/supervise.sh >> $HOME/.foreman/supervise.log 2>&1
+*/10 * * * * $HOME/.foreman/<installation>/install/skills/board/supervise.sh >> $HOME/.foreman/<installation>/supervise.log 2>&1
 ```
 
-No `FOREMAN_INSTANCE=` prefix, because there is one tick agent and it walks every
-board itself. A second entry with a board name in it would start a second tick,
-and two ticks dispatch twice into one `HOST_MAX_CONCURRENT`. If you find such a
-line left over from the per-board layout, delete it rather than editing it.
+No `FOREMAN_INSTANCE=` prefix, because an installation has one tick agent and it
+walks every board that installation serves. A second entry with a board name in
+it would start a second tick, and two ticks dispatch twice into one
+`HOST_MAX_CONCURRENT`. If you find such a line left over from the per-board
+layout, delete it rather than editing it.
+
+**Each installation's line names its own clone and its own log.** `supervise.sh`
+lives inside the installation it supervises, so the path is what selects which
+tick this entry keeps alive; a second installation is a second line, pointing at
+its own `install/`. What stays at the machine root `~/.foreman` and is shared by
+all of them is `linear.key` and `mcp.json`, the Linear control plane — nothing
+per installation belongs there.
 
 **The redirect is the fragile part of that line, not the script.** `>>` is
 performed by the shell *before* `supervise.sh` runs, so on a machine where
@@ -524,7 +596,7 @@ performed by the shell *before* `supervise.sh` runs, so on a machine where
 executes. Create the directory once when installing the entry:
 
 ```bash
-mkdir -p "$HOME/.foreman"
+mkdir -p "$HOME/.foreman/<installation>"
 ```
 
 Or drop the redirect and let cron mail the output. What must not happen is a
@@ -539,25 +611,33 @@ misjudged liveness, and misjudging liveness is what watchdogs do under load.
 Inspect or control it by hand:
 
 ```bash
-~/.foreman/install/skills/board/supervise.sh --status   # what it sees, changes nothing
-~/.foreman/install/skills/board/supervise.sh --stop     # stop ticking
-~/.foreman/install/skills/board/supervise.sh --restart  # replace the tick, leave builds alone
-~/.foreman/install/skills/board/supervise.sh            # start or repair now
-claude attach <id>                             # watch a tick live
+~/.foreman/<installation>/install/skills/board/supervise.sh --status   # what it sees, changes nothing
+~/.foreman/<installation>/install/skills/board/supervise.sh --stop     # stop ticking
+~/.foreman/<installation>/install/skills/board/supervise.sh --restart  # replace the tick, leave builds alone
+~/.foreman/<installation>/install/skills/board/supervise.sh            # start or repair now
+claude attach <id>                             # Claude installations only: watch a tick live
 ```
+
+**`claude attach` is Claude's own, and only a Claude installation has it.** The
+adapter carries no attach verb, because neither Codex nor OpenCode has anything
+to attach to. On those, read the tick's own output instead:
+`"$HARNESS_SH" transcript <cwd> <session-id>` prints the file, and the session
+id is the one `"$HARNESS_SH" list` reports for `foreman/<installation>/tick`.
 
 **`--restart` is how you pick up newly pulled install code, or replace a tick
 that looks wrong.** It stops the tick agent and nothing else. Every in-flight
-card keeps building, for the reason given above: its agent is parented to the
-`claude daemon`, not to the tick. The tick holds no state, so the replacement
-re-derives every card's position from Linear, `gh` and `claude agents`. The card
-agents are logged before and after, so you can check that rather than trust it.
+card keeps building, for the reason given above: the adapter detached its agent
+from the tick that spawned it. The tick holds no state, so the replacement
+re-derives every card's position from Linear, `gh` and `"$HARNESS_SH" list`. The
+card agents are logged before and after, so you can check that rather than trust it.
 
-**One is the only correct number of ticks**, and every gesture that changes the
-tick acts on all of them. Several agents can genuinely share the name: a
-`--bg --resume` fork inherits it, and a stop that does not land leaves the old
-one beside the new. `--status` collapses them to the one that is running, so
-counting them is the script's job, not the reader's.
+**One is the only correct number of ticks per installation**, and every gesture
+that changes the tick acts on all of them. `TICK_AGENT_NAME` carries the
+installation, so a sibling installation's tick is a different name and none of
+this reaches it. Several agents can genuinely share one name: a resumed session
+inherits it, and a stop that does not land leaves the old one beside the new.
+`--status` collapses them to the one that is running, so counting them is the
+script's job, not the reader's.
 
 A restart happens in four bounded steps, and every bound is in `config.sh`.
 
@@ -570,21 +650,21 @@ A restart happens in four bounded steps, and every bound is in `config.sh`.
 3. **Stop every live tick and confirm each is gone**, up to
    `TICK_STOP_TIMEOUT_SECONDS`, *before* starting anything. This one is a
    correctness bound, and the stop is re-issued on every poll rather than once.
-   `claude stop` is asynchronous and it can fail; a replacement started beside a
-   tick that never stopped gives the machine two ticks dispatching into one
+   `"$HARNESS_SH" stop` is asynchronous and it can fail; a replacement started
+   beside a tick that never stopped gives the machine two ticks dispatching into one
    `HOST_MAX_CONCURRENT`. When this bound passes, the restart refuses, which
    leaves the machine with the ticks it already had, still ticking.
 4. **Confirm it started**, up to `TICK_START_TIMEOUT_SECONDS`: the registry must
    hold exactly one live tick, and it must not be one of the ids just stopped.
-   `claude --bg` returns as soon as an agent is *spawned*, so "started" is not
-   evidence that a tick exists. Accepting "some live tick that is not the one I
+   The adapter's `spawn` returns as soon as an agent is *spawned*, so "started"
+   is not evidence that a tick exists. Accepting "some live tick that is not the one I
    stopped" instead let a survivor stand in for a replacement that never
    spawned, and reported success for it.
 
 **The card agents are listed before and after, and the report states what it
 saw.** It names any agent whose state changed and says which ids this restart
-issued `claude stop` for, which is always only the tick. It does not tell you a
-missing build finished; nothing in the registry can distinguish that from one
+issued `"$HARNESS_SH" stop` for, which is always only the tick. It does not tell
+you a missing build finished; nothing in the registry can distinguish that from one
 something else stopped, and a reassuring guess is worse than the fact.
 
 **`--stop` and `--restart` refuse rather than exit 0 when they did not act** —
@@ -601,26 +681,29 @@ there marked `foreman.service` failed every ten minutes and fixed nothing, and
 the tick whose stop is slowest to land is the wedged one the watchdog is for.
 
 **A running tick keeps reading the skill it started with.** So
-`git -C ~/.foreman/install pull` changes nothing by itself, and `--restart` is
-what makes the new install take effect.
+`git -C ~/.foreman/<installation>/install pull` changes nothing by itself, and
+`--restart` is what makes the new install take effect.
 
 `systemctl --user restart foreman.service` is **not** this gesture: it re-runs
 the watchdog, which finds a healthy tick and does nothing.
 
-**Why not `withlock.py` around `claude -p "/board"` any more.** That worked
-because `-p` blocks for the whole run, so the lock genuinely covered it. It does
-not survive the move to agents mode: `claude --bg` returns as soon as the agent
-is *spawned*, so the lock would be released a second later while the tick was
+**Why not `withlock.py` around a blocking `claude -p "/board"` any more.** That
+worked because `-p` blocks for the whole run, so the lock genuinely covered it.
+It does not survive the move to background agents: `spawn` returns as soon as
+the agent is spawned, so the lock would be released a second later while the tick was
 still working, and two fires could both pass it and both dispatch. The lock now
 sits inside `supervise.sh`, around a check-and-spawn that really is synchronous.
 
 What replaces it for the tick itself is that there is only ever **one** loop
-agent on the machine, kept that way by name: `TICK_AGENT_NAME` carries no board
-segment, so every board's work runs under the one name and `supervise.sh` keeps
-exactly one of it alive. The per-card agent names still carry their board, which
-is what stops two boards reaping each other's work. If you also type `/board` in
-an interactive session while the loop is running, you are the second tick — for
-every board at once — and nothing stops you, so don't, unless the loop is
+agent per installation, kept that way by name: `TICK_AGENT_NAME` is
+`foreman/<installation>/tick`, so every board this installation serves runs
+under the one name and `supervise.sh` keeps exactly one of it alive. The
+installation segment is what lets a machine run several ticks without any of
+them counting, stopping or restarting another's. The per-card agent names carry
+the installation **and** the board, which is what stops two boards, and two
+installations sharing one repository, reaping each other's work. If you also
+type `/board` in an interactive session while the loop is running, you are the
+second tick — for every board at once — and nothing stops you, so don't, unless the loop is
 stopped or you are running `BOARD_DRY_RUN=1`.
 
 The knobs are in `config.sh`: `TICK_INTERVAL_MINUTES`, `TICK_STALL_MINUTES`,
@@ -706,7 +789,7 @@ about the world prints a verdict on stdout; if there is no JSON, the tick learne
 nothing except that the command was wrong.
 
 ```bash
-B=~/.foreman/install/skills/board
+B=~/.foreman/<installation>/install/skills/board
 $B/waitfor.py reviews --ticket <T> --round <r> --slots a,b --timeout "$WAIT_REVIEW_SECONDS"
 $B/waitfor.py checks  --pr <n>                             --timeout "$WAIT_CHECKS_SECONDS"
 $B/waitfor.py deploy  --sha <merge-sha>                    --timeout "$WAIT_DEPLOY_SECONDS"
@@ -739,9 +822,9 @@ acted on now, not something to keep waiting on.
 ### 0. Preflight
 
 ```bash
-~/.foreman/install/skills/board/reconcile.py --served <board>   # this slice reached this board
-~/.foreman/install/skills/board/preflight.py --quick   # heartbeat tick
-~/.foreman/install/skills/board/preflight.py           # before a dispatch, or when diagnosing
+~/.foreman/<installation>/install/skills/board/reconcile.py --served <board>   # this slice reached this board
+~/.foreman/<installation>/install/skills/board/preflight.py --quick   # heartbeat tick
+~/.foreman/<installation>/install/skills/board/preflight.py           # before a dispatch, or when diagnosing
 ```
 
 **The stamp goes first, and it is unconditional.** It records that this board's
@@ -809,7 +892,7 @@ is not green is the same class of fault as an unfit machine and gets the same
 treatment:
 
 ```bash
-~/.foreman/install/skills/board/reconcile.py --main-ci
+~/.foreman/<installation>/install/skills/board/reconcile.py --main-ci
 ```
 
 It answers with one named `verdict`, because branching on a formatted `gh` line
@@ -924,10 +1007,20 @@ team. For anything in `Todo` you might dispatch, read it again with
 return it. Ask Linear for each card's `priority` as well — step 6 orders `Todo`
 by it. A card whose priority `queue.py` cannot read is skipped and reported, and
 the rest of the board is still ordered. A board where no card ranks is
-reported too, never passed over in silence. Then:
+reported too, never passed over in silence.
+
+**Only this installation's cards, in every one of those four columns.** A card
+is yours when its `foreman:*` label is your own `LABEL_INSTALLATION`, and — when
+`IS_DEFAULT` is non-empty — when it carries no `foreman:*` label at all. Every
+other card belongs to a sibling installation on this machine: do not reconcile
+it, dispatch it, resume it, comment on it or move it. Two installations serving
+one board would otherwise both adopt one ticket, dispatch two agents into two
+worktrees, and both push. Read each card's labels from Linear along with its
+priority; `queue.py` applies exactly this rule to `Todo` in step 6, and steps
+2, 3 and 6 all refer back here rather than restating it. Then:
 
 ```bash
-~/.foreman/install/skills/board/reconcile.py <TICKET> <TICKET> ...
+~/.foreman/<installation>/install/skills/board/reconcile.py <TICKET> <TICKET> ...
 ```
 
 One JSON object per card, joining agents, git, PR, checks, risk and deploy
@@ -959,6 +1052,10 @@ Five fields carry more than their names suggest:
 
 ### 2. Reconcile `Plan` and `In Progress`
 
+Both columns hold only the cards this installation owns — see
+[1. Adopt](#1-adopt). A sibling's card in either of them is none of your
+business, however stalled it looks.
+
 **One step, two agents.** A plan agent draws the graph and posts it to the card;
 a build agent, dispatched fresh from `origin/main` afterwards, executes it. They
 share no session and no worktree. Everything below the column moves — phase
@@ -975,7 +1072,7 @@ Read the card's comments with Linear MCP, write them out as the JSON Linear
 returned, and pipe them in, once per card in `Plan`:
 
 ```bash
-B=~/.foreman/install/skills/board
+B=~/.foreman/<installation>/install/skills/board
 $B/plancomments.py < /tmp/comments.json > /tmp/plan.json
 ```
 
@@ -992,7 +1089,7 @@ is the discriminator and not a timestamp.
     carrying the plan in its prompt:
 
     ```bash
-    B=~/.foreman/install/skills/board
+    B=~/.foreman/<installation>/install/skills/board
     $B/brief.py build --ticket <T> --title "<title>" --body-file <ticket-body> \
       --plan-file /tmp/plan.md > /tmp/b.md
     $B/dispatch.sh --ticket <T> --role build --attempt <n> --prompt-file /tmp/b.md
@@ -1036,7 +1133,7 @@ is the discriminator and not a timestamp.
     the plan being written, and nothing has been built to review.
 
     ```bash
-    B=~/.foreman/install/skills/board
+    B=~/.foreman/<installation>/install/skills/board
     $B/brief.py replan --ticket <T> --comments-file /tmp/plan.json > /tmp/rp.md
     $B/dispatch.sh --ticket <T> --role plan --attempt <n> --resume --prompt-file /tmp/rp.md
     card_log <T> '{"action":"resume","role":"plan","round":"<n>"}'
@@ -1139,11 +1236,11 @@ hour ago is still `alive: true`. Use `phase`.
 
 - **`running`**, `idle_minutes` under `STALL_MINUTES` → leave it. Say nothing.
   Agents legitimately sit quiet while polling CI.
-- **`running`**, `idle_minutes` over `STALL_MINUTES` → stalled. `claude stop <id>`,
+- **`running`**, `idle_minutes` over `STALL_MINUTES` → stalled. `"$HARNESS_SH" stop <id>`,
   count an attempt, treat as failed below.
 - **`turn-complete`** → the turn ended. Look at the PR.
 - **`blocked`** → it is sitting at a prompt nobody will answer, usually a
-  permission it cannot get. `claude stop <id>` and count an attempt; it will
+  permission it cannot get. `"$HARNESS_SH" stop <id>` and count an attempt; it will
   never move on its own.
 - **`terminal`** → already stopped. Look at the PR; if there is none, it failed.
 - **no agent at all**, no PR, no branch → the tick that dispatched it died before
@@ -1243,7 +1340,7 @@ the card's comments with Linear MCP, write them to a file as the JSON Linear
 returned, and pipe them in:
 
 ```bash
-B=~/.foreman/install/skills/board
+B=~/.foreman/<installation>/install/skills/board
 $B/plancomments.py < /tmp/comments.json > /tmp/plan.json
 ```
 
@@ -1289,6 +1386,9 @@ comment, and the one that must bound the work is the board's, because it counts
 work done and a deleted comment cannot reset it.
 
 ### 3. Reconcile `In Review`
+
+This column is read the same way as the last two: only the cards this
+installation owns ([1. Adopt](#1-adopt)).
 
 Each reviewer writes `$BOARD_HOME/cards/<T>/reviews/<round><slot>.json`:
 
@@ -1340,7 +1440,7 @@ deploy runs in**, and there is a written bar.
 command for this, and it fetches before it answers:
 
 ```bash
-B=~/.foreman/install/skills/board
+B=~/.foreman/<installation>/install/skills/board
 $B/evidence.sh main deploy/release.sh | grep -n '\.claude'         # what main says now
 $B/evidence.sh pr <n>                                          # what the diff changes
 $B/evidence.sh pr <n> <path>                                   # what the head says now
@@ -1612,7 +1712,9 @@ commit, and the wait keeps going until its budget runs out.
 This board's free slots = its `MAX_CONCURRENT` − (its cards in `Plan`) − (its
 cards in `In Progress`) − (its cards in `In Review` with a live reviewer).
 Parked-for-the-operator cards do not count. `MAX_CONCURRENT` is that board's own
-number, from its own `board.toml`.
+number, from its own `board.toml`. Count only the cards this installation owns,
+in every one of those columns — a sibling's in-flight card is its own
+installation's slot, not yours ([1. Adopt](#1-adopt)).
 
 **A card in `Plan` holds an agent.** It was dispatched and its plan agent is
 running, reading the code and drawing the graph it will post to the card. That
@@ -1691,20 +1793,29 @@ merged but failed to deploy is building on something that is not there.
 
 `blocks` needs no handling: the gating always happens on the dependent's side.
 
-Order what is left with `queue.py`. One block writes the cards and reads both
-of its streams, so no file outlives the tool call that made it:
+Route and order what is left with `queue.py`. One block writes the cards and
+reads both of its streams, so no file outlives the tool call that made it:
 
 ```bash
-B=~/.foreman/install/skills/board
+B=~/.foreman/<installation>/install/skills/board
 Q="${AGENT_TMP_ROOT:?source config.sh first}/queue"
 mkdir -p "$Q"
+# Through $B, so this block names the install once. Spelled out a second time,
+# an operator who edits <installation> in one line and not the other reads a
+# sibling's roster and calls every card of their own unroutable.
+SIBLINGS="$("$B/../../bin/installation.py" --siblings \
+  | tr '\0' '\n' | awk 'NR % 2' | paste -sd, -)"
+DEFAULT=""
+if [[ -n "$IS_DEFAULT" ]]; then DEFAULT=--default; fi
 cat > "$Q/todo.json" <<'JSON'
-[ ... this board's Todo cards, as the JSON Linear returned ... ]
+[ ... this board's Todo cards, as the JSON Linear returned, labels included ... ]
 JSON
 echo '--- order ---'
-"$B/queue.py" < "$Q/todo.json" 2>/dev/null; echo "--- exit: $? ---"
+"$B/queue.py" --installation "$INSTALLATION" --siblings "$SIBLINGS" $DEFAULT \
+  < "$Q/todo.json" 2>/dev/null; echo "--- exit: $? ---"
 echo '--- skipped ---'
-"$B/queue.py" < "$Q/todo.json" >/dev/null
+"$B/queue.py" --installation "$INSTALLATION" --siblings "$SIBLINGS" $DEFAULT \
+  < "$Q/todo.json" >/dev/null
 ```
 
 **One block, and no `queue.out`.** `queue.py` is a pure filter: same input, same
@@ -1724,6 +1835,21 @@ shell. `AGENT_TMP_ROOT` is neither. `config.sh` derives it from
 behind. It is one file, rewritten by every tick, so nothing accumulates for a
 sweep to reap.
 
+**All three routing arguments are required, and none of them is typed by hand.**
+`$INSTALLATION` and `$IS_DEFAULT` come from `config.sh`; the sibling list comes
+from `installation.py --siblings`, which prints a name and a home per pair of
+NUL-separated fields — hence the `tr`, the `awk` that keeps the names, and the
+`paste` that joins them with commas. A bare `queue.py < todo.json` is refused
+with exit 2: on a machine running more than one installation, ranking every card
+on the board — including a sibling's — is the double dispatch all of this exists
+to prevent, so there is no default that could be safe.
+
+**`queue.py` drops a card a sibling owns and you do nothing further about it.**
+It prints `queue: dropped <T>: …` under `--- skipped ---` and the card never
+reaches stdout. That card is not yours to move, label, count or report beyond
+naming what the line said — the sibling's own tick takes it, and a second tick
+reporting on it is how one card collects two opinions.
+
 **Never read the two sections as one list.** A skip line names a card too, so a
 tick that reads past `--- skipped ---` takes an identifier off stderr and
 dispatches the untriaged card `queue.py` refused. Every line `queue.py` writes
@@ -1741,30 +1867,48 @@ other `Todo` card. Dispatch from the order, and name every skipped card in the
 report. The operator sets the priority in Linear and the card queues on the next
 tick.
 
-Four exit codes, one meaning each: 0 is an order or an empty board, 3 is
-cards in and none ranked, 1 is the tick's own read being wrong, 2 is the tick's
-own invocation being wrong.
+**A card whose `foreman:*` label names no installation on this machine is
+dropped and named on stderr, on every run.** It is never in the order, whatever
+the exit code. `queue.py` writes `queue: dropped <T>: … names no installation on
+this machine` under `--- skipped ---`; name it in the report so the operator
+fixes the label in Linear. Do not move it, do not relabel it, do not count an
+attempt against it — it is not yours until its label says so.
+
+Four exit codes, one meaning each: 0 is an order, an empty board, or a board
+that is entirely a sibling's; 3 is nothing ranked; 1 is the tick's own read
+being wrong; 2 is the tick's own invocation being wrong.
 
 - **A skipped card is not a failed card.** Do not move it, do not label it, do
   not count a build attempt against it. Nothing about the card's work failed.
-- **Exit 3 means cards came in and not one of them ranked.** stdout is empty
-  and every skipped card is named on stderr. Dispatch nothing on this board's
-  slice, and name every skipped card in the report so the operator sets the
-  priority in Linear. Say it plainly: a stalled board and an idle one read the
-  same from outside, and only one of them needs the operator. Nothing about the
-  work failed, so count no build attempt against those cards and move none of
-  them to `Needs Human`.
+- **Exit 3 means nothing at all was ranked**, while at least one card was this
+  installation's problem: an owned card whose priority could not be read, or a
+  card whose label names no installation on this machine. stdout is empty and
+  every skipped and dropped card is named on stderr. Dispatch nothing on this
+  board's slice, and name each one in the report so the operator sets the
+  priority, or fixes the label, in Linear. Say it plainly: a stalled board and
+  an idle one read the same from outside, and only one of them needs the
+  operator. Nothing about the work failed, so count no build attempt against
+  those cards and move none of them to `Needs Human`. A board whose cards all
+  belong to a sibling exits 0, not 3 — that board is idle here, not stalled.
+- **Exit 3 is not how an unroutable card is reported.** One rankable card
+  beside one card whose label names no sibling exits **0**, prints the order on
+  stdout and names the unroutable card on stderr. Exit 3 promises an empty
+  stdout, so it cannot carry an order and a complaint at once — and an order
+  the tick may not act on is worse than no order. Dispatch from that order, and
+  still report the dropped card. Reading only the exit code is how that card
+  goes unmentioned for weeks.
 - **Exit 1 means there is no order at all**, and it means the tick's own read is
   wrong: malformed JSON, an item that is not an object, an identifier the queue
   cannot read, or one card listed twice. Dispatch nothing on this board's slice,
   report the refusal with its message, end the slice and take the next board.
   Never fall back to picking a card by eye — that is the failure `queue.py`
   exists to prevent.
-- **Exit 2 means the tick called `queue.py` wrong**, so nothing about the board
-  is known. Dispatch nothing on this board's slice, end the slice, and report
-  the command you ran. Exit 2 is a bug in the tick and never a fact about the
-  cards: report it as a foreman defect, not as a card the operator must triage
-  and not as the refused batch exit 1 describes.
+- **Exit 2 means the tick called `queue.py` wrong** — a missing routing flag,
+  an `--installation` that is not among `--siblings`, or an extra argument — so
+  nothing about the board is known. Dispatch nothing on this board's slice, end
+  the slice, and report the command you ran. Exit 2 is a bug in the tick and
+  never a fact about the cards: report it as a foreman defect, not as a card the
+  operator must triage and not as the refused batch exit 1 describes.
 
 **Read the message, never the number alone.** The four codes above are
 `queue.py`'s. The machine has its own, and they overlap: a redirect that cannot
@@ -1784,14 +1928,35 @@ ends and the next board takes its turn. A board with six free slots fills them
 over six passes rather than six spawns in a row, and every other board is served
 in between.
 
-**Move the card to `Plan` first, then spawn.** In that order — the card is the
-lock, and a spawn that precedes the move gets dispatched twice.
+**Label the card, then move it to `Plan`, then spawn.** In that order, and the
+label comes first for its own reason.
+
+**Take ownership durably before the card leaves `Todo`.** If the card carries no
+`foreman:*` label, add this installation's `LABEL_INSTALLATION` over Linear MCP —
+by id from `ids.env`, the way every label is matched and written — and only then
+move it. A card that already carries yours needs nothing; a card carrying a
+sibling's never got this far, because `queue.py` dropped it.
+
+Why the write, when being the default was already enough to take the card: the
+default is a property of the machine's configuration and the card is going to be
+in flight for hours. An operator who makes a sibling the default while this card
+builds would otherwise hand it to that sibling mid-build, which then adopts a
+worktree, a branch and a pull request it never dispatched. Writing the label
+freezes the answer at the moment of dispatch, where the evidence for it is.
+
+A tick that dies between the label and the move leaves a labelled card in
+`Todo`. That is the safe half to lose: the next pass of **this** installation
+picks it up, because the label already says the card is ours, and no sibling
+will touch it in the meantime.
+
+Then move the card, and only then spawn — the card is the lock, and a spawn that
+precedes the move gets dispatched twice.
 
 Never hand-write a prompt. `brief.py` renders every one of them, and it is the
 only thing that quotes agent-written text correctly:
 
 ```bash
-B=~/.foreman/install/skills/board
+B=~/.foreman/<installation>/install/skills/board
 $B/plancomments.py < /tmp/comments.json > /tmp/plan.json
 FOOTER="$(python3 -c 'import json,sys;print(json.load(sys.stdin)["footer"])' < /tmp/plan.json)"
 $B/brief.py plan --ticket <T> --title "<title>" --body-file <ticket-body> \
@@ -1855,15 +2020,17 @@ Never write into `Todo`.
 ### 8. Sweep
 
 ```bash
-~/.foreman/install/skills/board/sweep.sh <merged-or-abandoned tickets...>
-~/.foreman/install/skills/board/sweep.sh --orphans
+~/.foreman/<installation>/install/skills/board/sweep.sh <merged-or-abandoned tickets...>
+~/.foreman/<installation>/install/skills/board/sweep.sh --orphans
 ```
 
 **Inside the slice, one board at a time.** `sweep.sh` reads `FOREMAN_INSTANCE`
-and touches only that board's worktrees, branches and evidence refs. That
-scoping is what lets two boards share one repository without reaping each
-other's live work, so never sweep for a board other than the one whose slice you
-are in, and never with `FOREMAN_INSTANCE` left over from the previous board.
+and touches only this installation's worktrees, branches and evidence refs for
+that board — every one of those names carries the installation and the board.
+That scoping is what lets two boards, and two installations, share one
+repository without reaping each other's live work, so never sweep for a board
+other than the one whose slice you are in, and never with `FOREMAN_INSTANCE`
+left over from the previous board.
 
 `--orphans` protects any worktree whose agent is not positively `stopped`, and
 refuses to run at all if it cannot read the agent list — "no agents are alive"
@@ -1874,12 +2041,14 @@ costs, so the tie goes to leaving it.
 
 **Ticket mode also stops and forgets the card's sessions.** A background agent
 idles at `done` when its turn ends, and nothing else ever stops it. So a sweep
-for a terminal card first asks `claude stop` of every agent named
-`foreman/<instance>/<T>/…` that is `done` or `blocked` and waits up to
-`AGENT_STOP_TIMEOUT_SECONDS` for the registry to agree. Then it removes every
-stopped session's record under `~/.claude/jobs/` — what `claude agents --all`
-and the operator's session list keep showing a stopped agent from — and the
-transcript directory of each one that ran in the card's own worktree. A
+for a terminal card first asks `"$HARNESS_SH" stop` of every agent named
+`foreman/<installation>/<board>/<T>/…` that is `done` or `blocked`, and waits up
+to `AGENT_STOP_TIMEOUT_SECONDS` for the adapter's `list` to agree. On a Claude
+installation it then removes every stopped session's record under
+`~/.claude/jobs/` — what `claude agents --all` and the operator's session list
+keep showing a stopped agent from — and the transcript directory of each one
+that ran in the card's own worktree. On codex and opencode the records are the
+adapter's own, and `"$HARNESS_SH" reap` ages them out on the orphan pass. A
 `working` agent is never stopped, and its session is left and named on stderr
 the same way its worktree is: the judgment that the card is terminal may be
 stale. `--orphans` never stops or forgets a session, because a card that is
@@ -1888,15 +2057,17 @@ not terminal may still be diagnosed from its transcript (`reconcile.py` →
 count, before `released`. A stop that does not land in time leaves the session
 in place and makes the sweep exit non-zero, so report it on the tick.
 
-Either form also reaps `refs/board/evidence/<pid>` refs left by an `evidence.sh`
-that was killed between its fetch and its cleanup — a stopped tick, or one whose
-budget expired mid-read. It traps what it can, which leaves SIGKILL; nothing else
-touches that namespace, and a leaked ref pins every object its fetch brought with
-it. A ref whose pid is still alive is a read in flight and is left alone.
+Either form also reaps `refs/foreman/<installation>/<board>/evidence/<pid>`
+refs left by an `evidence.sh` that was killed between its fetch and its
+cleanup — a stopped tick, or one whose budget expired mid-read. It traps what it
+can, which leaves SIGKILL; nothing else touches that namespace, and a leaked ref
+pins every object its fetch brought with it. A ref whose pid is still alive is a
+read in flight and is left alone.
 
 That reap is the last defence there, so it is not allowed to fail quietly: a
-sweep that cannot list `refs/board/evidence/*`, or cannot delete a ref it found,
-names the problem on stderr and **exits non-zero** — the same distinction
+sweep that cannot list its own `refs/foreman/<installation>/<board>/evidence/*`,
+or cannot delete a ref it found, names the problem on stderr and
+**exits non-zero** — the same distinction
 `--orphans` makes about the agent list. The rest of the sweep still ran; what
 did not happen is the reap, so report the failure on the tick rather than
 reading the exit code as "the worktrees were not swept".
@@ -1917,9 +2088,14 @@ A tick where no board changed anything says so in one line and stops.
 
 ## Rules
 
-- **One tick, every board, round-robin.** One slice each, in turn: a slice ends
-  when the board has moved one card forward or has nothing immediately
-  actionable. Never work one board to completion — `TICK_BUDGET_MINUTES` and
+- **Only this installation's cards.** In `Todo`, `Plan`, `In Progress` and
+  `In Review` alike, a card is yours when its `foreman:*` label is your own, or
+  when it carries none and `IS_DEFAULT` is set. `queue.py` enforces it for
+  `Todo`; everywhere else it is yours to hold ([1. Adopt](#1-adopt)). Two
+  installations adopting one ticket dispatch two agents that both push.
+- **One tick per installation, every board, round-robin.** One slice each, in
+  turn: a slice ends when the board has moved one card forward or has nothing
+  immediately actionable. Never work one board to completion — `TICK_BUDGET_MINUTES` and
   `TICK_MAX_PASSES` bound the whole tick, and a starved board reports exactly
   what an idle board reports.
 - **A board's settings end with its slice.** `export FOREMAN_INSTANCE=<board>`,
@@ -1932,10 +2108,12 @@ A tick where no board changed anything says so in one line and stops.
   board whole and stops nothing else. Say which boards were skipped.
 - **`HOST_MAX_CONCURRENT` is yours to hold.** One tick sees every board, so
   check `reconcile.py --host-slots` against it in the slice, immediately before
-  each spawn. A board's own `MAX_CONCURRENT` still caps that board, and both
-  must allow the dispatch.
+  each spawn. It is one number for the whole machine and counts every
+  installation's cards, not only this installation's. A board's own
+  `MAX_CONCURRENT` still caps that board, and both must allow the dispatch.
 - **The lock is the card, and every fresh dispatch takes it by moving the card
-  first.** There are two: `Todo` → `Plan`, then spawn the plan agent (step 6);
+  first.** There are two: `Todo` → `Plan`, after applying this installation's
+  label to a card that carries none, then spawn the plan agent (step 6);
   `Plan` → `In Progress`, then spawn the build agent (step 2). That order both
   times, because a spawn that precedes the move leaves the card exactly where
   the next tick will find it and dispatch it a second time. A resume takes no

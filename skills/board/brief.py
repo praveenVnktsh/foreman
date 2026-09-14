@@ -42,7 +42,7 @@ MAX_BLOCK_CHARS = 20000
 
 # The plan checker belongs to THIS installation, not to the target repository
 # the agent is standing in, so the prompt names an absolute path derived from
-# where this file sits — the same way _load_target_config() finds config.sh. A
+# where this file sits — the same way _load_config() finds config.sh. A
 # bare `bin/check-plan-graph.py` resolves inside the target's worktree, where
 # it exists only when the target happens to be this repository.
 CHECK_PLAN_GRAPH = os.path.join(
@@ -146,8 +146,8 @@ def _budget(cfg: dict[str, str], mode: str) -> str:
     return budget
 
 
-def _load_target_config(ticket: str) -> dict[str, str]:
-    """Read the target's contract, sourced the way reconcile.py sources it.
+def _load_config(ticket: str) -> dict[str, str]:
+    """Read this board's settings from config.sh, the way reconcile.py does.
 
     One process, one source of truth, rather than a second copy of what
     board.toml means duplicated here as Python defaults — that duplication is
@@ -160,7 +160,7 @@ def _load_target_config(ticket: str) -> dict[str, str]:
     agent to create a branch (`board/{ticket}`) that nothing else looked for,
     after every other branch name moved to `foreman/<instance>/<ticket>`.
     """
-    keys = ("TEST_COMMAND", "REQUIRED_DOCS", "MAX_LABEL_CHARS")
+    keys = ("TEST_COMMAND", "REQUIRED_DOCS", "MAX_LABEL_CHARS", "HARNESS")
     script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.sh")
     printf = (
         'printf "%s\\0" ' + " ".join(f'"${k}"' for k in keys) + ' "$(branch_name "$1")"'
@@ -253,8 +253,39 @@ def plan(args) -> str:
             "Paste its `footer` field verbatim."
         )
 
-    cfg = _load_target_config(args.ticket)
+    cfg = _load_config(args.ticket)
     max_label_chars = _budget(cfg, "plan")
+
+    # HARNESS comes through config.sh with every other value this file reads,
+    # never from os.environ. graphplan's per-node model tiers and its Workflow
+    # tool are both Claude-specific; on any other harness a build agent has no
+    # Workflow tool to invoke, so the graph gets executed one node at a time in
+    # dependency order rather than as tiered parallel work -- and the plan has
+    # to say so.
+    #
+    # Read from the environment, that note appeared only when the caller
+    # happened to have sourced config.sh in the shell that ran brief.py. A
+    # `brief.py plan` run any other way -- by hand, or from a script that
+    # sources nothing -- printed the Claude-tier plan prompt on a codex
+    # installation and said nothing at all. config.sh always exports HARNESS,
+    # because bin/installation.py always emits it, so there is no "unset" case
+    # left to fall back from.
+    harness = cfg["HARNESS"]
+    if not harness:
+        # Unreachable through config.sh, which refuses a harness with no
+        # executable adapter under its own root. Said out loud anyway: the
+        # failure this replaces was a missing paragraph nobody could see, and
+        # an empty harness would silently bring it back.
+        _refuse("plan: config.sh resolved an empty HARNESS; it names the adapter this "
+                "installation dispatches with and cannot be blank")
+    harness_note = ""
+    if harness != "claude":
+        harness_note = f"""
+
+This installation's harness is `{harness}`, not `claude`. There is no \
+Workflow tool there, so the model tiers below are advisory only: every build \
+node runs the installation's one build model, and the graph is executed in \
+dependency order by hand, one node at a time."""
 
     return f"""\
 You are planning Linear ticket {args.ticket}. You draw the plan and nothing else.
@@ -277,7 +308,8 @@ written before reading is a guess with a diagram attached.
 **Invoke the `graphplan` skill as a skill, not from memory.** Invoking it is \
 what authorises the Workflow tool for the build agent that executes your graph \
 later, so a graph drawn from memory leaves that whole build running one node \
-at a time. It also owns the budget every label you write is judged against.
+at a time. It also owns the budget every label you write is judged against.\
+{harness_note}
 
 Draw ONE mermaid graph. No prose above it, none below it. Then check it, and \
 fix what it refuses:
@@ -320,7 +352,7 @@ def build(args) -> str:
         # above, and plans again on the model chosen for executing plans.
         _refuse(f"build: {args.plan_file} is empty; there is no plan to execute")
 
-    cfg = _load_target_config(args.ticket)
+    cfg = _load_config(args.ticket)
     standing = STANDING_TEMPLATE.format(
         docs_sentence=_docs_sentence(cfg["REQUIRED_DOCS"]),
         test_command=cfg["TEST_COMMAND"],
@@ -488,7 +520,7 @@ def replan(args) -> str:
     # build agent executes. Without it the reviser's only budget is the
     # installed skills/graphplan/SKILL.md, which states this file's default and
     # not the target's own number.
-    max_label_chars = _budget(_load_target_config(args.ticket), "replan")
+    max_label_chars = _budget(_load_config(args.ticket), "replan")
 
     return f"""\
 The operator has commented on the plan you posted for {args.ticket}. The card is \

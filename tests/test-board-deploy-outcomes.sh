@@ -47,8 +47,14 @@ fixture_board_toml "$fixture_repo"
 py_home="$work_dir/py-home"
 fixture_add_instance "$py_home" demo "$fixture_repo"
 
+# FOREMAN_HOME is named explicitly here and in every run below. config.sh no
+# longer derives it from $HOME: it asks bin/installation.py, which reads the
+# home as the parent of the install root -- this repository's own parent, whose
+# boards.toml is not a fixture's. An explicit home is what that derivation
+# yields to, and it is how this file stays pointed at its temporary directory.
 echo "==> what the board concludes from gh, without asking gh"
-HOME="$py_home" FOREMAN_INSTANCE=demo python3 "$here/lib/board-outcome-cases.py" \
+HOME="$py_home" FOREMAN_HOME="$py_home/.foreman" FOREMAN_INSTANCE=demo \
+  python3 "$here/lib/board-outcome-cases.py" \
   || fail "board-outcome-cases.py"
 
 # --- waitfor's exit codes at the command line --------------------------------
@@ -59,7 +65,9 @@ HOME="$py_home" FOREMAN_INSTANCE=demo python3 "$here/lib/board-outcome-cases.py"
 # a verdict that was never printed, on nothing worse than a typo.
 
 waitfor="$repo_root/skills/board/waitfor.py"
-ask_waitfor() { HOME="$py_home" FOREMAN_INSTANCE=demo "$waitfor" "$@"; }
+ask_waitfor() {
+  HOME="$py_home" FOREMAN_HOME="$py_home/.foreman" FOREMAN_INSTANCE=demo "$waitfor" "$@"
+}
 
 echo "==> an empty --sha is a bad invocation, not a settled outcome"
 status=0
@@ -110,7 +118,8 @@ stub_claude() {
 supervise() {
   # DRY RUN so a misjudgement prints instead of spawning a real agent, and a
   # BOARD_HOME of its own so a lock file never lands in the real one.
-  HOME="$1" FOREMAN_INSTANCE=demo BOARD_DRY_RUN=1 BOARD_HOME="$work_dir/board-home" \
+  HOME="$1" FOREMAN_HOME="$1/.foreman" FOREMAN_INSTANCE=demo BOARD_DRY_RUN=1 \
+    BOARD_HOME="$work_dir/board-home" \
     "$repo_root/skills/board/supervise.sh" 2>&1 || true
 }
 

@@ -1,17 +1,18 @@
 #!/usr/bin/env bash
-# Make this installation's skills resolvable to every Claude Code session.
+# Make this installation's skills resolvable to its harness.
 #
 #   install-skills.sh --dry-run   say what would change, change nothing
-#   install-skills.sh             link them into ~/.claude/skills/
+#   install-skills.sh             link them into the harness's skill directory
 #   install-skills.sh --uninstall remove only the links this script made
 #   install-skills.sh --force     replace a colliding skill, backing it up first
 #
-# WHY THIS EXISTS. A tick agent runs `/board`, and Claude Code resolves a skill
-# by name from ~/.claude/skills/ -- never from wherever this repository happens
-# to be installed. Without this step the loop looks installed and is not: the
-# watchdog starts a tick, the tick asks for `/board`, and it either finds
-# nothing or finds SOMEBODY ELSE'S skill of the same name and runs that instead.
-# The second is worse and is not hypothetical: on 2026-09-01 a foreman tick
+# WHY THIS EXISTS. A tick agent runs the board skill through whichever harness
+# this installation declares, and each harness resolves skills by name from its
+# own directory -- never from wherever this repository happens to be installed.
+# Without this step the loop looks installed and is not: the watchdog starts a
+# tick, the tick asks for the board skill, and the harness either finds nothing
+# or finds SOMEBODY ELSE'S skill of the same name and runs that instead. The
+# second is worse and is not hypothetical: on 2026-09-01 a foreman tick
 # resolved `/board` to a different project's board skill left at that path and
 # ran its loop against a live board, as a second dispatcher.
 #
@@ -36,7 +37,32 @@ esac
 HERE="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 INSTALL_ROOT="$(dirname -- "$HERE")"
 SRC="$INSTALL_ROOT/skills"
-DEST="${CLAUDE_SKILLS_DIR:-$HOME/.claude/skills}"
+
+# WHICH HARNESS, AND WHICH HOME. bin/installation.py is the one place that
+# derives both from where this clone sits, so a second derivation here would
+# be a copy that drifts from it -- exactly the failure bin/install.sh's own
+# comment names. bin/load-pairs.sh is the shared reader of its NUL-separated
+# pairs and its comment carries the bash 3.2 temp-file rule. This is that
+# reader, not a source of skills/board/config.sh: config.sh also picks a
+# board, so it requires FOREMAN_INSTANCE, which installing skills has no
+# reason to know.
+. "$INSTALL_ROOT/bin/load-pairs.sh" || die "cannot read $INSTALL_ROOT/bin/load-pairs.sh"
+
+# This installation's own declaration, never the operator's shell: the reader
+# lets the environment win, and a stray HARNESS would link these skills into a
+# harness this clone does not run. FOREMAN_HOME is left alone -- installation.py
+# reads it itself to pick the home it answers for, which is how a test points
+# this at a temporary directory.
+unset HARNESS INSTALLATION IS_DEFAULT FOREMAN_ROOT
+_foreman_load_pairs "this installation's declaration" "$INSTALL_ROOT/bin/installation.py" \
+  || die "installation.py could not read this installation's declaration"
+[[ -n "$HARNESS" ]] || die "installation.py did not report a harness"
+[[ -n "$FOREMAN_HOME" ]] || die "installation.py did not report a home"
+
+HARNESS_SH="$INSTALL_ROOT/skills/board/harness/$HARNESS.sh"
+[[ -x "$HARNESS_SH" ]] || die "no adapter at $HARNESS_SH for harness '$HARNESS'"
+DEST="$("$HARNESS_SH" skills-dir)"
+[[ -n "$DEST" ]] || die "$HARNESS_SH skills-dir printed nothing"
 
 # WHERE THE MANIFEST LIVES, AND WHY IT IS NOT THE OBVIOUS PLACE. The manifest
 # describes an INSTALLATION, so it belongs with this installation's own state.
@@ -48,7 +74,7 @@ DEST="${CLAUDE_SKILLS_DIR:-$HOME/.claude/skills}"
 #     repository whose whole job is to be a clean pin. Found on 2026-09-08:
 #     `~/.claude/skills/board` was a link to the clone and `.installed.json`
 #     was sitting in the clone's own skills/board directory.
-#   * Not `$DEST/` either. That is Claude Code's directory, shared with every
+#   * Not `$DEST/` either. That is the harness's directory, shared with every
 #     other project that installs a skill of its own. One manifest filename
 #     there means two installers taking turns overwriting each other's record.
 #     That is how the 2026-09-08 manifest came to list `question.py`, a file
@@ -57,7 +83,6 @@ DEST="${CLAUDE_SKILLS_DIR:-$HOME/.claude/skills}"
 #
 # $FOREMAN_HOME is this installation's state root -- the same one bin/boardctl
 # and bin/install-service.sh use -- and it is not shared with anyone.
-FOREMAN_HOME="${FOREMAN_HOME:-$HOME/.foreman}"
 MANIFEST="$FOREMAN_HOME/installed-skills"
 
 [[ -d "$SRC" ]] || die "no skills directory at $SRC"

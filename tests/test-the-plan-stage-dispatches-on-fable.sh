@@ -58,12 +58,14 @@ unset PLAN_MODEL
 
 # The agent name is what `waitfor.py`, `watch-agents.py` and `reconcile.py`
 # match a dispatched agent by, and a stage with no name of its own is a stage
-# no board can wait for.
+# no board can wait for. It starts at the INSTALLATION: the fixture's home
+# declares no installation.toml, so bin/installation.py reads it as the lone
+# Claude installation and the segment is `claude`.
 dispatch_fixture_run --ticket PRA-4 --role plan --attempt 2
-if grep -qx 'foreman/demo/PRA-4/plan-2' "$DISPATCH_ARGV_LOG"; then
-  ok "a plan agent is named foreman/<board>/<ticket>/plan-<attempt>"
+if grep -qx 'foreman/claude/demo/PRA-4/plan-2' "$DISPATCH_ARGV_LOG"; then
+  ok "a plan agent is named foreman/<installation>/<board>/<ticket>/plan-<attempt>"
 else
-  bad "a plan agent is named foreman/<board>/<ticket>/plan-<attempt>: got $(grep -A1 -x -- --name "$DISPATCH_ARGV_LOG" | tail -1)"
+  bad "a plan agent is named foreman/<installation>/<board>/<ticket>/plan-<attempt>: got $(grep -A1 -x -- --name "$DISPATCH_ARGV_LOG" | tail -1)"
 fi
 
 [[ "$fail" -eq 0 ]] && printf 'PASS: the plan stage is dispatched on fable\n'

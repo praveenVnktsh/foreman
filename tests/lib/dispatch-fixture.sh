@@ -91,11 +91,28 @@ dispatch_fixture_setup() {
   mkdir -p "$shim_root/bin" "$shim_root/skills/board"
   ln -s "$repo_root/bin/contract.py" "$shim_root/bin/contract.py"
   ln -s "$repo_root/bin/boards.py" "$shim_root/bin/boards.py"
+  # config.sh reads this installation's declaration before anything else, and
+  # reads it from THIS root's bin/ -- so a shim without it refuses at the first
+  # line of config.sh, in every test that drives a dispatch.
+  ln -s "$repo_root/bin/installation.py" "$shim_root/bin/installation.py"
+  # config.sh sources its pair reader from THIS root's bin/ on its first line.
+  ln -s "$repo_root/bin/load-pairs.sh" "$shim_root/bin/load-pairs.sh"
   ln -s "$repo_root/bin/tmp-dir.sh" "$shim_root/bin/tmp-dir.sh"
   local shim="$shim_root/skills/board"
   ln -s "$board_dir/config.sh" "$shim/config.sh"
   ln -s "$board_dir/dispatch.sh" "$shim/dispatch.sh"
   ln -s "$board_dir/withlock.py" "$shim/withlock.py"
+  # dispatch.sh refuses when it cannot count the machine's slots, and the
+  # count is reconcile.py's. A shim without it used to switch the ceiling gate
+  # off in silence; now it dies at the gate before any spawn, which every test
+  # on this fixture reads as "never reached claude --bg".
+  ln -s "$board_dir/reconcile.py" "$shim/reconcile.py"
+  # The WHOLE directory, as one symlink. config.sh checks that
+  # skills/board/harness/$HARNESS.sh under this root is executable and refuses
+  # there rather than at the spawn, so the adapter this installation selects has
+  # to exist here -- and linking the directory means an adapter added for a
+  # fourth harness needs no second edit in this fixture.
+  ln -s "$board_dir/harness" "$shim/harness"
   cat > "$shim/preflight.py" <<'PY'
 #!/usr/bin/env python3
 import sys
@@ -124,6 +141,7 @@ PY
 
   DISPATCH_ARGV_LOG="$work_dir/argv.log"
   DISPATCH_SUBAGENT_MODEL_LOG="$work_dir/subagent-model.log"
+  _DISPATCH_AGENT_NAME_LOG="$work_dir/agent-name.log"
   DISPATCH_RUN_LOG="$work_dir/dispatch.log"
   _DISPATCH_PROBE_ERR="$work_dir/probe.err"
   _DISPATCH_STUB_BIN="$work_dir/bin"
@@ -135,16 +153,36 @@ PY
   # The environment the agent is spawned with is logged too, because "no
   # fallback pushes a build subagent to fable" is a claim about an exported
   # variable and not about argv.
+  #
+  # `agents` ANSWERS FOR THE NAME IT WAS JUST GIVEN. The adapter spawns with
+  # `--bg` and then asks the registry for the session id of that name, so a stub
+  # that always printed `[]` made every spawn die at "it never registered" --
+  # after the argv this fixture captures, which is why the old one got away with
+  # it. It no longer does: dispatch.sh treats the adapter's non-zero exit as its
+  # own, so the dispatch would now die before writing the card's spawn entry.
+  # The `--name` is recorded and only ever overwritten by a later `--name`, so a
+  # resume (`--bg --resume`, which carries none) still finds the live agent.
   cat > "$_DISPATCH_STUB_BIN/claude" <<STUB
 #!/usr/bin/env bash
 if [[ "\$1" == "--bg" ]]; then
   printf '%s\n' "\$@" >"$DISPATCH_ARGV_LOG"
   printf '%s\n' "\${CLAUDE_CODE_SUBAGENT_MODEL-<unset>}" >"$DISPATCH_SUBAGENT_MODEL_LOG"
+  while [[ \$# -gt 0 ]]; do
+    if [[ "\$1" == "--name" && \$# -ge 2 ]]; then printf '%s\n' "\$2" >"$_DISPATCH_AGENT_NAME_LOG"; fi
+    shift
+  done
   echo "stub-session-\$\$"
   exit 0
 fi
 if [[ "\$1" == "agents" ]]; then
-  echo '[]'
+  name=""
+  if [[ -s "$_DISPATCH_AGENT_NAME_LOG" ]]; then name="\$(cat "$_DISPATCH_AGENT_NAME_LOG")"; fi
+  if [[ -z "\$name" ]]; then
+    echo '[]'
+    exit 0
+  fi
+  printf '[{"name":"%s","id":"stub-agent","sessionId":"stub-session","pid":%s,"state":"working","startedAt":1,"cwd":"%s","status":"running"}]\n' \\
+    "\$name" "\$\$" "\$PWD"
   exit 0
 fi
 exit 0
@@ -180,9 +218,9 @@ dispatch_fixture_show_run_log() {
 
 # dispatch_fixture_run <dispatch.sh args...>
 # Runs one dispatch and leaves its `claude --bg` argv in $DISPATCH_ARGV_LOG.
-# Failure is swallowed on purpose: the stubbed `claude agents` reports no
-# agents, so every dispatch dies at "never registered" AFTER the spawn this
-# fixture exists to capture.
+# Failure is swallowed on purpose: a dispatch has work after the spawn that no
+# caller of this fixture asserts on, and a test that fails should fail on its
+# own assertion rather than on this helper's exit status.
 #
 # The dispatch is given an ALLOWLIST of an environment -- `env -i` plus the
 # names below -- and not the caller's. Nearly every value in config.sh is
@@ -195,8 +233,17 @@ dispatch_fixture_show_run_log() {
 # allowlist closes the class, and makes each remaining hole a decision. It
 # stays an allowlist: config.sh honours the environment for every key
 # bin/boards.py and bin/contract.py emit as well as the ones written in the
-# file, so the knob class cannot be listed, while this fixture's own three
+# file, so the knob class cannot be listed, while this fixture's own four
 # base names can.
+#
+# FOREMAN_HOME is now one of those four, SET BY THIS FIXTURE and still blocked
+# from the operator's shell. config.sh no longer defaults it to $HOME/.foreman:
+# it asks bin/installation.py, which derives the home as the parent of the
+# install root. The install root here is the shim under $work_dir, so the
+# derived home would be $work_dir -- which holds no boards.toml, and every
+# dispatch would die at the board load. An explicit FOREMAN_HOME is what that
+# derivation is designed to yield to, and it is how the whole suite points at a
+# temporary directory instead of the operator's own installation.
 #
 # The dispatch's own output goes to $DISPATCH_RUN_LOG rather than /dev/null.
 # A dispatch that dies before the spawn tells a test only "never reached
@@ -205,6 +252,9 @@ dispatch_fixture_show_run_log() {
 dispatch_fixture_run() {
   : >"$DISPATCH_ARGV_LOG"
   : >"$DISPATCH_SUBAGENT_MODEL_LOG"
+  # Truncated with the other two. A name left over from the previous dispatch
+  # would let the stubbed registry answer for an agent this one never spawned.
+  : >"$_DISPATCH_AGENT_NAME_LOG"
   # The one hole: a model a test set deliberately after dispatch_fixture_setup
   # cleared the operator's. `+` and not `:-`, because `PLAN_MODEL=` empty is
   # itself a value under test and must reach the CLI as an empty `--model`.
@@ -222,9 +272,17 @@ dispatch_fixture_run() {
   done
   # bash 3.2 + `set -u`: "${arr[@]}" on an EMPTY array is an unbound-variable
   # error, not an empty expansion.
+  #
+  # The ceilings are raised out of the way. This fixture's board declares
+  # MAX_CONCURRENT 1 and its callers dispatch several cards in a row to read
+  # their argv, so with the gate real (reconcile.py linked above) the second
+  # dispatch would refuse at the ceiling. The gate itself is
+  # test-dispatch-holds-the-cap.sh's claim, on its own fixture.
   env -i \
     HOME="$DISPATCH_HOME" \
     FOREMAN_INSTANCE=demo \
+    FOREMAN_HOME="$DISPATCH_HOME/.foreman" \
+    MAX_CONCURRENT=9 HOST_MAX_CONCURRENT=9 \
     PATH="$_DISPATCH_STUB_BIN:$PATH" \
     ${toolchain[@]+"${toolchain[@]}"} \
     ${models[@]+"${models[@]}"} \
@@ -276,13 +334,13 @@ _dispatch_ensure_toolchain() {
 _dispatch_derive_toolchain() {
   local candidates="" name program kept head tail trial
 
-  # Every exported name of the caller's shell, except the three this fixture
+  # Every exported name of the caller's shell, except the four this fixture
   # sets itself and the model knobs. Excluding the knobs is what stops one
   # entering the allowlist through the toolchain half; excluding the base
-  # three keeps the probe from proving that HOME needs HOME.
+  # four keeps the probe from proving that HOME needs HOME.
   for name in $(compgen -e || true); do
     [[ "$name" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || continue
-    case " HOME FOREMAN_INSTANCE PATH $_DISPATCH_MODEL_KNOBS " in
+    case " HOME FOREMAN_INSTANCE FOREMAN_HOME PATH $_DISPATCH_MODEL_KNOBS " in
       *" $name "*) continue ;;
     esac
     candidates="${candidates:+$candidates }$name"
@@ -301,8 +359,9 @@ _dispatch_derive_toolchain() {
       _dispatch_set_probe_argv "$program"
       printf 'dispatch-fixture: %s does not work under the environment this fixture hands a dispatch.\n' \
         "$program" >&2
-      printf '  probe: env -i HOME=%s FOREMAN_INSTANCE=demo PATH=%s <every exported name> %s\n' \
-        "$DISPATCH_HOME" "$_DISPATCH_STUB_BIN:$PATH" "${_DISPATCH_PROBE_ARGV[*]}" >&2
+      printf '  probe: env -i HOME=%s FOREMAN_INSTANCE=demo FOREMAN_HOME=%s PATH=%s <every exported name> %s\n' \
+        "$DISPATCH_HOME" "$DISPATCH_HOME/.foreman" "$_DISPATCH_STUB_BIN:$PATH" \
+        "${_DISPATCH_PROBE_ARGV[*]}" >&2
       printf '  %s said:\n' "$program" >&2
       sed 's/^/    /' "$_DISPATCH_PROBE_ERR" >&2
       exit 1
@@ -359,6 +418,7 @@ _dispatch_program_starts() { # <program> <names, space separated>
   env -i \
     HOME="$DISPATCH_HOME" \
     FOREMAN_INSTANCE=demo \
+    FOREMAN_HOME="$DISPATCH_HOME/.foreman" \
     PATH="$_DISPATCH_STUB_BIN:$PATH" \
     ${extra[@]+"${extra[@]}"} \
     "${_DISPATCH_PROBE_ARGV[@]}" >/dev/null 2>"$_DISPATCH_PROBE_ERR"

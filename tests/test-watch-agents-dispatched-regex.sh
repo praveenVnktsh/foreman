@@ -26,7 +26,12 @@ fixture_board_toml "$fixture_repo"
 py_home="$work_dir/py-home"
 fixture_add_instance "$py_home" demo "$fixture_repo"
 
-HOME="$py_home" FOREMAN_INSTANCE=demo python3 - "$board_dir" <<'PY'
+# FOREMAN_HOME is named explicitly. config.sh no longer derives it from $HOME:
+# it asks bin/installation.py, which reads the home as the parent of this
+# clone. An explicit home is what that derivation yields to, and it is how this
+# file stays pointed at its temporary directory.
+HOME="$py_home" FOREMAN_HOME="$py_home/.foreman" FOREMAN_INSTANCE=demo \
+  python3 - "$board_dir" <<'PY'
 import importlib.util
 import os
 import sys
@@ -51,11 +56,13 @@ def check(ok, what, detail=""):
         print(f"    FAIL: {what} {detail}")
 
 
-# INSTANCE is "demo", from FOREMAN_INSTANCE above.
-digit_team = "foreman/demo/AB2-7/build-1"
-letters_only_team = "foreman/demo/PRA-7/build-1"
-tick_agent = "foreman/demo/tick"
-other_instance = "foreman/other/AB2-7/build-1"
+# INSTANCE is "demo", from FOREMAN_INSTANCE above. INSTALLATION is "claude":
+# this home declares no installation.toml, so bin/installation.py reads it as
+# the lone Claude installation, and every dispatched name starts there.
+digit_team = "foreman/claude/demo/AB2-7/build-1"
+letters_only_team = "foreman/claude/demo/PRA-7/build-1"
+tick_agent = "foreman/claude/tick"
+other_instance = "foreman/claude/other/AB2-7/build-1"
 
 check(watch_agents._dispatched(letters_only_team) == ("PRA-7", "build", "1"),
       "a letters-only team key still matches (no regression)",
@@ -74,7 +81,7 @@ check(watch_agents._dispatched(other_instance) is None,
 # Every role dispatch.sh will spawn. A role this regex does not know finishes
 # without waking the board at all.
 for role in ("plan", "build", "review"):
-    name = f"foreman/demo/PRA-7/{role}-1"
+    name = f"foreman/claude/demo/PRA-7/{role}-1"
     check(watch_agents._dispatched(name) == ("PRA-7", role, "1"),
           f"a {role} agent matches DISPATCHED",
           repr(watch_agents._dispatched(name)))

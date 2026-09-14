@@ -23,7 +23,11 @@ ok() { printf 'ok   %s\n' "$1"; }
 bad() { printf 'FAIL %s\n' "$1"; fail=1; }
 
 target="$work_dir/target"
-branch_name="foreman/demo/PRA-9"
+# Every name starts at the INSTALLATION. The fixture's home declares no
+# installation.toml, so bin/installation.py reads it as the lone Claude
+# installation and the segment is `claude`. Two installations may serve one
+# repository, so without it their worktrees and branches are the same paths.
+branch_name="foreman/claude/demo/PRA-9"
 
 dispatch_fixture_run --ticket PRA-9 --role plan --attempt 1
 
@@ -31,8 +35,8 @@ dispatch_fixture_run --ticket PRA-9 --role plan --attempt 1
 # review's does (see dispatch.sh's role table), so it lands at exactly this
 # path -- never at the card's own worktree_path("$TICKET"), which a later
 # build dispatch also uses and must not find pre-occupied by a plan.
-plan_worktree="$target/.claude/worktrees/foreman-demo-PRA-9-plan-1"
-build_worktree="$target/.claude/worktrees/foreman-demo-PRA-9"
+plan_worktree="$target/.claude/worktrees/foreman-claude-demo-PRA-9-plan-1"
+build_worktree="$target/.claude/worktrees/foreman-claude-demo-PRA-9"
 
 if [[ -d "$plan_worktree" ]]; then
   ok "a plan dispatch cuts a worktree named for ticket, role and attempt"

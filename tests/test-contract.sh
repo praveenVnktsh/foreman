@@ -462,8 +462,11 @@ check "max_label_chars = 0 still loads (starves planning, disarms nothing)" \
 # check-plan-graph.py's own --limits sentence, not from a copy typed in this
 # file: a test that retypes either number would stay green while the two
 # drifted, which is the defect this case exists to catch.
+# `[0-9][0-9]*` and not `[0-9]\+`: BSD sed reads `\+` as a literal plus, so
+# the substitution matched nothing, `plan_default` came back empty, and this
+# case compared "" against 80 on every macOS run while CI's GNU sed passed.
 plan_default="$(python3 "$root/bin/check-plan-graph.py" --limits |
-  sed -n 's/.*at most \([0-9]\+\) characters.*/\1/p')"
+  sed -n 's/.*at most \([0-9][0-9]*\) characters.*/\1/p')"
 check "check-plan-graph.py's default agrees with contract.py's MAX_LABEL_CHARS default" \
   "$plan_default" "$(read_key "$work/nolimits.toml" MAX_LABEL_CHARS)"
 

@@ -40,6 +40,14 @@ TOML
 # Declares board <name> in <home>/.foreman/boards.toml and creates its runtime
 # directory, so config.sh stops refusing to load.
 #
+# LEGACY-SHAPED ON PURPOSE: no installation.toml anywhere, so <home>/.foreman is
+# both the machine root and the installation home. bin/installation.py reads
+# such a home as a lone Claude installation -- name `claude`, harness `claude`,
+# default, no siblings -- which is exactly the layout every machine had before
+# installations existed. An un-migrated home is a supported layout, and every
+# test that calls this helper is what proves it still works. A test that wants
+# the new layout builds it with fixture_add_installation instead.
+#
 # A board used to be a directory holding instance.env. It is now a table in one
 # file, and the runtime directory holds only cards/, HALT and the ids cache. A
 # fixture that still writes instance.env produces the failure every test in this
@@ -64,14 +72,69 @@ fixture_add_board() {
   local home="$1" name="$2" repo_dir="${3:-}"
   [[ -n "$repo_dir" ]] || repo_dir="$home"
   local fh="$home/.foreman"
-  mkdir -p "$fh/instances/$name"
-  # One credential per workspace, at the foreman root. It used to be copied into
-  # every instance directory.
-  [[ -f "$fh/linear.key" ]] || printf 'fixture-key\n' > "$fh/linear.key"
-  chmod 600 "$fh/linear.key"
-  printf '[boards.%s]\nrepo = "%s"\n' "$name" "$repo_dir" >> "$fh/boards.toml"
+  fixture_add_board_in "$fh" "$name" "$repo_dir"
+  fixture_linear_key "$fh"
 }
 
 # Kept so a caller written against the old name still works while the tests that
 # use it are updated. It is the same fixture; only the layout underneath moved.
 fixture_add_instance() { fixture_add_board "$@"; }
+
+# fixture_add_board_in <foreman_home> <name> <repo_dir>
+# The same board declaration, written into a FOREMAN_HOME the caller names --
+# which under the new layout is <root>/<installation>, not the root itself.
+#
+# <repo_dir> is required here and optional in fixture_add_board, because the
+# legacy helper's default is the caller's HOME and an installation home has no
+# such obvious stand-in. A helper that guessed one would hand boards.py a path
+# that is not a directory, and boards.py refuses that -- correctly, and with an
+# error about the target repository rather than about the fixture.
+fixture_add_board_in() {
+  local fh="$1" name="$2" repo_dir="$3"
+  mkdir -p "$fh/instances/$name"
+  # APPENDS, for the reason fixture_add_board's header gives.
+  printf '[boards.%s]\nrepo = "%s"\n' "$name" "$repo_dir" >> "$fh/boards.toml"
+}
+
+# fixture_linear_key <dir>
+# One credential per workspace, at the machine root. It used to be copied into
+# every instance directory.
+fixture_linear_key() {
+  local dir="$1"
+  mkdir -p "$dir"
+  [[ -f "$dir/linear.key" ]] || printf 'fixture-key\n' > "$dir/linear.key"
+  chmod 600 "$dir/linear.key"
+}
+
+# fixture_add_installation <home> <name> <harness> [--default]
+# Creates the installation <name> under the machine root <home>/.foreman, on
+# <harness>, and prints nothing. Its FOREMAN_HOME is <home>/.foreman/<name>, and
+# that is where its boards go -- declare them with fixture_add_board_in.
+#
+# installation.toml is written through bin/installation.py --write and never by
+# hand. The writer refuses a harness it has no adapter for, a name that breaks
+# the name rule, and a second sibling claiming `default = true`; a fixture that
+# emitted the TOML itself would build roots no loader accepts, and the test
+# driving them would fail somewhere further down naming something else.
+#
+# Codex and OpenCode have no default models, so a placeholder is passed for all
+# four stages. It is deliberately not a real model name: no test asserts on it,
+# and a plausible one invites a reader to believe the fixture spends it.
+fixture_add_installation() {
+  local home="$1" name="$2" harness="$3" default_flag="${4:-}"
+  local root="$home/.foreman"
+  local install_home="$root/$name"
+  local repo_root models=()
+  repo_root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd)"
+  mkdir -p "$install_home"
+  fixture_linear_key "$root"
+  if [[ "$harness" != claude ]]; then
+    models=(--model-tick stub-model --model-plan stub-model
+            --model-build stub-model --model-review stub-model)
+  fi
+  # bash 3.2 + `set -u`: "${arr[@]}" on an EMPTY array is an unbound-variable
+  # error, not an empty expansion.
+  "$repo_root/bin/installation.py" --write --home "$install_home" \
+    --harness "$harness" ${default_flag:+"$default_flag"} \
+    ${models[@]+"${models[@]}"}
+}

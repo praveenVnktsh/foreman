@@ -30,11 +30,23 @@ shim_root="$work_dir/shim-repo"
 mkdir -p "$shim_root/bin" "$shim_root/skills/board"
 ln -s "$repo_root/bin/contract.py" "$shim_root/bin/contract.py"
 ln -s "$repo_root/bin/boards.py" "$shim_root/bin/boards.py"
+# config.sh reads this installation's declaration before anything else, from
+# THIS root's bin/ -- a shim without it refuses at config.sh's first line.
+ln -s "$repo_root/bin/installation.py" "$shim_root/bin/installation.py"
+# config.sh sources its pair reader from THIS root's bin/ on its first line.
+ln -s "$repo_root/bin/load-pairs.sh" "$shim_root/bin/load-pairs.sh"
 ln -s "$repo_root/bin/tmp-dir.sh" "$shim_root/bin/tmp-dir.sh"
 shim="$shim_root/skills/board"
 ln -s "$board_dir/config.sh" "$shim/config.sh"
 ln -s "$board_dir/dispatch.sh" "$shim/dispatch.sh"
 ln -s "$board_dir/withlock.py" "$shim/withlock.py"
+# dispatch.sh refuses when it cannot count the machine's slots; the counter is
+# reconcile.py's, so the shim links it.
+ln -s "$board_dir/reconcile.py" "$shim/reconcile.py"
+# The permission flag this file is about is now spelled by the harness adapter,
+# not by dispatch.sh, so the adapter has to exist under this root. Linked as a
+# whole directory, so a fourth harness needs no second edit here.
+ln -s "$board_dir/harness" "$shim/harness"
 cat > "$shim/preflight.py" <<'PY'
 #!/usr/bin/env python3
 import sys
@@ -67,17 +79,34 @@ home="$work_dir/home"
 fixture_add_instance "$home" demo "$target"
 
 argv_log="$work_dir/argv.log"
+name_log="$work_dir/agent-name.log"
 stub_dir="$work_dir/bin"
 mkdir -p "$stub_dir"
+# `agents` ANSWERS FOR THE NAME IT WAS JUST GIVEN. The adapter spawns with
+# `--bg` and then asks the registry for that name's session id, so a stub that
+# always printed `[]` made every spawn die at "it never registered" -- and
+# dispatch.sh takes the adapter's non-zero exit as its own, so the argv this
+# file asserts on would be captured by a dispatch that then failed.
 cat > "$stub_dir/claude" <<STUB
 #!/usr/bin/env bash
 if [[ "\$1" == "--bg" ]]; then
   printf '%s\n' "\$*" >"$argv_log"
+  while [[ \$# -gt 0 ]]; do
+    if [[ "\$1" == "--name" && \$# -ge 2 ]]; then printf '%s\n' "\$2" >"$name_log"; fi
+    shift
+  done
   echo "stub-session-\$\$"
   exit 0
 fi
 if [[ "\$1" == "agents" ]]; then
-  echo '[]'
+  name=""
+  if [[ -s "$name_log" ]]; then name="\$(cat "$name_log")"; fi
+  if [[ -z "\$name" ]]; then
+    echo '[]'
+    exit 0
+  fi
+  printf '[{"name":"%s","id":"stub-agent","sessionId":"stub-session","pid":%s,"state":"working","startedAt":1,"cwd":"%s","status":"running"}]\n' \\
+    "\$name" "\$\$" "\$PWD"
   exit 0
 fi
 exit 0
@@ -90,12 +119,23 @@ echo "do the thing" > "$prompt_file"
 run_dispatch() { # AGENT_SKIP_PERMISSIONS=<value or unset via ''-marker>, ticket
   local value="$1" ticket="$2"
   : >"$argv_log"
+  # A name left over from the previous dispatch would let the stubbed registry
+  # answer for an agent this one never spawned.
+  : >"$name_log"
+  # The ceilings are raised out of the way: four cards are dispatched on one
+  # board whose MAX_CONCURRENT is 1, and the gate is another test's claim.
+  # FOREMAN_HOME is passed explicitly. config.sh no longer defaults it to
+  # $HOME/.foreman: it asks bin/installation.py, which derives the home as the
+  # parent of the install root -- here the shim under $work_dir, which holds no
+  # boards.toml. An explicit home is what that derivation yields to.
   if [[ "$value" == "__unset__" ]]; then
-    env -u AGENT_SKIP_PERMISSIONS HOME="$home" FOREMAN_INSTANCE=demo PATH="$stub_dir:$PATH" \
+    env -u AGENT_SKIP_PERMISSIONS HOME="$home" FOREMAN_HOME="$home/.foreman" \
+      FOREMAN_INSTANCE=demo MAX_CONCURRENT=9 HOST_MAX_CONCURRENT=9 PATH="$stub_dir:$PATH" \
       "$dispatch" --ticket "$ticket" --role build --attempt 1 --prompt-file "$prompt_file" \
       >/dev/null 2>&1 || true
   else
-    env AGENT_SKIP_PERMISSIONS="$value" HOME="$home" FOREMAN_INSTANCE=demo PATH="$stub_dir:$PATH" \
+    env AGENT_SKIP_PERMISSIONS="$value" HOME="$home" FOREMAN_HOME="$home/.foreman" \
+      FOREMAN_INSTANCE=demo MAX_CONCURRENT=9 HOST_MAX_CONCURRENT=9 PATH="$stub_dir:$PATH" \
       "$dispatch" --ticket "$ticket" --role build --attempt 1 --prompt-file "$prompt_file" \
       >/dev/null 2>&1 || true
   fi

@@ -94,13 +94,19 @@ case "$out" in
   *) bad "expected a host-ceiling refusal, got: $out" ;;
 esac
 
-# --- an unreadable count is advisory, never a blocker
+# --- an unreadable count REFUSES, and says so
+# It used to be advisory: a failing --host-slots read as "no slots held" and
+# the whole ceiling gate switched itself off, in silence. A sibling
+# installation whose boards.toml would not load then vanished from the count
+# and the machine over-dispatched on top of its builds -- the 2026-09-01
+# failure one level up. A count the gate cannot read is now a refusal that
+# names itself and spends no attempt.
 mv "$root/skills/board/reconcile.py" "$work/reconcile.hidden" 2>/dev/null || true
 out="$(dispatch 1 4 ABC-77)"
 mv "$work/reconcile.hidden" "$root/skills/board/reconcile.py" 2>/dev/null || true
 case "$out" in
-  *"DRY RUN"*) ok "a count it cannot read does not block a dispatch" ;;
-  *) bad "an unreadable slot count blocked a dispatch: $out" ;;
+  *"could not count the machine's slots"*) ok "a count it cannot read refuses the dispatch by name" ;;
+  *) bad "an unreadable slot count did not refuse by name: $out" ;;
 esac
 
 exit "$fail"

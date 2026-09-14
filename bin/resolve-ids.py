@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Turn the names in a contract into the ids the board moves cards by.
 
-    resolve-ids.py --instance <name> [--api-url URL] [--key-file PATH]
+    resolve-ids.py --instance <name> --installation <name> [--api-url URL] [--key-file PATH]
 
 The contract names a team, a project and nothing else, because a fork must not
 inherit somebody else's project UUID (see bin/contract.py). The running loop
@@ -10,8 +10,8 @@ silently change which column the orchestrator is allowed to write to. This
 script is the one moment those two requirements meet, and therefore the one
 moment a name is trusted.
 
-The credential is per Linear WORKSPACE, not per board: $FOREMAN_HOME/linear.key
-by default, or the --key-file path for a board in a different workspace. It
+The credential is per Linear WORKSPACE, not per board: $FOREMAN_ROOT/linear.key
+by default -- the machine root, shared by every installation on it -- or the --key-file path for a board in a different workspace. It
 used to be $INSTANCE_HOME/linear.key, so ten boards in one workspace meant ten
 identical copies of one secret, and rotating it meant finding all ten. One copy
 missed is a board that keeps authenticating with a key the operator believes is
@@ -21,6 +21,12 @@ $INSTANCE_HOME/ids.env is a CACHE, not state. Every id in it is derived from
 the target repository's own board.toml plus Linear, so it can always be rebuilt
 by running this script again. It may be absent -- deleting it costs one
 re-resolve, never a broken board -- so nothing may treat its absence as fatal.
+
+--installation names the installation this resolve is for. Its label,
+foreman:<name>, is created if missing exactly like the fixed labels below and
+written to ids.env as LABEL_INSTALLATION, so the operator can apply it and the
+tick can find it -- see "Routing" in
+docs/specs/2026-09-14-installations-per-harness-design.md.
 
 Everything it resolves, it verifies, and every mismatch fails closed:
 
@@ -107,10 +113,22 @@ LABEL_ROLES = [
     ("LABEL_NEEDS_PLAN", "needs-plan"),
 ]
 
+# The installation's own label (docs/specs/2026-09-14-installations-per-
+# harness-design.md, "Routing"). A tick applies foreman:<installation> to a
+# card the moment it takes ownership, so the label an installation resolves
+# has to be the SAME one it later writes -- and that name is only known at
+# run time, from --installation, not at import time the way every name in
+# LABEL_ROLES above is. It cannot live in that fixed list for the same reason
+# a second installation in the same team must never collide with the first
+# one's label: the role is constant, the label name is not, so it is resolved
+# through the same ensure_labels() path with a name built in main() instead.
+LABEL_INSTALLATION_ROLE = "LABEL_INSTALLATION"
+
 IDS_ENV_ORDER = (
     ["LINEAR_TEAM_ID", "LINEAR_PROJECT_ID"]
     + [role for role, _ in STATE_ROLES]
     + [role for role, _ in LABEL_ROLES]
+    + [LABEL_INSTALLATION_ROLE]
 )
 
 
@@ -304,10 +322,16 @@ def resolve_states(api_url: str, key: str, team_id: str) -> dict:
     return ids
 
 
-def ensure_labels(api_url: str, key: str, team_id: str) -> dict:
-    """Resolve every label in LABEL_ROLES, creating any that are missing.
+def ensure_labels(api_url: str, key: str, team_id: str, label_roles: list) -> dict:
+    """Resolve every label in `label_roles`, creating any that are missing.
 
-    Returns {role: id} for every role in LABEL_ROLES. Whether a label was
+    Takes the role/name pairs as an argument rather than reading LABEL_ROLES
+    directly, because LABEL_INSTALLATION's name is only known at run time
+    (see LABEL_INSTALLATION_ROLE above) and has to go through this exact
+    found-or-create-then-verify path too -- one function, not a copy of it
+    for the one label whose name main() has to build itself.
+
+    Returns {role: id} for every role in `label_roles`. Whether a label was
     found or just created, its id is independently verified by querying it
     back by id and checking the name that comes back -- the found-existing
     path and the just-created path share this one guard, because a mismatch
@@ -316,7 +340,7 @@ def ensure_labels(api_url: str, key: str, team_id: str) -> dict:
     data = query(api_url, key, LABELS_QUERY, {"teamId": team_id})
     nodes = data.get("team", {}).get("labels", {}).get("nodes", [])
     ids: dict = {}
-    for role, label_name in LABEL_ROLES:
+    for role, label_name in label_roles:
         matches = [n for n in nodes if n.get("name") == label_name]
         if len(matches) > 1:
             found = ", ".join(sorted(n["id"] for n in matches))
@@ -414,7 +438,7 @@ def _load_instance_config(instance: str) -> dict:
     there is no legitimate reason for it to inherit an ambient REPO from
     whatever ran before it in this process's environment.
     """
-    keys = ("INSTANCE_HOME", "FOREMAN_HOME", "LINEAR_TEAM_NAME", "LINEAR_PROJECT_NAME")
+    keys = ("INSTANCE_HOME", "FOREMAN_HOME", "FOREMAN_ROOT", "LINEAR_TEAM_NAME", "LINEAR_PROJECT_NAME")
     script = os.path.join(
         os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
         "skills",
@@ -446,11 +470,16 @@ def _load_instance_config(instance: str) -> dict:
 def main(argv: list) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--instance", required=True, help="instance name (FOREMAN_INSTANCE)")
+    parser.add_argument(
+        "--installation",
+        required=True,
+        help="installation name; owns the label foreman:<name>, created on first resolve",
+    )
     parser.add_argument("--api-url", default=DEFAULT_API_URL, help="Linear GraphQL endpoint")
     parser.add_argument(
         "--key-file",
         default=None,
-        help="Linear API key file; defaults to $FOREMAN_HOME/linear.key",
+        help="Linear API key file; defaults to $FOREMAN_ROOT/linear.key",
     )
     args = parser.parse_args(argv)
 
@@ -467,7 +496,7 @@ def main(argv: list) -> int:
         # fallback to an empty key: a key read as "" reaches Linear as an
         # unauthenticated request, and the operator reads the resulting error
         # as "Linear is down", not "the key file moved".
-        key_path = args.key_file or os.path.join(cfg["FOREMAN_HOME"], "linear.key")
+        key_path = args.key_file or os.path.join(cfg["FOREMAN_ROOT"], "linear.key")
         try:
             with open(key_path) as handle:
                 key = handle.read().strip()
@@ -479,7 +508,13 @@ def main(argv: list) -> int:
         team_id = resolve_team(args.api_url, key, team_name)
         project_id = resolve_project(args.api_url, key, team_id, project_name)
         state_ids = resolve_states(args.api_url, key, team_id)
-        label_ids = ensure_labels(args.api_url, key, team_id)
+        installation_label = f"foreman:{args.installation}"
+        label_ids = ensure_labels(
+            args.api_url,
+            key,
+            team_id,
+            LABEL_ROLES + [(LABEL_INSTALLATION_ROLE, installation_label)],
+        )
 
         ids = {
             "LINEAR_TEAM_ID": team_id,

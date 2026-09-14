@@ -264,8 +264,14 @@ check "an underscore in the board name is legal" "target_staging" \
 # and N ticks would then dispatch against one machine-wide
 # HOST_MAX_CONCURRENT. The per-CARD names keep their board segment, which is
 # what stops two boards reaping each other's agents, branches and worktrees.
-check "the tick name carries no board segment" "foreman/tick" "$(ask TICK_AGENT_NAME)"
-check "a card's agent name still carries the board" "foreman/demo/PRA-1/build-1" \
+#
+# It does carry the INSTALLATION. This home declares no installation.toml, so
+# bin/installation.py reads it as the lone Claude installation and the segment
+# is `claude`. Two installations on one machine each run a tick, and two agents
+# named `foreman/tick` in one registry would each read the other as the one
+# supervise.sh must stop before starting a replacement.
+check "the tick name carries no board segment" "foreman/claude/tick" "$(ask TICK_AGENT_NAME)"
+check "a card's agent name still carries the board" "foreman/claude/demo/PRA-1/build-1" \
   "$(env FOREMAN_HOME="$home" FOREMAN_INSTANCE=demo bash -c \
        ". '$root/skills/board/config.sh' >/dev/null; agent_name PRA-1 build 1")"
 

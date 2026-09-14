@@ -47,15 +47,32 @@ board_home="$work_dir/board-home"
 
 marker="$work_dir/bg-agent-started"
 holder_log="$work_dir/bg-agent.log"
+name_log="$work_dir/agent-name.log"
+: >"$name_log"
 
+# `agents` ANSWERS FOR THE NAME IT WAS JUST GIVEN. The harness adapter spawns
+# with `--bg` and then asks the registry for that name's session id, so a stub
+# that always printed `[]` made the spawn die at "it never registered" -- and
+# supervise.sh takes that as its own failure, before this file has measured
+# anything about fd 9.
 mkdir -p "$home/.local/bin"
 cat >"$home/.local/bin/claude" <<STUB
 #!/usr/bin/env bash
 if [[ "\$1" == "agents" ]]; then
-  echo '[]'
+  if [[ -s "$name_log" ]]; then
+    printf '[{"name":"%s","id":"stub-tick","sessionId":"stub-session","pid":1,"state":"idle","startedAt":1,"cwd":"","status":"running"}]\n' \\
+      "\$(cat "$name_log")"
+  else
+    echo '[]'
+  fi
   exit 0
 fi
 if [[ "\$1" == "--bg" ]]; then
+  prev=""
+  for arg in "\$@"; do
+    if [[ "\$prev" == "--name" ]]; then printf '%s\n' "\$arg" >"$name_log"; fi
+    prev="\$arg"
+  done
   # Simulate the detached agent claude --bg spawns: a background process that
   # outlives this stub's own return, inheriting whatever fds this process has
   # open. It holds fd 9 open (a bare no-op write) for as long as it can, so a
@@ -76,9 +93,14 @@ exit 0
 STUB
 chmod +x "$home/.local/bin/claude"
 
-run_out="$(HOME="$home" FOREMAN_INSTANCE=demo SUPERVISE_LOCK="$board_home/supervise.lock" "$supervise" 2>&1)" \
+# FOREMAN_HOME is named explicitly. config.sh no longer derives it from $HOME:
+# it asks bin/installation.py, which reads the home as the parent of this
+# clone. An explicit home is what that derivation yields to, and it is how this
+# file stays pointed at its temporary directory.
+run_out="$(HOME="$home" FOREMAN_HOME="$home/.foreman" FOREMAN_INSTANCE=demo \
+  SUPERVISE_LOCK="$board_home/supervise.lock" "$supervise" 2>&1)" \
   || { bad "supervise.sh exited non-zero: $run_out"; exit "$fail"; }
-grep -q "started foreman/tick" <<<"$run_out" \
+grep -q "started foreman/claude/tick" <<<"$run_out" \
   || bad "supervise.sh did not report starting the tick agent: $run_out"
 
 # The real-world symptom, checked FIRST and time-critical: the stub's

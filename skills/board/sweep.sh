@@ -5,7 +5,7 @@
 #                                 # are stopped, and their trees and sessions go
 #   sweep.sh --orphans            # board-* trees with no live agent
 #
-# Either way it also reaps `refs/foreman/<instance>/evidence/<pid>` refs left behind by an
+# Either way it also reaps `refs/foreman/<installation>/<instance>/evidence/<pid>` refs left behind by an
 # `evidence.sh` that was killed mid-read. Nothing else in the board touches that
 # namespace, and a leaked ref pins every object its fetch brought with it. A
 # sweep that could not enumerate or could not delete there exits non-zero and
@@ -68,7 +68,7 @@ remove_agent_tmp() {
   local tmp="$1"
   [[ -d "$tmp" ]] || return 0
   case "$tmp" in
-    "$AGENT_TMP_ROOT"/foreman-"$INSTANCE"-*) ;;
+    "$AGENT_TMP_ROOT"/foreman-"$INSTALLATION"-"$INSTANCE"-*) ;;
     *) die "refusing to remove $tmp — not an agent scratch dir" ;;
   esac
   if [[ -n "$BOARD_DRY_RUN" ]]; then
@@ -84,7 +84,7 @@ remove_tree() {
   [[ -d "$path" ]] || remove_agent_tmp "$(agent_tmp_for "$path")"
   [[ -d "$path" ]] || return 0
   case "$path" in
-    "$REPO"/.claude/worktrees/foreman-"$INSTANCE"-*) ;;
+    "$REPO"/.claude/worktrees/foreman-"$INSTALLATION"-"$INSTANCE"-*) ;;
     *) die "refusing to remove $path — not a foreman worktree" ;;
   esac
   remove_agent_tmp "$(agent_tmp_for "$path")"
@@ -96,12 +96,55 @@ remove_tree() {
   git -C "$REPO" worktree remove -f -f "$path" 2>/dev/null || rm -rf "$path"
   # Only ever delete a local branch this skill created.
   case "$branch" in
-    foreman/"$INSTANCE"/*) git -C "$REPO" branch -D "$branch" 2>/dev/null || true ;;
+    foreman/"$INSTALLATION"/"$INSTANCE"/*) git -C "$REPO" branch -D "$branch" 2>/dev/null || true ;;
   esac
   printf 'removed %s\n' "$path"
 }
 
-# Leaked `refs/foreman/<instance>/evidence/<pid>` refs, from `evidence.sh` invocations that
+# How long a finished agent's leavings are kept. Thirty days is already the
+# retention this sweep applies to reviews at the bottom of this file, and an
+# agent's record, log and wrapper are the same kind of thing: regenerable
+# evidence of a run that is over, read by a human for as long as anyone is still
+# asking what happened. One number, so the two cannot drift apart.
+SWEEP_RETENTION_DAYS=30
+
+# What the harness left behind for every agent it ever spawned.
+#
+# codex.sh and opencode.sh have no agent registry, so detached.sh writes three
+# files per spawn under $FOREMAN_HOME/agents — <id>.json, <id>.log and <id>.sh —
+# and until this existed nothing ever deleted them. That is unbounded disk, and
+# worse: `list` globs and JSON-parses every record ever written, and `list` is
+# read on every dispatch gate, every sweep, every watch-agents poll and every
+# supervise fire. The cost of asking "is this agent alive" rose with the age of
+# the installation. claude.sh answers this verb with a no-op, because its
+# registry is Claude's own.
+#
+# The adapter decides which agents are finished — it owns that rule for `list`
+# too — and prints the ids it took. This function only says so in the sweep's
+# voice, and only ever deletes through the adapter.
+#
+# BOARD_DRY_RUN is passed explicitly: `config.sh` does not export it, and the
+# adapter is a separate process, so an inherited-by-accident dry run would
+# delete on a run the operator asked to be told about.
+reap_agent_records() {
+  local ids id
+  if ! ids="$(env BOARD_DRY_RUN="$BOARD_DRY_RUN" \
+      "$HARNESS_SH" reap "$(( SWEEP_RETENTION_DAYS * 24 * 60 * 60 ))")"; then
+    printf 'foreman: %s reap exited non-zero; finished agents keep their records, logs and wrappers\n' \
+      "$HARNESS_SH" >&2
+    return 1
+  fi
+  while read -r id; do
+    [[ -n "$id" ]] || continue
+    if [[ -n "$BOARD_DRY_RUN" ]]; then
+      printf 'DRY RUN: would remove agent record %s\n' "$id"
+    else
+      printf 'removed agent record %s\n' "$id"
+    fi
+  done <<<"$ids"
+}
+
+# Leaked `refs/foreman/<installation>/<instance>/evidence/<pid>` refs, from `evidence.sh` invocations that
 # were killed between their fetch and their `update-ref -d`.
 #
 # `evidence.sh` traps HUP, INT and TERM and deletes its own ref, so this exists
@@ -132,9 +175,9 @@ remove_tree() {
 # worth reaping — it is recorded and reported at the end.
 reap_evidence_refs() {
   local ref pid refs failed=0
-  if ! refs="$(git -C "$REPO" for-each-ref --format='%(refname)' "refs/foreman/$INSTANCE/evidence/*")"; then
-    printf 'foreman: could not list refs/foreman/%s/evidence/* in %s; leaked evidence refs went unchecked\n' \
-      "$INSTANCE" "$REPO" >&2
+  if ! refs="$(git -C "$REPO" for-each-ref --format='%(refname)' "refs/foreman/$INSTALLATION/$INSTANCE/evidence/*")"; then
+    printf 'foreman: could not list refs/foreman/%s/%s/evidence/* in %s; leaked evidence refs went unchecked\n' \
+      "$INSTALLATION" "$INSTANCE" "$REPO" >&2
     return 1
   fi
   while read -r ref; do
@@ -161,7 +204,7 @@ reap_evidence_refs() {
 # Exits non-zero if the agent list could not be read at all. That distinction
 # matters: "no agents are alive" and "I could not tell" must not look the same.
 live_worktrees() {
-  claude agents --json --all 2>/dev/null | python3 -c '
+  "$HARNESS_SH" list 2>/dev/null | python3 -c '
 import json,sys
 raw=sys.stdin.read()
 if not raw.strip(): sys.exit(3)
@@ -223,7 +266,7 @@ release_slot() {
 # be stale, raced or wrong, and a stop it did not need costs a build.
 # forget_sessions then names the working session and leaves it.
 #
-# `claude stop` is asynchronous and can fail, so the stop is re-issued on every
+# A stop is asynchronous and can fail, so it is re-issued on every
 # poll and the registry, never the exit code, says when it landed -- the loop
 # supervise.sh runs for the tick, bounded by AGENT_STOP_TIMEOUT_SECONDS. An
 # agent still not stopped at the bound is left, named on stderr, and held in
@@ -234,7 +277,7 @@ stop_status=0
 # line. Exits non-zero when the registry cannot be read, which the caller must
 # not confuse with "nothing to stop".
 stoppable_agents() { # <name prefix...>
-  claude agents --json --all 2>/dev/null | python3 -c '
+  "$HARNESS_SH" list 2>/dev/null | python3 -c '
 import json,sys
 prefixes=sys.argv[1:]
 try: agents=json.loads(sys.stdin.read())
@@ -267,7 +310,7 @@ stop_card_agents() { # <ticket...>
     fi
     if [[ "$waited" -ge "$AGENT_STOP_TIMEOUT_SECONDS" ]]; then
       while IFS=$'\t' read -r id name; do
-        [[ -n "$id" ]] && printf 'foreman: leaving session %s (%s) -- claude stop did not land in %ss\n' \
+        [[ -n "$id" ]] && printf 'foreman: leaving session %s (%s) -- the stop did not land in %ss\n' \
           "$name" "$id" "$AGENT_STOP_TIMEOUT_SECONDS" >&2
       done <<<"$listing"
       stop_status=1
@@ -280,7 +323,7 @@ stop_card_agents() { # <ticket...>
         *) printf 'stopping session %s (%s)\n' "$name" "$id"; asked="$asked $id" ;;
       esac
       # The registry below decides whether this landed; the exit code cannot.
-      claude stop "$id" >/dev/null 2>&1 || true
+      "$HARNESS_SH" stop "$id" >/dev/null 2>&1 || true
     done <<<"$listing"
     sleep "$poll_seconds"
     waited=$((waited + poll_seconds))
@@ -323,6 +366,11 @@ forget_status=0
 forget_sessions() {
   local ticket="$1" jobs_dir="$HOME/.claude/jobs"
   local listing id state name cwd transcripts forgotten=0
+  # Claude Code's own records. A codex or opencode agent's record belongs to
+  # the adapter, under $FOREMAN_HOME/agents/, and `"$HARNESS_SH" reap` ages it
+  # out on the orphan pass; there is no ~/.claude/jobs entry of this card's to
+  # forget on those harnesses.
+  [[ "$HARNESS" == claude ]] || return 0
   [[ -d "$jobs_dir" ]] || return 0
   if ! listing="$(python3 - "$jobs_dir" "$(card_agents_prefix "$ticket")" <<'PY'
 import json, os, re, sys
@@ -388,7 +436,7 @@ remove_transcripts() {
     *) die "refusing to remove $dir -- not a transcript directory" ;;
   esac
   case "$cwd" in
-    "$REPO"/.claude/worktrees/foreman-"$INSTANCE"-*) ;;
+    "$REPO"/.claude/worktrees/foreman-"$INSTALLATION"-"$INSTANCE"-*) ;;
     *)
       printf 'foreman: leaving transcripts in %s -- %s ran outside a foreman worktree, so that directory is shared\n' \
         "$dir" "$name" >&2
@@ -432,8 +480,9 @@ remove_tree_unless_live() {
   remove_tree "$path"
 }
 
+agent_reap_status=0
 if [[ "${1:-}" == "--orphans" ]]; then
-  for path in "$REPO"/.claude/worktrees/foreman-"$INSTANCE"-*/; do
+  for path in "$REPO"/.claude/worktrees/foreman-"$INSTALLATION"-"$INSTANCE"-*/; do
     [[ -d "$path" ]] || continue
     path="${path%/}"
     grep -Fxq "$path" "$LIVE_FILE" || remove_tree "$path"
@@ -443,7 +492,7 @@ if [[ "${1:-}" == "--orphans" ]]; then
   # scratch behind forever — which is precisely the accumulation this exists to
   # stop. Keyed on the worktree the scratch is named for, and still refusing to
   # act when that worktree is a live agent's cwd.
-  for tmp in "$AGENT_TMP_ROOT"/foreman-"$INSTANCE"-*/; do
+  for tmp in "$AGENT_TMP_ROOT"/foreman-"$INSTALLATION"-"$INSTANCE"-*/; do
     [[ -d "$tmp" ]] || continue
     tmp="${tmp%/}"
     wt="$REPO/.claude/worktrees/$(basename "$tmp")"
@@ -451,6 +500,10 @@ if [[ "${1:-}" == "--orphans" ]]; then
     grep -Fxq "$wt" "$LIVE_FILE" && continue
     remove_agent_tmp "$tmp"
   done
+  # Held rather than propagated on the spot, for the reason the evidence-ref
+  # reap below is held: the rest of the sweep is unrelated and still worth
+  # doing.
+  reap_agent_records || agent_reap_status=$?
 else
   # The stops change the answer the liveness read above gave, so it is asked
   # again once they have landed -- and refused again if it cannot be read, for
@@ -461,7 +514,7 @@ else
   fi
   for ticket in "$@"; do
     remove_tree_unless_live "$(worktree_path "$ticket")"
-    for extra in "$REPO"/.claude/worktrees/foreman-"$INSTANCE"-"$ticket"-*/; do
+    for extra in "$REPO"/.claude/worktrees/foreman-"$INSTALLATION"-"$INSTANCE"-"$ticket"-*/; do
       [[ -d "$extra" ]] && remove_tree_unless_live "${extra%/}"
     done
     # Before the release, so `released` stays the card's last history line --
@@ -480,10 +533,13 @@ reap_status=0
 reap_evidence_refs || reap_status=$?
 
 # Reviews are regenerable; history.jsonl is the card's audit trail and stays.
-find "$BOARD_HOME"/cards/*/reviews -type f -mtime +30 -delete 2>/dev/null || true
+find "$BOARD_HOME"/cards/*/reviews -type f -mtime +"$SWEEP_RETENTION_DAYS" -delete 2>/dev/null || true
+
+[[ "$agent_reap_status" -eq 0 ]] \
+  || die "could not reap finished agent records (see above); $HARNESS_SH left them in place"
 
 [[ "$reap_status" -eq 0 ]] \
-  || die "could not reap leaked evidence refs (see above); refs/foreman/$INSTANCE/evidence/* is unswept"
+  || die "could not reap leaked evidence refs (see above); refs/foreman/$INSTALLATION/$INSTANCE/evidence/* is unswept"
 [[ "$forget_status" -eq 0 ]] \
   || die "could not read every session record under $HOME/.claude/jobs (see above); a finished session may still be listed"
 [[ "$stop_status" -eq 0 ]] \

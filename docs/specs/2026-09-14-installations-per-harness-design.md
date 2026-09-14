@@ -66,17 +66,34 @@ anything it cannot make sense of.
 installation.py                    this home's INSTALLATION, HARNESS, IS_DEFAULT,
                                    FOREMAN_ROOT, TICK_MODEL, PLAN_MODEL,
                                    BUILD_MODEL, REVIEW_MODEL
-installation.py --siblings         every installation under FOREMAN_ROOT, one
-                                   name per field
+installation.py --siblings         every installation under FOREMAN_ROOT, as
+                                   NAME, HOME pairs -- two fields each, the
+                                   same wire format as every other mode here
 installation.py --write --harness codex [--default] [--model-tick M] ...
                                    write installation.toml for this home
 ```
+
+**Which installation is the default**, in three rules, because every card that
+carries no `foreman:*` label belongs to it:
+
+- **A lone installation is the default**, whatever its `installation.toml`
+  says, and a home with no `installation.toml` at all is a lone installation.
+  There is no second reader to disagree with, and an operator who never learned
+  about labels keeps a working machine.
+- **Several installations, exactly one saying `default = true`** is the normal
+  shape of a machine running two harnesses.
+- **Several installations and no default is refused**, not tolerated. With no
+  default, `queue.py` drops every unlabelled card as foreign and exits 0, so
+  every tick on the machine reports a healthy, empty board while the cards sit
+  in `Todo` forever. A silent stop is worse than a refusal.
 
 Refusals, all exit 1 with the reason on stderr:
 
 - `harness` missing or not one of the three.
 - `default = true` in more than one sibling. Every reader checks this, so a
   second default is refused before its tick starts, not after both dispatched.
+- More than one sibling and `default = true` in none of them, for the reason
+  above. Checked on every read, the same way.
 - A Codex or OpenCode installation with any of the four models unset. Claude
   keeps today's defaults (`fable`, `fable`, `opus`, `opus`). The other two have
   no defaults because a wrong model name on those harnesses fails later and
@@ -128,10 +145,11 @@ no `foreman:*` label.
 `--default`, and drops every card it does not own before ranking, naming each on
 stderr as it names an unrankable one. A card whose `foreman:*` label matches no
 sibling name is reported as unroutable and never ranked; `--siblings` from
-`installation.py` is what it checks against. `reconcile.py` applies the same
-filter when it rebuilds card positions from the Linear listing the tick hands
-it, so an in-flight card is only ever adopted by its owner. The tick's prose in
-`SKILL.md` says to pass the flags and to trust the filter, not to re-derive it.
+`installation.py` is what it checks against. `reconcile.py` never sees a Linear
+listing: it is handed ticket names one at a time, so the filter for the other
+three columns is the tick's, stated once in `SKILL.md` where the columns are
+listed. The tick's prose says to pass the flags to `queue.py` and to trust its
+filter for `Todo`, not to re-derive it.
 
 **Ownership is made durable at dispatch.** When a tick takes a card that has no
 `foreman:*` label, it applies its own label before moving the card out of
@@ -150,15 +168,18 @@ from" changes its liveness row the same way.
 ```
 harness.sh spawn  --name N --cwd D --model M --prompt-file F
                   [--add-dir D] [--mcp-config F] [--skip-permissions]
-                  [--loop-minutes K]                     prints the session id
+                  [--max-budget-usd N] [--settings JSON] [--loop-minutes K]
+                                                         prints the session id
 harness.sh resume --name N --cwd D --prompt-file F
-                  [--skip-permissions]                   prints the session id
+                  [--skip-permissions] [--max-budget-usd N] [--settings JSON]
+                                                         prints the session id
 harness.sh list                                          prints a JSON list
 harness.sh stop   <id>
 harness.sh transcript <cwd> <session-id>                 prints a path
 harness.sh check                                         exit 0 if the binary runs
 harness.sh skills-dir                                    where this harness resolves skills
 harness.sh skill-prompt <name>                           the prompt text that invokes a skill
+harness.sh reap <older-than-seconds>                     drops finished records past the window
 ```
 
 `list` prints what `claude agents --json --all` prints today, and only the
@@ -167,6 +188,24 @@ fields foreman reads: `name`, `id`, `sessionId`, `pid`, `state`, `startedAt`
 `blocked`, `stopped`, which is the exact set `reconcile.py`'s `PHASE` table maps.
 Several rows may share a name, the newest `startedAt` is the live one, and every
 consumer already sorts by it.
+
+`--max-budget-usd N` is the per-agent spend ceiling `dispatch.sh` passes when
+`MAX_BUDGET_USD` is set. Only Claude Code has such a flag, so only its adapter
+accepts it. The other two refuse it by name, so a cap set on a codex or
+opencode installation fails every dispatch loudly instead of running uncapped.
+
+`reap` is the lifecycle rule for the adapter's own registry. `sweep.sh` calls
+it on its orphan pass with the same retention window it applies to review
+worktrees, so finished records, logs and wrappers under `agents/` do not
+accumulate for the life of the installation. Claude's registry is Claude's to
+age out, so its adapter answers with a no-op.
+
+`--settings JSON` is Claude Code's per-session settings. `dispatch.sh` passes
+config.sh's `CARD_AGENT_SETTINGS` on every card agent, spawned or resumed, to
+turn off the Remote Control registration a card agent would otherwise leave in
+the operator's claude.ai account forever. The tick never gets it. The codex and
+opencode adapters accept it and drop it, because nothing on those harnesses
+registers with a claude.ai account.
 
 `transcript` returns the file whose mtime is the agent's last activity. For
 Claude that is the session `.jsonl` under `~/.claude/projects`, computed as
@@ -212,6 +251,31 @@ is inside die together.
 The exact flags are verified against the installed CLI at build time and
 recorded in each adapter's header comment. What the design fixes is the verb
 set and the record shape, not the flag spelling.
+
+### Adding a harness
+
+A fourth harness is six edits, and the list is here because every one of them
+fails quietly on its own. A missing adapter is an installation nobody can
+declare; an adapter nobody tests is a verb that answers differently from the
+other three, which is exactly what the contract test exists to stop.
+
+1. `bin/installation.py`, `HARNESSES` — the name becomes declarable. Until it
+   is in that tuple, `installation.toml` is refused and no home can say it.
+2. `skills/board/harness/<name>.sh` — the adapter, the whole verb set above,
+   with the installed CLI's real flags recorded in its header comment.
+3. `tests/lib/harness-stub.sh` — a stub for that CLI that prints what the real
+   one prints, so the contract test can drive it with no subscription.
+4. `tests/test-harness-adapters-agree.sh`, the `for harness in ...` loop — add
+   the name. An adapter absent from that loop is an adapter nothing runs.
+5. `README.md` — the install instruction for an installation on that harness,
+   beside the Codex one.
+6. `skills/board/SKILL.md` — anywhere the prose says which harness a step needs.
+   Today that is the invocation section (`/loop` and the Monitor are Claude's
+   alone) and `claude attach`.
+
+Nothing else names a harness. Every other script reaches the CLI through
+`$HARNESS_SH`, which `config.sh` selects and refuses when the adapter is
+missing or not executable.
 
 ### What changes for callers
 
@@ -290,6 +354,14 @@ style of `tests/lib/dispatch-fixture.sh`.
 
 ## Known limits
 
+- The tick is edge-triggered on Claude alone. `/loop` and the Monitor tool are
+  Claude Code's own, so on Codex and OpenCode the cadence is the adapter's
+  `--loop-minutes` wrapper -- one fresh pass per interval -- no Monitor is
+  armed, and a dispatched agent that finishes wakes nothing. That tick finds it
+  on its next pass through `"$HARNESS_SH" list`. Slower, not wrong: every pass
+  re-derives the whole picture, which is the same property that makes a lost
+  edge survivable on Claude. `SKILL.md`'s invocation section says so where the
+  Monitor is armed.
 - Graphplan's per-node model tiers are Claude names. On Codex and OpenCode
   every build node runs the installation's build model, and the plan brief says
   so.

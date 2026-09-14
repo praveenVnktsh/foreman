@@ -41,8 +41,12 @@ TOML
 py_home="$work_dir/py-home"
 fixture_add_instance "$py_home" demo "$fixture_repo"
 
+# FOREMAN_HOME is named explicitly in both runs below. config.sh no longer
+# derives it from $HOME: it asks bin/installation.py, which reads the home as
+# the parent of this clone. An explicit home is what that derivation yields to,
+# and it is how this file stays pointed at its temporary directory.
 echo "==> the ordinary case: CI_WORKFLOW comes from board.toml, no substitution"
-if out="$(HOME="$py_home" FOREMAN_INSTANCE=demo python3 -c "
+if out="$(HOME="$py_home" FOREMAN_HOME="$py_home/.foreman" FOREMAN_INSTANCE=demo python3 -c "
 import sys
 sys.path.insert(0, '$board_dir')
 import reconcile
@@ -56,7 +60,7 @@ else
 fi
 
 echo "==> an explicitly empty CI_WORKFLOW override is refused, not silently patched to \"CI\""
-if err="$(HOME="$py_home" FOREMAN_INSTANCE=demo CI_WORKFLOW= python3 -c "
+if err="$(HOME="$py_home" FOREMAN_HOME="$py_home/.foreman" FOREMAN_INSTANCE=demo CI_WORKFLOW= python3 -c "
 import sys
 sys.path.insert(0, '$board_dir')
 import reconcile

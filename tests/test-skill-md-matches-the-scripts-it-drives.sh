@@ -61,9 +61,16 @@ shim="$shim_root/skills/board"
 for f in config.sh dispatch.sh withlock.py brief.py plancomments.py reconcile.py; do
   ln -s "$board_dir/$f" "$shim/$f"
 done
-for f in contract.py boards.py tmp-dir.sh check-plan-graph.py; do
+# installation.py is read by config.sh before anything else, and load-pairs.sh
+# is what config.sh sources to read it -- both from THIS root's bin/, so a
+# shim without either refuses at config.sh's first line.
+for f in contract.py boards.py installation.py load-pairs.sh tmp-dir.sh check-plan-graph.py; do
   ln -s "$root/bin/$f" "$shim_root/bin/$f"
 done
+# config.sh checks that the adapter for this installation's harness is
+# executable under this root and refuses there rather than at the spawn. The
+# WHOLE directory, so a fourth harness needs no second edit here.
+ln -s "$board_dir/harness" "$shim/harness"
 cat > "$shim/preflight.py" <<'PY'
 #!/usr/bin/env python3
 import sys
@@ -165,7 +172,7 @@ for line in lines:
 # substituted path contains `/tmp/` at all: green locally, red on the runner.
 subs = [
     ("/tmp/", work + "/"),
-    ("~/.foreman/install/skills/board", shim),
+    ("~/.foreman/<installation>/install/skills/board", shim),
     ("<ticket-body>", body),
     ("<headRefOid>", sha),
     ("<TICKET>", ticket),
@@ -207,9 +214,14 @@ ok "SKILL.md shows one bash block per dispatched role, and no unrun extras"
 # Run one extracted block the way the tick would: this board's environment,
 # config.sh sourced (so `card_log` and `$BOARD_HOME` are the real ones), and
 # `$B` pointing at the install root.
+# FOREMAN_HOME is exported here and named in every other run below. config.sh
+# no longer derives it from $HOME: it asks bin/installation.py, which reads the
+# home as the parent of the install root -- the shim under $work, which holds
+# no boards.toml. An explicit home is what that derivation yields to.
 run_block() {
   ( set -e
-    export HOME="$home" FOREMAN_INSTANCE=demo PATH="$stub_bin:$PATH"
+    export HOME="$home" FOREMAN_HOME="$home/.foreman" FOREMAN_INSTANCE=demo \
+      PATH="$stub_bin:$PATH"
     # shellcheck disable=SC1090
     . "$shim/config.sh"
     B="$shim"
@@ -233,10 +245,13 @@ else
 $out"
 fi
 
-if spawned "foreman/demo/$TICKET/plan-1"; then
+# Every name starts at the INSTALLATION. This home declares no
+# installation.toml, so bin/installation.py reads it as the lone Claude
+# installation and the segment is `claude`.
+if spawned "foreman/claude/demo/$TICKET/plan-1"; then
   ok "the plan block spawns a plan agent for the card"
 else
-  bad "the plan block spawned no agent named foreman/demo/$TICKET/plan-1"
+  bad "the plan block spawned no agent named foreman/claude/demo/$TICKET/plan-1"
 fi
 
 if [[ -f "$work/p.md" ]] && grep -q 'foreman:plan round=1 consumed=' "$work/p.md"; then
@@ -255,7 +270,7 @@ else
 $(cat "$work/p.md" 2>/dev/null)"
 fi
 
-plan_worktree="$target/.claude/worktrees/foreman-demo-$TICKET-plan-1"
+plan_worktree="$target/.claude/worktrees/foreman-claude-demo-$TICKET-plan-1"
 if [[ -d "$plan_worktree" ]]; then
   ok "the plan block cuts the worktree dispatch.sh names for a plan agent"
 else
@@ -273,7 +288,7 @@ cat > "$work/comments.json" <<'JSON'
   {"id": "c2", "body": "What happens when the queue is empty?"}
 ]
 JSON
-env HOME="$home" FOREMAN_INSTANCE=demo "$shim/plancomments.py" \
+env HOME="$home" FOREMAN_HOME="$home/.foreman" FOREMAN_INSTANCE=demo "$shim/plancomments.py" \
   < "$work/comments.json" > "$work/plan.json"
 
 # Judged on what the block SAID, not on the status it returned. `run_block`
@@ -302,8 +317,15 @@ if [[ -z "$out" ]]; then
   bad "the replan block still runs with --role build, so its --role plan proves nothing"
 else
   case "$out" in
-    *"no agent named"*) ok "the same block with --role build is refused: no such agent to resume" ;;
-    *) bad "the block with --role build failed, but not at the agent lookup:
+    # Either refusal proves it, and which one fires is dispatch.sh's own
+    # ordering. The session lookup now lives inside the harness adapter, which
+    # needs a `--cwd` that exists, so the worktree check runs first. What both
+    # messages must name is the BUILD identity: with `--role build` the block
+    # resolves a different agent and a different worktree, and neither of them
+    # is anything a plan dispatch ever created.
+    *"no agent named"*build-1*|*"cannot resume"*build-1*)
+      ok "the same block with --role build is refused: no such agent to resume" ;;
+    *) bad "the block with --role build failed, but not on the build role's own identity:
 $out" ;;
   esac
 fi
@@ -337,10 +359,10 @@ else
 $out"
 fi
 
-if spawned "foreman/demo/$TICKET/build-1"; then
+if spawned "foreman/claude/demo/$TICKET/build-1"; then
   ok "the build block spawns a build agent for the card"
 else
-  bad "the build block spawned no agent named foreman/demo/$TICKET/build-1"
+  bad "the build block spawned no agent named foreman/claude/demo/$TICKET/build-1"
 fi
 
 if grep -q 'frobnicates on demand' "$work/b.md" 2>/dev/null; then
@@ -442,7 +464,7 @@ if [[ -z "$knobs" ]]; then
 else
   unset_knobs=""
   for knob in $knobs; do
-    if ! env HOME="$home" FOREMAN_INSTANCE=demo bash -c \
+    if ! env HOME="$home" FOREMAN_HOME="$home/.foreman" FOREMAN_INSTANCE=demo bash -c \
          ". '$shim/config.sh'; eval \"v=\\\${$knob+set}\"; [[ -n \"\$v\" ]]"; then
       unset_knobs="$unset_knobs $knob"
     fi

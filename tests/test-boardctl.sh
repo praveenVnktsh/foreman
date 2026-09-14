@@ -8,8 +8,10 @@
 # read boards.toml through bin/boards.py; `halt`/`resume` toggle
 # $FOREMAN_HOME/instances/<name>/HALT even before that directory otherwise
 # exists, and refuse an undeclared board; `migrate` writes boards.toml from
-# instance.env files without ever deleting them, all-or-nothing, and reports
-# a per-board linear.key that differs from the shared default.
+# instance.env files without ever deleting them, all-or-nothing, reports
+# a per-board linear.key that differs from the shared default, and reports
+# itself a no-op rather than refusing once boards.toml exists -- migrate has a
+# second step, and a refusal here would put it out of reach.
 #
 # No network is reached anywhere here: unlike the instance-directory-building
 # `add` this replaces, the new one never calls bin/resolve-ids.py, so there is
@@ -402,7 +404,13 @@ else
 fi
 
 # =============================================================================
-# Case: migrate REFUSES when boards.toml already exists
+# Case: migrate's boards.toml step is a no-op when boards.toml already exists
+#
+# A no-op and NOT a refusal, because migrate has a second step after this one.
+# The instance.env files survive the first step by design -- it tells the
+# operator to delete them by hand -- so dying here would make `boardctl
+# migrate` exit 1 forever on exactly the homes the second step exists for.
+# The file it would have written is left byte-identical either way.
 # =============================================================================
 home13="$(new_home)"
 target13="$(new_target)"
@@ -413,10 +421,11 @@ legacy_instance "$home13" leftover "$target13"
 status=0
 run "$home13" migrate >"$work_dir/migrate4.out" 2>"$work_dir/migrate4.err" || status=$?
 after13="$(cat "$home13/boards.toml")"
-if [[ $status -ne 0 ]] && [[ "$after13" == "$before13" ]]; then
-  ok "migrate REFUSES when boards.toml already exists"
+if [[ $status -eq 0 ]] && [[ "$after13" == "$before13" ]] \
+    && grep -qi "nothing to migrate" "$work_dir/migrate4.out"; then
+  ok "migrate's boards.toml step is a no-op, saying so, when boards.toml already exists"
 else
-  not_ok "migrate REFUSES when boards.toml already exists: status=$status changed=$([[ "$after13" != "$before13" ]] && echo yes || echo no)"
+  not_ok "migrate's boards.toml step is a no-op, saying so, when boards.toml already exists: status=$status changed=$([[ "$after13" != "$before13" ]] && echo yes || echo no) out=$(cat "$work_dir/migrate4.out") err=$(cat "$work_dir/migrate4.err")"
 fi
 
 # =============================================================================

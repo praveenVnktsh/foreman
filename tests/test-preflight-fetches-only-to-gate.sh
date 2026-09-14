@@ -116,7 +116,8 @@ run_preflight() {
   [[ -z "$mode" ]] || flags=("$mode")
   : > "$work_dir/git.log"
   out="$(
-    REPO="$repo" HOME="$inst_home" FOREMAN_INSTANCE=fixture \
+    REPO="$repo" HOME="$inst_home" FOREMAN_HOME="$inst_home/.foreman" \
+    FOREMAN_INSTANCE=fixture \
     PATH="$shim_dir:$PATH" GIT_SHIM_LOG="$work_dir/git.log" \
     QUICK_PROBE_MB=1 PROBE_TMP_MB=1 PROBE_REPO_MB=1 \
     MIN_FREE_TMP_MB=1 MIN_FREE_REPO_MB=1 \

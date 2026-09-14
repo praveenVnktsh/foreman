@@ -8,6 +8,12 @@
 # The names below are what keeps them apart. Assert on the SEPARATION, not just
 # the format: a test that only checks one instance's names passes on a regex
 # that matches both. Every case here compares alpha's output against beta's.
+#
+# Every name also starts at the INSTALLATION, one level above the board. This
+# home declares no installation.toml, so bin/installation.py reads it as the
+# lone Claude installation and that segment is `claude` throughout. The
+# separation this file is about is the board segment; the installation segment
+# has tests/test-names-carry-installation.sh.
 set -euo pipefail
 
 here="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
@@ -35,15 +41,18 @@ done
 
 # ask_fn <instance> <function> <args...> -- calls a config.sh function and
 # prints what it prints.
+# FOREMAN_HOME is named explicitly in every probe below. config.sh no longer
+# derives it from $HOME: it asks bin/installation.py, which reads the home as
+# the parent of this clone. An explicit home is what that derivation yields to.
 ask_fn() {
   local inst="$1" fn="$2"; shift 2
-  env HOME="$home" FOREMAN_INSTANCE="$inst" \
+  env HOME="$home" FOREMAN_HOME="$home/.foreman" FOREMAN_INSTANCE="$inst" \
     bash -c ". '$skill/config.sh' >/dev/null; \"\$1\" \"\${@:2}\"" _ "$fn" "$@"
 }
 # ask_var <instance> <VAR> [env assignments...] -- prints a config.sh variable.
 ask_var() {
   local inst="$1" var="$2"; shift 2
-  env HOME="$home" FOREMAN_INSTANCE="$inst" "$@" \
+  env HOME="$home" FOREMAN_HOME="$home/.foreman" FOREMAN_INSTANCE="$inst" "$@" \
     bash -c ". '$skill/config.sh' >/dev/null; printf '%s' \"\$$var\""
 }
 
@@ -58,8 +67,8 @@ branch_beta="$(ask_fn beta branch_name PRA-1)"
 evref_alpha="$(ask_fn alpha evidence_ref 12345)"
 evref_beta="$(ask_fn beta evidence_ref 12345)"
 
-check "alpha build agent has the expected shape" "foreman/alpha/PRA-1/build-1" "$build_agent_alpha"
-check "beta build agent has the expected shape"  "foreman/beta/PRA-1/build-1"  "$build_agent_beta"
+check "alpha build agent has the expected shape" "foreman/claude/alpha/PRA-1/build-1" "$build_agent_alpha"
+check "beta build agent has the expected shape"  "foreman/claude/beta/PRA-1/build-1"  "$build_agent_beta"
 # The tick is the ONE name that is deliberately NOT board-scoped. There is a
 # single tick for the machine, walking every board a slice at a time, so two
 # boards resolving the same tick name is the design and not a collision.
@@ -67,10 +76,10 @@ check "beta build agent has the expected shape"  "foreman/beta/PRA-1/build-1"  "
 # Every other name below still carries the board, and that is what this file is
 # really protecting: `claude agents` is one flat registry, so a shared
 # agent/branch/worktree/evidence name would let one board reap another's work.
-check "alpha resolves the shared tick name" "foreman/tick" "$tick_alpha"
-check "beta resolves the same shared tick"  "foreman/tick" "$tick_beta"
-check "alpha branch has the expected shape" "foreman/alpha/PRA-1" "$branch_alpha"
-check "alpha evidence ref has the expected shape" "refs/foreman/alpha/evidence/12345" "$evref_alpha"
+check "alpha resolves the shared tick name" "foreman/claude/tick" "$tick_alpha"
+check "beta resolves the same shared tick"  "foreman/claude/tick" "$tick_beta"
+check "alpha branch has the expected shape" "foreman/claude/alpha/PRA-1" "$branch_alpha"
+check "alpha evidence ref has the expected shape" "refs/foreman/claude/alpha/evidence/12345" "$evref_alpha"
 
 check_ne "alpha and beta build agents differ" "$build_agent_alpha" "$build_agent_beta"
 check "alpha and beta share one tick"        "$tick_alpha"        "$tick_beta"
@@ -86,7 +95,7 @@ check_ne "alpha and beta evidence refs differ" "$evref_alpha"      "$evref_beta"
 shared="$work/target-alpha"
 ask_fn_with_repo() { # instance repo
   local inst="$1" repo="$2"
-  env HOME="$home" FOREMAN_INSTANCE="$inst" REPO="$repo" \
+  env HOME="$home" FOREMAN_HOME="$home/.foreman" FOREMAN_INSTANCE="$inst" REPO="$repo" \
     bash -c ". '$skill/config.sh' >/dev/null; worktree_path PRA-1"
 }
 worktree_alpha_shared="$(ask_fn_with_repo alpha "$shared")"
@@ -101,7 +110,8 @@ check_ne "worktrees differ by instance even under the SAME repo" \
 watch_src="$skill/watch-agents.py"
 run_watch_probe() {
   local inst="$1"
-  env HOME="$home" FOREMAN_INSTANCE="$inst" python3 - "$watch_src" <<'PY'
+  env HOME="$home" FOREMAN_HOME="$home/.foreman" FOREMAN_INSTANCE="$inst" \
+    python3 - "$watch_src" <<'PY'
 import sys
 path = sys.argv[1]
 src = open(path).read()
@@ -109,10 +119,10 @@ ns = {"__file__": path}
 exec(src.split("\ndef poll")[0], ns)
 _dispatched = ns["_dispatched"]
 cases = [
-    "foreman/alpha/PRA-1/build-1",
-    "foreman/beta/PRA-1/build-1",
-    "foreman/tick",
-    "foreman/alpha/PRA-1/review-2a",
+    "foreman/claude/alpha/PRA-1/build-1",
+    "foreman/claude/beta/PRA-1/build-1",
+    "foreman/claude/tick",
+    "foreman/claude/alpha/PRA-1/review-2a",
 ]
 print("|".join("1" if _dispatched(c) is not None else "0" for c in cases))
 PY
@@ -138,7 +148,8 @@ check_ne "the same agent list produces DIFFERENT matches for alpha vs. beta" \
 run_reconcile_probe() {
   # agents (as a |-joined list of names), ticket -> |-joined matched names
   local inst="$1" agents="$2" ticket="$3"
-  env HOME="$home" FOREMAN_INSTANCE="$inst" python3 - "$skill" "$agents" "$ticket" <<'PY'
+  env HOME="$home" FOREMAN_HOME="$home/.foreman" FOREMAN_INSTANCE="$inst" \
+    python3 - "$skill" "$agents" "$ticket" <<'PY'
 import sys
 sys.path.insert(0, sys.argv[1])
 import reconcile
@@ -149,13 +160,13 @@ PY
 }
 
 cross_instance="$(run_reconcile_probe alpha \
-  "foreman/alpha/PRA-1/build-1|foreman/beta/PRA-1/build-1" PRA-1)"
+  "foreman/claude/alpha/PRA-1/build-1|foreman/claude/beta/PRA-1/build-1" PRA-1)"
 check "reconcile's prefix for alpha excludes beta's agents" \
-  "foreman/alpha/PRA-1/build-1" "$cross_instance"
+  "foreman/claude/alpha/PRA-1/build-1" "$cross_instance"
 
 prefix_substring="$(run_reconcile_probe alpha \
-  "foreman/alpha/PRA-1/build-1|foreman/alpha/PRA-10/build-1|foreman/alpha/PRA-11/build-1" PRA-1)"
+  "foreman/claude/alpha/PRA-1/build-1|foreman/claude/alpha/PRA-10/build-1|foreman/claude/alpha/PRA-11/build-1" PRA-1)"
 check "reconcile's prefix for PRA-1 excludes PRA-10 and PRA-11 (prefix, not substring)" \
-  "foreman/alpha/PRA-1/build-1" "$prefix_substring"
+  "foreman/claude/alpha/PRA-1/build-1" "$prefix_substring"
 
 exit "$fail"

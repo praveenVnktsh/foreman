@@ -79,68 +79,78 @@ fi
 # or a reviewer for a card the board is already working must pass: refusing
 # those would block every fix-dispatch behind the card's own slot. That is why
 # `--host-slots` reports which tickets are holding, not just how many.
-# The concurrency ceilings, held here rather than only in SKILL.md.
-#
-# SKILL.md states the arithmetic exactly -- a board's free slots are its
-# MAX_CONCURRENT minus its cards in progress and in review -- but that is prose
-# an agent is asked to follow, and prose is not a gate. On 2026-09-01 a tick
-# adopted five cards left In Progress by a previous layout and dispatched a build
-# for each, against a MAX_CONCURRENT of 1. The machine reached a load average of
-# 14 with four builds, a tick and a self-hosted CI runner competing for 14GB, and
-# an earlier OOM had already killed that runner the same night.
-#
-# So this refuses, for the same reason and in the same voice as the preflight
-# gate above: it holds however this script is called -- by the tick, by a resume,
-# or by hand -- rather than only when the caller remembers to count first.
-#
-# A card that ALREADY holds a slot is not consuming a new one. A resume, a fix,
-# or a reviewer for a card the board is already working must pass: refusing
-# those would block every fix-dispatch behind the card's own slot. That is why
-# `--host-slots` reports which tickets are holding, not just how many.
 #
 # The MACHINE half of the arithmetic lives in `reconcile.py --may-dispatch`,
 # which weighs each board's priority so one busy board cannot hold every slot.
 # It is Python, and testable; the previous inline version was shell-embedded
 # python where a single apostrophe closed the surrounding quoted string and
 # disabled the whole gate with no error at all.
-HELD="$("$SKILL_DIR/reconcile.py" --host-slots 2>/dev/null || true)"
-ALREADY_HOLDS=""
-if [[ -n "$HELD" ]]; then
-  ALREADY_HOLDS="$(printf '%s' "$HELD" | python3 -c '
+#
+# A COUNT THAT CANNOT BE TAKEN REFUSES THE DISPATCH. This used to read
+# `HELD="$(... 2>/dev/null || true)"` and then skip the whole gate when HELD
+# was empty, so any failure of `--host-slots` -- a sibling installation whose
+# boards.toml will not load is enough, and one unmounted repository path is
+# enough for that -- disabled both ceilings with nothing at all on stderr. That
+# is the same silence this comment's own 2026-09-01 paragraph records, reached
+# the other way round. reconcile.py's stderr is not captured, so whatever it
+# could not read is named above this refusal.
+if ! HELD="$("$SKILL_DIR/reconcile.py" --host-slots)"; then
+  die "could not count the machine's slots; refusing to dispatch $NAME.
+reconcile.py's own message is above: a sibling installation whose boards.toml
+will not load, or this installation's own scripts being unrunnable.
+This is NOT a failure of ticket $TICKET and must not consume its attempt budget.
+Repair the machine, then dispatch again at the same attempt number."
+fi
+# `--host-slots` counts every board of every installation under this machine's
+# root, so its keys are `<installation>/<board>` and not the bare board name.
+# Two installations may serve one repository, and keyed by board alone one
+# would overwrite the other's count. Read with the bare name, every lookup
+# below missed, `held` came back empty, and this board's own ceiling passed a
+# dispatch through however many cards were already in flight -- the gate
+# disabled with no error at all, which is the failure its own comment records.
+SLOT_KEY="$INSTALLATION/$INSTANCE"
+# No `try:` around the parse and no `|| true` on the pipeline any more. HELD is
+# what json.dump wrote a moment ago, so a parse that fails here says python3
+# itself is broken, and answering "this card holds no slot" to that is the
+# disabled gate again.
+ALREADY_HOLDS="$(printf '%s' "$HELD" | python3 -c '
 import json, sys
-try:
-    d = json.load(sys.stdin)
-except Exception:
-    sys.exit(0)
+d = json.load(sys.stdin)
 board, ticket = sys.argv[1], sys.argv[2]
 held = (d.get("tickets") or {}).get(board) or []
 print("yes" if ticket in held else "")
-' "$INSTANCE" "$TICKET" 2>/dev/null || true)"
+' "$SLOT_KEY" "$TICKET")" || die "could not read the slot count reconcile.py printed; refusing to dispatch $NAME.
+This is NOT a failure of ticket $TICKET and must not consume its attempt budget."
 
-  if [[ -z "$ALREADY_HOLDS" ]]; then
-    # This board's own ceiling first, then the machine's.
-    OWN="$(printf '%s' "$HELD" | python3 -c '
+if [[ -z "$ALREADY_HOLDS" ]]; then
+  # This board's own ceiling first, then the machine's.
+  OWN="$(printf '%s' "$HELD" | python3 -c '
 import json, sys
-try:
-    d = json.load(sys.stdin)
-except Exception:
-    sys.exit(0)
+d = json.load(sys.stdin)
 board, board_max = sys.argv[1], int(sys.argv[2])
 held = (d.get("tickets") or {}).get(board) or []
 names = ", ".join(held)
 if len(held) >= board_max:
     print(f"board {board} holds {len(held)} of {board_max} slots: {names}")
-' "$INSTANCE" "$MAX_CONCURRENT" 2>/dev/null || true)"
-    MACHINE="$(HOST_MAX_CONCURRENT="$HOST_MAX_CONCURRENT" \
-      "$SKILL_DIR/reconcile.py" --may-dispatch "$INSTANCE" 2>/dev/null || true)"
-    VERDICT="${OWN:-$MACHINE}"
-    if [[ -n "$VERDICT" ]]; then
-      die "at the concurrency ceiling; refusing to dispatch $NAME.
+' "$SLOT_KEY" "$MAX_CONCURRENT")" || die "could not weigh this board against its own ceiling; refusing to dispatch $NAME.
+This is NOT a failure of ticket $TICKET and must not consume its attempt budget."
+  # Refused the same way and for the same reason as `--host-slots` above: this
+  # is the half of the arithmetic that weighs every OTHER board on the machine,
+  # so a failure here is a machine ceiling nobody checked.
+  if ! MACHINE="$(HOST_MAX_CONCURRENT="$HOST_MAX_CONCURRENT" \
+    "$SKILL_DIR/reconcile.py" --may-dispatch "$INSTANCE")"; then
+    die "could not weigh this machine's ceiling; refusing to dispatch $NAME.
+reconcile.py's own message is above.
+This is NOT a failure of ticket $TICKET and must not consume its attempt budget.
+Repair the machine, then dispatch again at the same attempt number."
+  fi
+  VERDICT="${OWN:-$MACHINE}"
+  if [[ -n "$VERDICT" ]]; then
+    die "at the concurrency ceiling; refusing to dispatch $NAME.
 $VERDICT
 This is NOT a failure of ticket $TICKET and must not consume its attempt budget.
 Wait for a card to release a slot, or raise the limit deliberately in the
 target's board.toml (MAX_CONCURRENT) or this machine's boards.toml (priority)."
-    fi
   fi
 fi
 
@@ -174,44 +184,25 @@ case "$ROLE" in
     ;;
 esac
 
-# Resolve an agent by its deterministic name. This is what makes the sidecar
-# disposable: the name is derivable, so the session id never has to be remembered.
-#
-# `--bg --resume` FORKS — it starts a new session id and inherits the name, so
-# several agents legitimately share one name. The newest is the live one, so
-# always sort by startedAt and take the last. Taking the first resumes a dead
-# session and silently loses every turn since.
-lookup_session() {
-  claude agents --json --all 2>/dev/null | python3 -c '
-import json,sys
-want=sys.argv[1]
-try: agents=json.load(sys.stdin)
-except Exception: sys.exit(0)
-matches=[a for a in agents if a.get("name")==want]
-if matches:
-    print(max(matches, key=lambda a: a.get("startedAt") or 0).get("sessionId",""))
-' "$NAME"
-}
-
-EXTRA=()
-[[ -n "$MAX_BUDGET_USD" ]] && EXTRA=(--max-budget-usd "$MAX_BUDGET_USD")
-# `--dangerously-skip-permissions` IS `--permission-mode bypassPermissions`;
-# passing both conflicts, so it is one or the other. Either way the last flag
-# before the prompt is non-variadic, which is what keeps the prompt from being
-# swallowed. This applies to RESUME too — a resumed agent with no permission
-# flag blocks on its first Bash call exactly like a fresh one.
+# Whether to pass --skip-permissions to the adapter.
 #
 # "0" is off too, not just empty: `-n` alone reads the STRING "0" as
 # non-empty, i.e. "on" -- exactly the value an operator would type expecting
 # it to mean off, and previously the one value that could never turn this off
 # at all (config.sh's old `:-` also silently reinstated the default for an
 # explicitly empty override). Both are honoured now.
+SKIP_PERMISSIONS=()
 if [[ -n "$AGENT_SKIP_PERMISSIONS" && "$AGENT_SKIP_PERMISSIONS" != "0" ]]; then
-  EXTRA+=(--dangerously-skip-permissions)
-else
-  EXTRA+=(--permission-mode acceptEdits)
+  SKIP_PERMISSIONS=(--skip-permissions)
 fi
-set -- ${EXTRA[@]+"${EXTRA[@]}"}
+
+# The per-agent spend ceiling, when the operator set one. Passed to the
+# adapter on the spawn AND the resume path: a resumed agent spends the same way
+# a fresh one does. Only harness/claude.sh can hold it; the other two refuse it
+# by name, so a MAX_BUDGET_USD on a codex or opencode installation fails every
+# dispatch loudly rather than running uncapped in silence.
+BUDGET=()
+[[ -z "$MAX_BUDGET_USD" ]] || BUDGET=(--max-budget-usd "$MAX_BUDGET_USD")
 
 if [[ -n "$BOARD_DRY_RUN" ]]; then
   printf 'DRY RUN: would %s %s (model=%s worktree=%s ref=%s)\n' \
@@ -220,16 +211,22 @@ if [[ -n "$BOARD_DRY_RUN" ]]; then
 fi
 
 if [[ -n "$RESUME" ]]; then
-  SESSION="$(lookup_session)"
-  [[ -n "$SESSION" ]] || die "no agent named $NAME to resume"
-  # Resuming into a deleted working directory produces a second silent failure,
-  # so this refuses instead. The caller's fallback is a FRESH dispatch at the
+  # Resuming into a deleted working directory produces a silent failure, so
+  # this refuses instead. The caller's fallback is a FRESH dispatch at the
   # next attempt number, which rebuilds the worktree from origin/main — the
   # agent loses its context but the card keeps moving. See SKILL.md step 2.
   [[ -d "$WORKTREE" ]] || die "worktree $WORKTREE is gone; cannot resume $NAME.
 Dispatch fresh (drop --resume, use the next attempt number) instead."
-  cd "$WORKTREE"
-  claude --bg --resume "$SESSION" --settings "$CARD_AGENT_SETTINGS" "$@" "$PROMPT" >/dev/null
+  # The adapter resolves the session by name and prints it; see its header for
+  # the lookup rule (newest startedAt wins). A failed resolve or resume is the
+  # adapter's own refusal, so its non-zero exit is this script's non-zero exit.
+  #
+  # `--settings` carries CARD_AGENT_SETTINGS on the resume path too: a resumed
+  # build is a card agent, and config.sh records why every card agent needs it.
+  SESSION="$("$HARNESS_SH" resume --name "$NAME" --cwd "$WORKTREE" \
+    --prompt-file "$PROMPT_FILE" --settings "$CARD_AGENT_SETTINGS" \
+    "${BUDGET[@]+"${BUDGET[@]}"}" \
+    "${SKIP_PERMISSIONS[@]+"${SKIP_PERMISSIONS[@]}"}")"
   card_log "$TICKET" "$(printf '{"action":"resume","name":"%s","session":"%s"}' "$NAME" "$SESSION")"
   printf '%s\n' "$SESSION"
   exit 0
@@ -290,17 +287,6 @@ Repair the environment, then dispatch again at the same attempt number."
   fi
 fi
 
-# bash 3.2 + `set -u`: "${arr[@]}" on an EMPTY array is an unbound-variable
-# error, not an empty expansion. The `+` form is the portable way to say
-# "expand only if set".
-# A review worktree is throwaway and never merged, so acceptEdits is contained;
-# the reviewer needs write access only to drop its findings under BOARD_HOME.
-#
-# ORDER IS LOAD-BEARING. `--add-dir <directories...>` and `--tools <tools...>`
-# are VARIADIC: whatever follows them is eaten as another value. A prompt placed
-# after one produces an agent that starts, authenticates, and then sits at an
-# empty prompt box forever — `state: blocked`, no transcript, no error.
-# Keep a non-variadic flag (`--permission-mode`) immediately before the prompt.
 # Create the scratch dir paired with this worktree. It is NOT exported as
 # TMPDIR here and must not be: a background agent inherits its environment from
 # the shared `claude daemon`, not from this script, so every agent after the
@@ -311,17 +297,22 @@ fi
 # that cannot go stale. sweep.sh reaps it.
 mkdir -p "$(agent_tmp_for "$WORKTREE")"
 
-cd "$WORKTREE"
-claude --bg \
-  --name "$NAME" \
-  --model "$MODEL" \
-  --settings "$CARD_AGENT_SETTINGS" \
-  --add-dir "$BOARD_HOME" \
-  "$@" \
-  "$PROMPT" >/dev/null
-
-SESSION="$(lookup_session)"
-[[ -n "$SESSION" ]] || die "spawned $NAME but it never registered with claude agents"
+# The adapter resolves and prints the session id itself -- see its header --
+# so a "never registered" failure surfaces as ITS non-zero exit, not a second
+# lookup here.
+#
+# `--settings` is CARD_AGENT_SETTINGS, on every card agent and never the tick;
+# config.sh records why.
+#
+# bash 3.2 + `set -u`: "${arr[@]}" on an EMPTY array is an unbound-variable
+# error, not an empty expansion. The `+` form below is the portable way to say
+# "expand only if set", and BUDGET and SKIP_PERMISSIONS are both empty on an
+# ordinary dispatch.
+SESSION="$("$HARNESS_SH" spawn --name "$NAME" --cwd "$WORKTREE" --model "$MODEL" \
+  --prompt-file "$PROMPT_FILE" --add-dir "$BOARD_HOME" \
+  --settings "$CARD_AGENT_SETTINGS" "${BUDGET[@]+"${BUDGET[@]}"}" \
+  "${SKIP_PERMISSIONS[@]+"${SKIP_PERMISSIONS[@]}"}")" \
+  || die "spawned $NAME but the adapter never reported a session id"
 
 mkdir -p "$(card_dir "$TICKET")"
 card_log "$TICKET" "$(printf '{"action":"spawn","name":"%s","session":"%s","worktree":"%s","role":"%s","attempt":"%s"}' \
