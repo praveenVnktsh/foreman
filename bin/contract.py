@@ -52,6 +52,15 @@ SCALARS = [
     # deploys on every merge, with no scheduling step to read, has nothing to
     # name here, so absence must stay "" rather than refuse to load.
     ("DEPLOY_SELECTION_STEP", ("deploy", "selection_step"), ""),
+    # Names the GitHub label the board copies onto a merged pull request when
+    # the Linear card carries a Linear label of the identical name -- the
+    # operator's mark of urgency, never foreman's own guess. The target's
+    # deploy selection step reads that label off the merged PR to deploy at
+    # once instead of joining the schedule; see merge.py. Optional: absence
+    # ("") means the board never adds a label and every merge queues on the
+    # target's normal schedule. The same string names the label on both
+    # sides -- Linear and GitHub -- so one board.toml entry is enough.
+    ("FAST_TRACK_LABEL", ("deploy", "fast_track_label"), ""),
 ]
 
 # (key, toml path, joiner, default). A default of None marks it REQUIRED.
@@ -185,7 +194,7 @@ LIMITS = {
 KNOWN_TABLES = {
     "linear": {"team", "project"},
     "checks": {"required", "ci_workflow"},
-    "deploy": {"workflow", "step", "selection_step"},
+    "deploy": {"workflow", "step", "selection_step", "fast_track_label"},
     "risk": {"paths"},
     "test": {"command"},
     "bootstrap": {"command"},
@@ -271,6 +280,15 @@ def load(path: str) -> list[tuple[str, str]]:
             die(f"{path}: {'.'.join(path_)} may not be empty")
         if "\0" in value:
             die(f"{path}: {'.'.join(path_)} may not contain a NUL byte")
+        # FAST_TRACK_LABEL round-trips through `gh pr edit --add-label`, which
+        # SPLITS its argument ON COMMAS and would silently add a different
+        # label (or several) than the one written here; leading/trailing
+        # whitespace is the same class of mismatch, since it would compare
+        # unequal to the Linear label of the "same" name in route.label_names().
+        if key == "FAST_TRACK_LABEL" and value != value.strip():
+            die(f"{path}: {'.'.join(path_)} may not have leading or trailing whitespace")
+        if key == "FAST_TRACK_LABEL" and "," in value:
+            die(f"{path}: {'.'.join(path_)} may not contain a comma (gh --add-label splits on it)")
         out.append((key, value))
 
     for key, path_, joiner, default in LISTS:

@@ -70,6 +70,7 @@ ci_workflow = "CI"                # workflow NAME, matching `name:` in the yml
 workflow = "deploy.yml"
 step = "Deploy and verify"        # the step, not the job -- see below
 selection_step = "Choose the revision to deploy"  # optional; reads a queued deploy's reason
+fast_track_label = "fast-track"   # optional; copied from the card to the PR before merge
 
 [risk]
 paths = ["migrations/"]
@@ -96,7 +97,7 @@ rejected: with no isolation between instances, a config that can run code runs
 as the operator's user beside every other instance's credentials, before
 anything has decided whether that repository is trusted.
 
-Four entries carry the reasoning that produced them and must not be flattened
+Five entries carry the reasoning that produced them and must not be flattened
 into "settings":
 
 - `deploy.step`, not `deploy.workflow` alone. A deploy job concludes `success`
@@ -121,6 +122,18 @@ into "settings":
 - `docs.required` is the extension point for style guides and anything else a
   future project wants every agent to have read. A style guide is a contract
   entry, not new machinery.
+- `deploy.fast_track_label` exists because a target that queues deploys still
+  needs a way to skip the queue: a merged pull request carrying this GitHub
+  label deploys as soon as main is green. The operator marks urgency on the
+  Linear card, not on a pull request foreman opens, so the card is the only
+  source -- foreman applies the label only when the card carries a Linear
+  label of the same name, and never decides urgency on its own. The copy
+  happens right before `gh pr merge`, at the latest, because the operator may
+  add the Linear label after the pull request already opened. A failed copy
+  means no merge that tick, reported to the card and the tick report, because
+  merging without the label would silently queue a deploy the operator asked
+  to hurry. Absent means off. It is declared here rather than hardcoded
+  because foreman names nothing target-specific.
 
 The values above are murmr's, because they are the only ones that have ever
 been proven. **murmr gets no such file under this spec** — they are shown

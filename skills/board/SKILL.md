@@ -141,8 +141,8 @@ in its own process — refuses with `FOREMAN_INSTANCE is unset`. Exported, every
 helper in the slice inherits the board.
 
 **`cd "$REPO"`.** Bare `gh` reads the repository from the working directory, and
-the merge, ready, update-branch and re-run commands in steps 2, 4 and 5 are all
-bare. Pull request numbers are per repository and small, so `gh pr merge 42` run
+the ready, update-branch and re-run commands in steps 2, 4 and 5 are all
+bare (`merge.py` runs its own `gh` in `REPO`). Pull request numbers are per repository and small, so `gh pr merge 42` run
 from the wrong checkout does not fail — it finds a real, different pull request
 and merges it. Change directory inside the subshell so that ends with the slice
 too.
@@ -1643,13 +1643,57 @@ Before merging, three things that make a green PR lie:
   That path is high-risk anyway, so it parks; mention the collision if you
   see one.
 
-Merge with `gh pr merge <n> --squash`. Never enable auto-merge.
+Merge through `merge.py`. Re-read the card from Linear this tick first, labels
+included: the operator may add the fast-track label after the pull request
+opened, and a card read before that misses it.
+
+```bash
+B=~/.foreman/<installation>/install/skills/board
+M="${AGENT_TMP_ROOT:?source config.sh first}/merge"
+mkdir -p "$M"
+cat > "$M/card.json" <<'JSON'
+{ ... this card, re-read this tick, as the JSON Linear returned, labels included ... }
+JSON
+"$B/merge.py" <n> < "$M/card.json"; echo "--- exit: $? ---"
+```
+
+`merge.py` copies the target's declared fast-track label to the pull request
+right before it merges. The label is `[deploy] fast_track_label` in the target's
+`board.toml`, emitted as `FAST_TRACK_LABEL`. The same name is used on the Linear
+card and on GitHub. `merge.py` adds it only when the card carries a label of
+exactly that name, and never when the target declares none. It then runs
+`gh pr merge <n> --squash`. It never enables auto-merge.
+
+**Never run a bare `gh pr merge` for a card instead.** That is how the label gets
+skipped: the pull request merges without it, and the target queues a deploy the
+operator asked to hurry.
+
+`merge.py` prints one JSON object (`pr`, `merged`, `fast_tracked`, `label`,
+`reason`) and exits one of four ways:
+
+- **exit 0** — merged. `fast_tracked` says whether the label went on first.
+- **exit 1** — **not merged**, because the card carries the label and copying it
+  to the pull request failed. The usual cause is a label that does not exist on
+  the repository. Leave the card in `In Review`. Do not charge an attempt and do
+  not add `board-failed`: the diff is fine, only the label is missing. Report it
+  on the card and in the tick's report, and quote the `gh` error from `reason`.
+  Try again next tick. Merging without the label would silently queue a deploy
+  the operator asked to hurry.
+- **exit 3** — `gh pr merge` itself failed. Quote `reason` on the card.
+  `fast_tracked` says whether the label is already on the pull request.
+- **exit 2** — called wrong or the card JSON was unreadable, and no JSON was
+  printed. Merge nothing. Fix the call and run it again.
+
+**Say it on the card.** When `merge.py` reports `fast_tracked: true`, the merge
+comment says the deploy was **fast-tracked** (label copied from the card), not
+queued.
 
 **From this board's `$REPO`, always.** `gh` takes the repository from the working
 directory, and a pull request number is only unique within one. Run from the
 wrong checkout, `gh pr merge <n> --squash` does not fail — it squashes a real,
-unrelated pull request. The `cd "$REPO"` in the slice's subshell is what
-prevents that; the same applies to `gh pr ready`, `gh pr update-branch` and
+unrelated pull request. `merge.py` runs its own `gh` calls in `REPO` from
+`config.sh`, so it is safe from any directory. The `cd "$REPO"` in the slice's
+subshell still protects the bare `gh pr ready`, `gh pr update-branch` and
 `gh run rerun` above.
 
 ### 5. Reconcile `Done`
@@ -1754,10 +1798,15 @@ step alone never means queued.** `deploy-queued` is read from the selection
 step's logged reason (`queued: ...`); a `stand-down: ...` reason skips the same
 step and keeps the wait open.
 
-**The board never applies the `fast-track` label**, nor any other label that
-makes a target deploy sooner. A queued card stays queued until the target's
-schedule deploys it. Fast-tracking a deploy is the operator's call, because the
+**The board applies the fast-track label only when the Linear card carries it.**
+The label is the one the target declares in `[deploy] fast_track_label`, and
+`merge.py` copies it in step 4. The card is the only source. The board never
+decides a card is urgent itself, and applies no other label that makes a target
+deploy sooner. Fast-tracking a deploy is the operator's call, because the
 schedule exists so that a human decides when production changes out of turn.
+With the label on the pull request, the deploy verdict reads a deploy that ran,
+not `deploy-queued`. A card without the label stays queued until the target's
+schedule deploys it.
 
 ### 6. Dispatch
 
@@ -2136,6 +2185,11 @@ report reads exactly like a board with no work — which is the failure
 round-robin exists to make visible, so do not drop the quiet ones to keep the
 report short.
 
+**A refused label copy is reported too**, though the card did not move. When
+`merge.py` exits 1, name the card, the label and the `gh` error in the tick's
+report. The card waits in `In Review` until the label exists on the repository,
+and only the report tells the operator why.
+
 A tick where no board changed anything says so in one line and stops.
 
 ## Rules
@@ -2154,8 +2208,8 @@ A tick where no board changed anything says so in one line and stops.
   source `config.sh`, `cd "$REPO"`, all inside `( )`. Without the subshell the
   previous board's repository, credential and risk paths survive into the next
   board's decisions; without the `export` every helper refuses; without the `cd`
-  a bare `gh pr merge <n>` squashes a same-numbered pull request in the wrong
-  repository.
+  a bare `gh pr ready <n>` or `gh pr update-branch <n>` acts on a same-numbered
+  pull request in the wrong repository.
 - **Halting is per board.** `$FOREMAN_HOME/instances/<board>/HALT` skips that
   board whole and stops nothing else. Say which boards were skipped.
 - **`HOST_MAX_CONCURRENT` is yours to hold.** One tick sees every board, so
