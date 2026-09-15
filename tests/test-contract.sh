@@ -30,6 +30,7 @@ ci_workflow = "CI"
 workflow = "deploy.yml"
 step = "Deploy and verify"
 selection_step = "Choose the revision to deploy"
+fast_track_label = "fast-track"
 [risk]
 paths = ["migrations/"]
 [test]
@@ -48,6 +49,7 @@ check "test command"                    "make test" "$(read_key "$work/full.toml
 check "limits are upper-cased"          "2" "$(read_key "$work/full.toml" MAX_CONCURRENT)"
 check "unset limit falls back"          "2" "$(read_key "$work/full.toml" MAX_REVIEW_ROUNDS)"
 check "deploy selection_step loads"     "Choose the revision to deploy" "$(read_key "$work/full.toml" DEPLOY_SELECTION_STEP)"
+check "deploy fast_track_label loads"   "fast-track" "$(read_key "$work/full.toml" FAST_TRACK_LABEL)"
 
 # Task 6 (decisions §2): MIN_FREE_TMP_MB, MIN_FREE_REPO_MB, PROBE_TMP_MB,
 # PROBE_REPO_MB and QUICK_PROBE_MB were added to LIMITS alongside the
@@ -102,6 +104,7 @@ TOML
 check "absent deploy workflow is empty, not missing" "" "$(read_key "$work/nodeploy.toml" DEPLOY_WORKFLOW)"
 check "absent deploy step is empty, not missing"     "" "$(read_key "$work/nodeploy.toml" DEPLOY_STEP)"
 check "absent deploy selection_step is empty, not missing" "" "$(read_key "$work/nodeploy.toml" DEPLOY_SELECTION_STEP)"
+check "absent deploy fast_track_label is empty, not missing" "" "$(read_key "$work/nodeploy.toml" FAST_TRACK_LABEL)"
 
 # An existing target's [deploy] table -- workflow and step set, but written
 # before selection_step existed -- must keep reading exactly as it always
@@ -122,6 +125,8 @@ command = "make test"
 TOML
 check "a [deploy] table written before selection_step existed still reads empty for it" \
   "" "$(read_key "$work/deploynoselection.toml" DEPLOY_SELECTION_STEP)"
+check "a [deploy] table written before fast_track_label existed still reads empty for it" \
+  "" "$(read_key "$work/deploynoselection.toml" FAST_TRACK_LABEL)"
 
 # An explicitly empty risk list means NOTHING is high risk. It must not fall
 # back to a default -- the same distinction `HIGH_RISK_PATHS` uses `-` for.
@@ -256,6 +261,28 @@ if err="$("$root/bin/contract.py" "$work/unknownkey.toml" 2>&1 >/dev/null)"; the
 else
   case "$err" in *commnad*) printf 'ok   unknown key under a non-limits table is refused\n' ;;
     *) printf 'FAIL error did not name commnad: %s\n' "$err"; fail=1 ;; esac
+fi
+
+# fast_track_label round-trips through `gh pr edit --add-label`, which splits
+# its argument on commas -- a comma in the value would silently add a
+# different label (or several) than the one written here.
+cat >"$work/fasttrackcomma.toml" <<'TOML'
+[linear]
+team = "PRA"
+project = "foreman"
+[checks]
+required = ["Tests"]
+ci_workflow = "CI"
+[deploy]
+fast_track_label = "fast,track"
+[test]
+command = "make test"
+TOML
+if err="$("$root/bin/contract.py" "$work/fasttrackcomma.toml" 2>&1 >/dev/null)"; then
+  printf 'FAIL a comma in deploy.fast_track_label must be refused\n'; fail=1
+else
+  case "$err" in *deploy.fast_track_label*) printf 'ok   comma in fast_track_label is refused\n' ;;
+    *) printf 'FAIL error did not name deploy.fast_track_label: %s\n' "$err"; fail=1 ;; esac
 fi
 
 # Finding 3, other half: an unknown table at the top level must be refused
