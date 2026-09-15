@@ -81,7 +81,7 @@ resolving. Nothing writes them.
 
 ```toml
 [cleanup]
-every_days = 7        # 0 = off; the default
+every_days = 3        # the default; 0 = off
 model = "opus"        # optional; defaults to PLAN_MODEL
 max_plan_nodes = 8    # a larger plan, or one touching [risk] paths, waits for the operator
 ```
@@ -89,6 +89,10 @@ max_plan_nodes = 8    # a larger plan, or one touching [risk] paths, waits for t
 `contract.py` exports `CLEANUP_EVERY_DAYS`, `CLEANUP_MODEL` and
 `CLEANUP_MAX_PLAN_NODES`. `every_days` and `max_plan_nodes` must be integers
 `>= 0`. With `max_plan_nodes = 0`, every cleanup card waits for sign-off.
+
+Cleanup is **on by default**. A board with no `[cleanup]` table runs one every 3
+days. The first run after this change lands is due at once, because the board has
+no stamp yet.
 
 ### When it runs
 
@@ -155,7 +159,8 @@ to the card it just created.** This can only make the gate stricter.
 
 All drive the real script and stub at the Linear and harness boundary.
 
-- `test-contract.sh`: `[cleanup]` parses. `every_days = 0` is off. Negative
+- `test-contract.sh`: `[cleanup]` parses. No table → `every_days` 3.
+  `every_days = 0` is off. Negative
   values are refused. `max_followups` warns and does not refuse. The new review
   defaults are 1 and 1.
 - `test-cleanup-due.sh`: no stamp → due. Fresh stamp → not due. Stale stamp →
