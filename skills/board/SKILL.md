@@ -1774,12 +1774,16 @@ JSON
 "$B/merge.py" <n> < "$M/card.json"; echo "--- exit: $? ---"
 ```
 
-`merge.py` copies the target's declared fast-track label to the pull request
-right before it merges. The label is `[deploy] fast_track_label` in the target's
+`merge.py` makes the pull request's fast-track label match the card right
+before it merges. The label is `[deploy] fast_track_label` in the target's
 `board.toml`, emitted as `FAST_TRACK_LABEL`. The same name is used on the Linear
-card and on GitHub. `merge.py` adds it only when the card carries a label of
-exactly that name, and never when the target declares none. It then runs
-`gh pr merge <n> --squash`. It never enables auto-merge.
+card and on GitHub. When the target declares one, `merge.py` reads the pull
+request's labels, adds it when the card carries a label of exactly that name,
+and removes it when the card does not but the pull request carries it anyway —
+left from an earlier tick whose merge failed, or put there by an agent or a
+person. When the target declares none, `merge.py` makes no label call at all,
+not even a read. It then runs `gh pr merge <n> --squash`. It never enables
+auto-merge.
 
 **Never run a bare `gh pr merge` for a card instead.** That is how the label gets
 skipped: the pull request merges without it, and the target queues a deploy the
@@ -1788,16 +1792,20 @@ operator asked to hurry.
 `merge.py` prints one JSON object (`pr`, `merged`, `fast_tracked`, `label`,
 `reason`) and exits one of five ways:
 
-- **exit 0** — merged. `fast_tracked` says whether the label went on first.
-- **exit 1** — **not merged**, because the card carries the label and copying it
-  to the pull request failed. The usual cause is a label that does not exist on
-  the repository. Leave the card in `In Review`. Do not charge an attempt and do
-  not add `board-failed`: the diff is fine, only the label is missing. Report it
-  on the card and in the tick's report, and quote the `gh` error from `reason`.
-  Try again next tick. Merging without the label would silently queue a deploy
-  the operator asked to hurry.
+- **exit 0** — merged. `fast_tracked` says whether the label was on the pull
+  request when it merged.
+- **exit 1** — **not merged**, because syncing the label failed: adding it (the
+  card carries it), reading the pull request's labels, or removing it (the card
+  does not carry it but the pull request does). The usual cause of a failed add
+  is a label that does not exist on the repository. Leave the card in
+  `In Review`. Do not charge an attempt and do not add `board-failed`: the diff
+  is fine, only the label sync is. Report it on the card and in the tick's
+  report, and quote the `gh` error from `reason`. Try again next tick. A failed
+  read or removal refuses to merge for the same reason a failed add does:
+  merging on an unknown label set, or with a label the card no longer carries,
+  could fast-track a deploy the operator did not ask to hurry.
 - **exit 3** — `gh pr merge` itself failed. Quote `reason` on the card.
-  `fast_tracked` says whether the label is already on the pull request.
+  `fast_tracked` says whether the label is on the pull request.
 - **exit 4** — **not merged, and the pull request was not touched**: its head
   branch is in another repository (a fork), or where it lives could not be
   established. **Never merge it any other way**, and never look for a way around
@@ -1812,8 +1820,8 @@ operator asked to hurry.
   printed. Merge nothing. Fix the call and run it again.
 
 **Say it on the card.** When `merge.py` reports `fast_tracked: true`, the merge
-comment says the deploy was **fast-tracked** (label copied from the card), not
-queued.
+comment says the deploy was **fast-tracked** (label synced to match the card),
+not queued.
 
 **From this board's `$REPO`, always.** `gh` takes the repository from the working
 directory, and a pull request number is only unique within one. Run from the
@@ -1927,7 +1935,8 @@ step and keeps the wait open.
 
 **The board applies the fast-track label only when the Linear card carries it.**
 The label is the one the target declares in `[deploy] fast_track_label`, and
-`merge.py` copies it in step 4. The card is the only source. The board never
+`merge.py` syncs it to match in step 4, removing it from the pull request when
+the card no longer carries it. The card is the only source. The board never
 decides a card is urgent itself, and applies no other label that makes a target
 deploy sooner. Fast-tracking a deploy is the operator's call, because the
 schedule exists so that a human decides when production changes out of turn.
@@ -2480,10 +2489,11 @@ board whose slice never reached `Todo` says "Todo not read", never "quiet."**
 "Quiet" is a verdict about the cards; "Todo not read" is a verdict about the
 tick, and spelling both the same way is how a starved board looks idle.
 
-**A refused label copy is reported too**, though the card did not move. When
-`merge.py` exits 1, name the card, the label and the `gh` error in the tick's
-report. The card waits in `In Review` until the label exists on the repository,
-and only the report tells the operator why.
+**A refused label sync is reported too**, though the card did not move. When
+`merge.py` exits 1 — a failed add, a failed read of the pull request's labels,
+or a failed removal — name the card, the label and the `gh` error in the tick's
+report. The card waits in `In Review` until the sync can succeed, and only the
+report tells the operator why.
 
 A tick where no board changed anything says so in one line and stops.
 
