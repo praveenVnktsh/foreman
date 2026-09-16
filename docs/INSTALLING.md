@@ -61,6 +61,50 @@ than to the tick, and the tick holds no state, so the replacement re-derives
 every card's position from Linear, `gh` and `git`. A sibling installation's
 tick is unaffected: each has its own lock and its own `supervise.sh`.
 
+## Rate-limit fallback
+
+A stage whose model is rate-limited falls back to the next tier down and keeps
+working, instead of voiding every card that needs it. On 2026-09-16
+`PLAN_MODEL=fable` was rate-limited for 11 hours and nothing moved; this table
+is why it no longer does.
+
+`installation.toml` gains an optional `[fallback]` table:
+
+    [fallback]
+    tiers = ["fable", "opus", "sonnet", "haiku"]   # strongest first
+    cooldown_minutes = 60                          # positive integer
+
+    [fallback.floor]                               # optional, per stage
+    plan = "opus"
+
+- **`tiers`** lists this installation's models, strongest first. A stage's
+  own model (`plan`, `build`, and so on) must be one of them to fall back at
+  all; a stage whose model is not in the list runs on it unconditionally, rate
+  limit or not. Claude defaults `tiers` to `["fable", "opus", "sonnet",
+  "haiku"]`. Codex and OpenCode default it to `[]`, off, because their model
+  names are the operator's own and a guessed order could downgrade a stage
+  onto a model that installation cannot run at all. Write `tiers = []` on
+  Claude to turn fallback off the same way.
+- **`cooldown_minutes`** is how long a rate-limited model is skipped before a
+  stage tries it again. It defaults to 60 minutes.
+- **`[fallback.floor]`** names, per stage (`tick`, `plan`, `build`, `review`),
+  the weakest model that stage may fall back to. A stage with no floor may
+  fall all the way to the bottom of `tiers`. A floor must name a model in
+  `tiers`, and it must sit at or below the stage's own model in that list;
+  fallback only walks down, so a floor above the stage's model would never be
+  reached and `install.sh` refuses it. The cleanup stage shares the plan
+  stage's floor, because it shares its model.
+
+While a model is rate-limited, the stage runs on the strongest tier below it
+that is not, and the card's history and its Linear comment say which model was
+limited, until when, and which model the stage runs on instead. When the
+cooldown ends, the stage tries its first-choice model again on the next pass.
+
+**Reaching the floor changes nothing else.** A stage that has fallen back as
+far as its floor and finds that model rate-limited too voids exactly as it did
+before this table existed, and says so on the card: the board waits rather
+than fall back past a model the installation declared safe.
+
 ## A second installation
 
 One machine can run several installations at once, each on its own harness --

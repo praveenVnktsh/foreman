@@ -193,6 +193,48 @@ case "$ROLE" in
     ;;
 esac
 
+# The model a FRESH spawn actually runs on, once a rate limit on the role's
+# first choice is accounted for. `fallback.py` walks FALLBACK_TIERS down from
+# $MODEL above while it stays limited, never past this role's floor -- see
+# skills/board/fallback.py for the rule. Without this, a rate limit on one
+# role's model voided every card needing that role on every pass: 11 hours on
+# 2026-09-16 with PLAN_MODEL=fable, because each attempt re-dispatched onto
+# the same limited model. `fallback.py` reads the identical environment
+# config.sh just exported, so this asks the one place that rule is written
+# rather than re-deriving it here.
+#
+# Skipped on --resume: the harness's resume verb below takes no --model at
+# all, so a resumed agent keeps its own session's model and resolving one here
+# would compute a value nothing reads.
+#
+# CLEANUP_MODEL is passed explicitly because config.sh does not export it (see
+# config.sh's own comment on CLEANUP_MODEL); the other three *_MODEL vars, and
+# every FALLBACK_*/*_FLOOR variable fallback.py also needs, already are.
+FIRST_CHOICE_MODEL="$MODEL"
+if [[ -z "$RESUME" ]]; then
+  if FALLBACK_JSON="$(CLEANUP_MODEL="$CLEANUP_MODEL" "$SKILL_DIR/fallback.py" resolve "$ROLE" 2>&1)" \
+    && FALLBACK_FIELDS="$(printf '%s' "$FALLBACK_JSON" | python3 -c '
+import json, sys
+d = json.load(sys.stdin)
+until = d["limited"][0]["until"] if d["fell_back"] and d["limited"] else ""
+print(d["model"] + "\t" + until)
+')"; then
+    IFS=$'\t' read -r MODEL LIMITED_UNTIL <<<"$FALLBACK_FIELDS"
+    if [[ "$MODEL" != "$FIRST_CHOICE_MODEL" ]]; then
+      printf 'foreman: %s model %s is rate-limited until %s; dispatching %s on %s\n' \
+        "$ROLE" "$FIRST_CHOICE_MODEL" "$LIMITED_UNTIL" "$NAME" "$MODEL" >&2
+    fi
+  else
+    # A broken helper must not stop all work: spawn on the first choice, the
+    # same model this role ran on before fallback.py existed, and say why on
+    # stderr rather than silently -- see fallback.py's own AN UNSET VARIABLE
+    # IS REFUSED for the one case dispatch.sh itself can trigger this.
+    printf 'foreman: %s; dispatching %s on first-choice model %s\n' \
+      "${FALLBACK_JSON:-fallback.py produced no output}" "$NAME" "$FIRST_CHOICE_MODEL" >&2
+    MODEL="$FIRST_CHOICE_MODEL"
+  fi
+fi
+
 # Whether to pass --skip-permissions to the adapter.
 #
 # "0" is off too, not just empty: `-n` alone reads the STRING "0" as
@@ -330,6 +372,13 @@ mkdir -p "$(card_dir "$TICKET")"
 # and cleanup among them). reconcile.py's review_verdict reads "the fix was
 # pushed" as the pull request head having moved past the sha the reviewer
 # read, and until this the spawn record kept no memory of what that was.
-card_log "$TICKET" "$(printf '{"action":"spawn","name":"%s","session":"%s","worktree":"%s","role":"%s","attempt":"%s","ref":"%s"}' \
-  "$NAME" "$SESSION" "$WORKTREE" "$ROLE" "${ATTEMPT}${SLOT}" "$REF")"
+#
+# "model" and "first_choice" carry what this dispatch actually ran on and what
+# the role would have run on with no rate limit. reconcile.py's death_report
+# reads "model" back off the newest spawn entry for a dead agent's name so the
+# tick knows which model to mark limited; the tick's own fallback log entry
+# (SKILL.md) is what says WHY the two differ, so this only needs to record
+# them, not explain them.
+card_log "$TICKET" "$(printf '{"action":"spawn","name":"%s","session":"%s","worktree":"%s","role":"%s","attempt":"%s","ref":"%s","model":"%s","first_choice":"%s"}' \
+  "$NAME" "$SESSION" "$WORKTREE" "$ROLE" "${ATTEMPT}${SLOT}" "$REF" "$MODEL" "$FIRST_CHOICE_MODEL")"
 printf '%s\n' "$SESSION"
