@@ -132,8 +132,41 @@ fi
 # fetch writes only remote-tracking refs: it moves refs/remotes/origin/*, never
 # the working tree, HEAD or any local branch. So the dry run's one side effect
 # is the same one an operator's own `git fetch` has.
-git_ro fetch --quiet origin main \
-  || die "git fetch origin main failed; expected a reachable origin and a usable credential. Nothing was changed."
+# THE FETCH MUST NOT BE ABLE TO HANG, and these four options are why.
+#
+# Measured on 2026-09-16, the first time this ran from a systemd timer rather
+# than a terminal: three installations fired within two seconds of each other,
+# and all three `git fetch` processes stalled -- connected to the remote, then
+# silent. They were still stalled two minutes later. A fresh run a moment
+# afterwards completed in two seconds, so this is a transient the network can
+# produce at any time, not a broken credential.
+#
+# What made it serious is what a stall does to the timer. A `Type=oneshot`
+# service that never finishes stays `activating` for ever, and systemd will not
+# compute the next elapse of a timer whose service has not finished:
+# `NextElapseUSecMonotonic=infinity`. One stalled fetch therefore does not cost
+# one update -- it silently ends every future update for that installation, and
+# nothing anywhere reports it. A board would go on ticking healthily against
+# code that quietly stopped being refreshed.
+#
+# So a stall has to end by itself, here, rather than being something the unit
+# is asked to survive:
+#   BatchMode=yes          a missing or passphrased key fails now, not at a
+#                          prompt nobody can answer under systemd
+#   ConnectTimeout         bounds the connect
+#   ServerAlive*           bounds the SILENCE AFTER connecting, which is the
+#                          case actually observed; without it ssh waits for
+#                          ever on a peer that has stopped talking
+#   GIT_TERMINAL_PROMPT=0  the same guarantee for an https remote, which would
+#                          otherwise block asking for a username
+#
+# ssh's own options rather than timeout(1): macOS ships no timeout(1), and this
+# suite runs there as well as on Linux. bin/install-self-update.sh sets
+# TimeoutStartSec as a second, unconditional backstop for anything these miss.
+GIT_SSH_COMMAND="ssh -o BatchMode=yes -o ConnectTimeout=15 -o ServerAliveInterval=10 -o ServerAliveCountMax=3" \
+GIT_TERMINAL_PROMPT=0 \
+  git_ro fetch --quiet origin main \
+  || die "git fetch origin main failed or timed out; expected a reachable origin and a credential usable with no terminal. Nothing was changed."
 
 OLD="$(git_ro rev-parse HEAD)"
 NEW="$(git_ro rev-parse FETCH_HEAD)"

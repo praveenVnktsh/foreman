@@ -183,5 +183,20 @@ else
     || bad "force-push -> $out"
 fi
 
+# --- an unreachable origin is refused, and it must not proceed on a stale ref.
+#     Proceeding on the last-fetched origin/main would report "already up to
+#     date" for a machine that simply could not ask, which reads as healthy.
+git -C "$install" remote set-url origin "$work_dir/no-such-remote"
+before="$(head_of)"; r_before="$(restarts)"
+if out="$(run_update 2>&1)"; then
+  bad "an unreachable origin was treated as success: $out"
+else
+  grep -q "fetch origin main failed" <<<"$out" \
+    && [[ "$(head_of)" == "$before" && "$(restarts)" == "$r_before" ]] \
+    && ! grep -q "already at" <<<"$out" \
+    && ok "an unreachable origin is refused, not reported as up to date" \
+    || bad "unreachable origin -> $out"
+fi
+
 [[ "$fail" -eq 0 ]] && printf 'PASS: self-update fast-forwards or refuses, and never restarts for nothing\n'
 exit "$fail"
