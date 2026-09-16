@@ -15,6 +15,15 @@
 # to from a phone, and one row that restarts rarely. A card is three to six
 # rows per build, and those are what filled the list.
 #
+# NOT registering is no longer the same as registering. Measured 2026-09-16 on
+# Claude Code 2.1.273: a plain `claude --bg` tick did NOT appear in the desktop
+# app at all. Running `/remote-control` inside it did, and so did spawning it
+# with `claude --bg --remote-control <name>`. So the tick has to ask for Remote
+# Control by name at the spawn; leaving the kill switch off is not enough, and a
+# tick that merely "keeps" it is invisible. The name is passed explicitly
+# because the flag's value is optional: a bare `--remote-control` would take
+# whatever argument came next as the session's name.
+#
 # The prompt is checked too. Every spawn line documents that ORDER IS
 # LOAD-BEARING: a variadic flag placed before the prompt eats it. `--settings`
 # takes exactly one value, and this is what keeps that true the day someone
@@ -54,6 +63,27 @@ print(verdict, "prompt-last" if argv[-1] == sys.argv[2] else "prompt-lost:" + re
 PY
 }
 
+# asks_for_rc <argv file> -- "asks:<name>" when the spawn passes
+# `--remote-control` followed by the session's own `--name`, "silent" when it
+# passes no `--remote-control` at all, and what went wrong otherwise. The value
+# must be the session's name and nothing else: the flag's value is optional, so
+# anything else sitting in that slot is an argument it swallowed.
+asks_for_rc() {
+  python3 - "$1" <<'PY'
+import sys
+argv = open(sys.argv[1]).read().split("\n")[:-1]
+name = next((argv[i + 1] for i, a in enumerate(argv[:-1]) if a == "--name"), None)
+hits = [i for i, a in enumerate(argv) if a == "--remote-control"]
+if not hits:
+    print("silent"); sys.exit(0)
+if len(hits) > 1:
+    print("repeated"); sys.exit(0)
+i = hits[0]
+value = argv[i + 1] if i + 1 < len(argv) - 1 else None  # never the prompt
+print("asks:" + value if value is not None and value == name else "swallowed:" + repr(value))
+PY
+}
+
 # --- dispatched agents, through the real dispatch.sh -------------------------
 dispatch_fixture_setup "$work" "$repo_root"
 prompt="$(cat "$DISPATCH_PROMPT")"
@@ -69,6 +99,10 @@ check_dispatch() { # <description> <dispatch.sh args...>
     bad "$desc: $got"
     [[ "$got" == never-spawned* ]] && dispatch_fixture_show_run_log
   fi
+  got="$(asks_for_rc "$DISPATCH_ARGV_LOG")"
+  [[ "$got" == silent ]] \
+    && ok "$desc, and does not ask for Remote Control" \
+    || bad "$desc, but it asks for Remote Control: $got"
 }
 check_dispatch "a plan agent is spawned with Remote Control disabled" \
   --ticket PRA-1 --role plan --attempt 1
@@ -117,6 +151,10 @@ if [[ -s "$tick_argv" ]]; then
   [[ "$got" == "enabled prompt-last" ]] \
     && ok "the tick keeps Remote Control, so the operator can still attach to the board" \
     || bad "tick: $got"
+  got="$(asks_for_rc "$tick_argv")"
+  [[ "$got" == asks:* && "$got" != "asks:" ]] \
+    && ok "the tick asks for Remote Control under its own name, so every restart is visible" \
+    || bad "tick does not ask for Remote Control under its own name: $got"
 else
   bad "supervise.sh never reached claude --bg: $(cat "$work/supervise.log")"
 fi
