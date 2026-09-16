@@ -923,6 +923,11 @@ detached_parse_spawn() {
     # of bash's "unbound variable" under `set -u`.
     case "$1" in
       --skip-permissions) skip=1; shift; continue ;;
+      # Accepted and ignored. supervise.sh asks for Remote Control on every tick
+      # it starts, whatever the harness; neither harness here has a claude.ai
+      # account to register with. Refusing it would leave this installation
+      # with no tick at all, which is a far worse answer than no app listing.
+      --remote-control) shift; continue ;;
       --name|--cwd|--model|--prompt-file|--add-dir|--mcp-config|--loop-minutes|--settings)
         [[ $# -ge 2 ]] || die "spawn: $1 needs a value" ;;
       --max-budget-usd) _detached_refuse_budget spawn ;;

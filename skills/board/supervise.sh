@@ -373,6 +373,10 @@ start_agent() {
   #
   # The tick serves every board, so there is no single repository to start it
   # in. It runs from the install and cds per board inside its own slices.
+  #
+  # `--remote-control` is asked for HERE, at every start, because it belongs to
+  # one session: a tick switched on by hand with `/remote-control` drops out of
+  # the operator's app the next time this script replaces it, silently.
   ( exec 9>&-
     "$HARNESS_SH" spawn \
       --name "$TICK_AGENT_NAME" \
@@ -380,6 +384,7 @@ start_agent() {
       --model "$TICK_MODEL" \
       --prompt-file "$prompt_file" \
       ${MCP_ARGS[@]+"${MCP_ARGS[@]}"} \
+      --remote-control \
       --skip-permissions \
       --loop-minutes "$TICK_INTERVAL_MINUTES" >/dev/null ) || rc=$?
   # Removed whatever happened: the adapter reads the file before it spawns, so

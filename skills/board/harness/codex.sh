@@ -5,6 +5,7 @@
 #   codex.sh spawn --name N --cwd D --model M --prompt-file F
 #                  --skip-permissions
 #                  [--add-dir D]... [--mcp-config F]... [--loop-minutes K]
+#                  [--remote-control]   accepted; nothing to register
 #                                             prints the session id
 #   codex.sh resume --name N --cwd D --prompt-file F --skip-permissions
 #                   [--mcp-config F]...       prints the session id

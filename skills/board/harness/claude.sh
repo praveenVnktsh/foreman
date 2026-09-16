@@ -5,6 +5,7 @@
 #   claude.sh spawn --name N --cwd D --model M --prompt-file F
 #                   [--add-dir D]... [--mcp-config F]... [--skip-permissions]
 #                   [--max-budget-usd N] [--settings JSON] [--loop-minutes K]
+#                   [--remote-control]
 #                                             prints the session id
 #   claude.sh resume --name N --cwd D --prompt-file F [--skip-permissions]
 #                   [--mcp-config F]... [--max-budget-usd N] [--settings JSON]
@@ -111,6 +112,7 @@ set_permission_args() { # <non-empty to skip permissions>
 
 spawn() {
   local name="" cwd="" model="" model_given="" prompt_file="" skip="" budget="" settings="" prompt session
+  local remote_control=""
   local add_dirs=() mcp_configs=() args=() dir
   while [[ $# -gt 0 ]]; do
     # Two passes over the same argument: the first says whether it is a flag
@@ -119,6 +121,12 @@ spawn() {
     # bash's problem rather than the one the caller has.
     case "$1" in
       --skip-permissions) skip=1; shift; continue ;;
+      # Registers the session with the operator's claude.ai account, so it can
+      # be opened from the desktop or mobile app. supervise.sh asks for it on
+      # the tick and nothing else does. On 2.1.273 a `--bg` session that does
+      # not ask is not listed there at all, so staying out of the way of Remote
+      # Control is not the same as having it.
+      --remote-control) remote_control=1; shift; continue ;;
       --name|--cwd|--model|--prompt-file|--add-dir|--mcp-config|--loop-minutes|--max-budget-usd|--settings)
         [[ $# -ge 2 ]] || die "spawn: $1 needs a value" ;;
       *) die "spawn: unknown argument: $1" ;;
@@ -177,6 +185,11 @@ spawn() {
   [[ -z "$budget" ]] || args+=(--max-budget-usd "$budget")
   # One value, never variadic, so it may sit anywhere before the permission flag.
   [[ -z "$settings" ]] || args+=(--settings "$settings")
+  # The CLI's `--remote-control [name]` takes an OPTIONAL value, so a bare flag
+  # would take whatever followed it as the session's name -- the permission
+  # flag here, or the prompt if anyone ever reordered this. Passing the name
+  # makes the value explicit, and it is the name the app then shows.
+  [[ -z "$remote_control" ]] || args+=(--remote-control "$name")
   set_permission_args "$skip"
   args+=("${PERMISSION_ARGS[@]}")
 

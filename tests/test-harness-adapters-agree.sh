@@ -192,6 +192,18 @@ for harness in claude codex opencode; do
     fi
   fi
 
+  # supervise.sh passes --remote-control on every tick it starts, whatever the
+  # harness, so a spawn that refused it would leave that installation with no
+  # tick at all. Only Claude Code has Remote Control; the other two accept the
+  # flag and have nothing to register.
+  rc_err="$work/$harness/rc.err"
+  if run_adapter spawn --name watched --cwd "$agent_cwd" --model stub-model \
+      --prompt-file "$prompt" --remote-control --skip-permissions >/dev/null 2>"$rc_err"; then
+    ok "$harness spawn accepts --remote-control"
+  else
+    bad "$harness spawn --remote-control: $(cat "$rc_err")"
+  fi
+
   # An unreadable home must never answer "nothing is running". opencode.sh used
   # to default FOREMAN_HOME to $HOME/.foreman, so a caller that had not set one
   # got `[]` and exit 0 -- the single answer that lets supervise.sh start a

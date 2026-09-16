@@ -566,6 +566,14 @@ WAIT_BUILD_SECONDS="${WAIT_BUILD_SECONDS:-0}"
 # operator's settings.json, so their own sessions on the machine keep Remote
 # Control too.
 #
+# NOT REGISTERING BY DEFAULT ANY MORE. Measured 2026-09-16 on Claude Code
+# 2.1.273: a plain `claude --bg` tick did not appear in the desktop app at all,
+# so "the tick does not get this setting" no longer makes it visible. It is
+# visible because supervise.sh asks for it by name, through the adapter's
+# `--remote-control`. This setting stays on card agents regardless: it costs
+# nothing on a version that does not register them, and a version that goes
+# back to registering every `--bg` session would otherwise refill the list.
+#
 # dispatch.sh hands it to the harness adapter as `--settings`. Only Claude Code
 # registers a Remote Control session, so only harness/claude.sh forwards it;
 # the codex and opencode adapters accept it and drop it, because nothing on
