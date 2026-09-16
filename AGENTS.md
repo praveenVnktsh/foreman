@@ -60,6 +60,7 @@
 | View a diagram | `bin/render-diagram.sh <file.md>` | committing the render |
 | Check a plan is a graph | `bin/check-plan-graph.py --max-label-chars <N> <file>` | reading the plan by eye, or the checker's default budget over a target that sets its own |
 | Restart the tick, leaving cards alone | `skills/board/supervise.sh --restart` | `systemctl --user restart foreman.service`; it finds a healthy tick |
+| Update an installation to the latest `main` | `bin/self-update.sh` | `git -C ~/.foreman/<name>/install pull` by hand; the tick keeps running the code it started with, so the machine reports healthy while running a version nobody chose |
 
 - `git show origin/main:<path>` reads a **local** ref. No fetch is guaranteed to
   have refreshed it, so it answers with a stale file and no warning.
