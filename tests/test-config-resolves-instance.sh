@@ -118,6 +118,35 @@ check "an unset HOST_SLOT_STALE_MINUTES still falls back to 720" \
 
 check "board name is exported"           "demo"        "$(ask INSTANCE)"
 
+# An absent [cleanup] table means "same schedule and model as the plan"
+# -- contract.py emits CLEANUP_MODEL="" for it, and config.sh's fallback below
+# reads that empty as "inherit PLAN_MODEL", the same reading fable/fable/opus/opus
+# gives the other three stage models above.
+check "no [cleanup] table gives the plan's every-days default" "3" "$(ask CLEANUP_EVERY_DAYS)"
+check "no [cleanup] table gives the plan's model" "$(ask PLAN_MODEL)" "$(ask CLEANUP_MODEL)"
+
+cleanuptarget="$work/cleanuptarget"; mkdir -p "$cleanuptarget"; git -C "$cleanuptarget" init -q -b main
+cat >"$cleanuptarget/board.toml" <<'TOML'
+[linear]
+team = "PRA"
+project = "example"
+[checks]
+required = ["Tests"]
+ci_workflow = "CI"
+[test]
+command = "make test"
+[cleanup]
+model = "opus"
+TOML
+cleanuphome="$work/cleanuphome"; mkdir -p "$cleanuphome"
+cat >"$cleanuphome/boards.toml" <<TOML
+[boards.demo]
+repo = "$cleanuptarget"
+TOML
+check "a declared [cleanup] model overrides the plan's" "opus" \
+  "$(env FOREMAN_HOME="$cleanuphome" FOREMAN_INSTANCE=demo bash -c \
+       ". '$root/skills/board/config.sh' >/dev/null; printf '%s' \"\$CLEANUP_MODEL\"")"
+
 # The credential.
 #
 # One key per Linear WORKSPACE, in the machine's foreman root, replacing the

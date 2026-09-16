@@ -46,7 +46,8 @@ check "required checks are pipe-joined" "Tests|Lint" "$(read_key "$work/full.tom
 check "risk paths are space-joined"     "migrations/" "$(read_key "$work/full.toml" HIGH_RISK_PATHS)"
 check "test command"                    "make test" "$(read_key "$work/full.toml" TEST_COMMAND)"
 check "limits are upper-cased"          "2" "$(read_key "$work/full.toml" MAX_CONCURRENT)"
-check "unset limit falls back"          "2" "$(read_key "$work/full.toml" MAX_REVIEW_ROUNDS)"
+check "unset limit falls back"          "1" "$(read_key "$work/full.toml" MAX_REVIEW_ROUNDS)"
+check "reviewers_per_round defaults to 1" "1" "$(read_key "$work/full.toml" REVIEWERS_PER_ROUND)"
 check "deploy selection_step loads"     "Choose the revision to deploy" "$(read_key "$work/full.toml" DEPLOY_SELECTION_STEP)"
 
 # Task 6 (decisions §2): MIN_FREE_TMP_MB, MIN_FREE_REPO_MB, PROBE_TMP_MB,
@@ -492,5 +493,131 @@ plan_default="$(python3 "$root/bin/check-plan-graph.py" --limits |
   sed -n 's/.*at most \([0-9][0-9]*\) characters.*/\1/p')"
 check "check-plan-graph.py's default agrees with contract.py's MAX_LABEL_CHARS default" \
   "$plan_default" "$(read_key "$work/nolimits.toml" MAX_LABEL_CHARS)"
+
+# A fully-specified [cleanup] table round-trips all three keys.
+cat >"$work/cleanup.toml" <<'TOML'
+[linear]
+team = "PRA"
+project = "foreman"
+[checks]
+required = ["Tests"]
+ci_workflow = "CI"
+[test]
+command = "make test"
+[cleanup]
+every_days = 5
+model = "opus"
+max_plan_nodes = 12
+TOML
+check "cleanup.every_days round-trips"      "5"    "$(read_key "$work/cleanup.toml" CLEANUP_EVERY_DAYS)"
+check "cleanup.model round-trips"           "opus" "$(read_key "$work/cleanup.toml" CLEANUP_MODEL)"
+check "cleanup.max_plan_nodes round-trips"  "12"   "$(read_key "$work/cleanup.toml" CLEANUP_MAX_PLAN_NODES)"
+
+# A board with no [cleanup] table at all still gets cleanup ON by default:
+# every_days=3, an empty (not missing) model, and max_plan_nodes=8.
+check "no [cleanup] table defaults every_days to 3"      "3"  "$(read_key "$work/nolimits.toml" CLEANUP_EVERY_DAYS)"
+check "no [cleanup] table defaults model to empty, not missing" "" "$(read_key "$work/nolimits.toml" CLEANUP_MODEL)"
+check "no [cleanup] table defaults max_plan_nodes to 8"  "8"  "$(read_key "$work/nolimits.toml" CLEANUP_MAX_PLAN_NODES)"
+
+# every_days = 0 is the operator's explicit off switch, not a refusal.
+cat >"$work/cleanupoff.toml" <<'TOML'
+[linear]
+team = "PRA"
+project = "foreman"
+[checks]
+required = ["Tests"]
+ci_workflow = "CI"
+[test]
+command = "make test"
+[cleanup]
+every_days = 0
+TOML
+check "cleanup.every_days = 0 loads (cleanup off)" "0" "$(read_key "$work/cleanupoff.toml" CLEANUP_EVERY_DAYS)"
+
+# Negative values are refused, naming the key -- same shape as every other
+# integer this loader validates.
+cat >"$work/cleanupnegative.toml" <<'TOML'
+[linear]
+team = "PRA"
+project = "foreman"
+[checks]
+required = ["Tests"]
+ci_workflow = "CI"
+[test]
+command = "make test"
+[cleanup]
+every_days = -1
+max_plan_nodes = -1
+TOML
+if err="$("$root/bin/contract.py" "$work/cleanupnegative.toml" 2>&1 >/dev/null)"; then
+  printf 'FAIL cleanup.every_days = -1 must be refused\n'; fail=1
+else
+  case "$err" in *every_days*) printf 'ok   negative cleanup.every_days is refused, naming the key\n' ;;
+    *) printf 'FAIL error did not name every_days: %s\n' "$err"; fail=1 ;; esac
+fi
+
+# A string where an integer is required is refused, naming the key -- a
+# quoted "3" must not silently become the string "3" surviving as an int.
+cat >"$work/cleanupstring.toml" <<'TOML'
+[linear]
+team = "PRA"
+project = "foreman"
+[checks]
+required = ["Tests"]
+ci_workflow = "CI"
+[test]
+command = "make test"
+[cleanup]
+every_days = "3"
+TOML
+if err="$("$root/bin/contract.py" "$work/cleanupstring.toml" 2>&1 >/dev/null)"; then
+  printf 'FAIL cleanup.every_days = "3" (a string) must be refused\n'; fail=1
+else
+  case "$err" in *every_days*) printf 'ok   cleanup.every_days as a string is refused\n' ;;
+    *) printf 'FAIL error did not name every_days: %s\n' "$err"; fail=1 ;; esac
+fi
+
+# [limits] max_followups is deprecated, not refused: it warns on stderr, the
+# contract still loads, and MAX_FOLLOWUPS is gone from the emitted pairs --
+# an existing board.toml written before this change must keep loading.
+cat >"$work/maxfollowups.toml" <<'TOML'
+[linear]
+team = "PRA"
+project = "foreman"
+[checks]
+required = ["Tests"]
+ci_workflow = "CI"
+[test]
+command = "make test"
+[limits]
+max_followups = 3
+TOML
+if err="$("$root/bin/contract.py" "$work/maxfollowups.toml" 2>&1 >/dev/null)"; then
+  case "$err" in *max_followups*) printf 'ok   limits.max_followups warns on stderr and does not refuse\n' ;;
+    *) printf 'FAIL stderr did not mention max_followups: %s\n' "$err"; fail=1 ;; esac
+else
+  printf 'FAIL limits.max_followups must not refuse the contract\n'; fail=1
+fi
+check "MAX_FOLLOWUPS is gone from the emitted pairs" "<missing>" "$(read_key "$work/maxfollowups.toml" MAX_FOLLOWUPS)"
+
+# Unknown-key rejection under [cleanup] is symmetric with every other table.
+cat >"$work/cleanupunknownkey.toml" <<'TOML'
+[linear]
+team = "PRA"
+project = "foreman"
+[checks]
+required = ["Tests"]
+ci_workflow = "CI"
+[test]
+command = "make test"
+[cleanup]
+every_dyas = 5
+TOML
+if err="$("$root/bin/contract.py" "$work/cleanupunknownkey.toml" 2>&1 >/dev/null)"; then
+  printf 'FAIL a typo'"'"'d key under [cleanup] must be refused\n'; fail=1
+else
+  case "$err" in *every_dyas*) printf 'ok   unknown key under [cleanup] is refused\n' ;;
+    *) printf 'FAIL error did not name every_dyas: %s\n' "$err"; fail=1 ;; esac
+fi
 
 exit "$fail"

@@ -9,6 +9,7 @@
     brief.py fix    --ticket MUR-42 --findings-file reviews/1a.json
     brief.py ci-fix --ticket MUR-42 --pr 91 --jobs "Backend,Operations"
     brief.py replan --ticket MUR-42 --comments-file plan-comments/1a.json
+    brief.py cleanup --board widgets --since 2026-09-12T04:00:00Z
 
 Writes the prompt to stdout; pipe it to a file and pass that to dispatch.sh.
 
@@ -29,6 +30,7 @@ import json
 import os
 import subprocess
 import sys
+from datetime import datetime
 from typing import NoReturn
 
 MAX_FINDING_CHARS = 2000
@@ -40,16 +42,18 @@ MAX_FINDING_CHARS = 2000
 # build agent a plan with its last nodes silently missing.
 MAX_BLOCK_CHARS = 20000
 
-# The plan checker belongs to THIS installation, not to the target repository
-# the agent is standing in, so the prompt names an absolute path derived from
-# where this file sits — the same way _load_config() finds config.sh. A
-# bare `bin/check-plan-graph.py` resolves inside the target's worktree, where
-# it exists only when the target happens to be this repository.
+# Every script a prompt tells an agent to RUN belongs to THIS installation, not
+# to the target repository the agent is standing in, so each one is named as an
+# absolute path derived from where this file sits — the same way _load_config()
+# finds config.sh. A bare `bin/check-plan-graph.py` or `skills/board/evidence.sh`
+# resolves inside the target's worktree, where it exists only when the target
+# happens to be this repository.
+BOARD_DIR = os.path.dirname(os.path.abspath(__file__))
 CHECK_PLAN_GRAPH = os.path.join(
-    os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
-    "bin",
-    "check-plan-graph.py",
+    os.path.dirname(os.path.dirname(BOARD_DIR)), "bin", "check-plan-graph.py"
 )
+EVIDENCE_SH = os.path.join(BOARD_DIR, "evidence.sh")
+PLANCOMMENTS_PY = os.path.join(BOARD_DIR, "plancomments.py")
 
 # The broken-environment paragraph names no project, so generalising the rest
 # of this file's prose never had anything to take out of it — it stays as it
@@ -70,6 +74,31 @@ been told about and re-run you for free, but a build that quietly routes \
 around a broken environment and then dies leaves nothing to diagnose and \
 costs the ticket one of its few attempts."""
 
+# The self-cleanup step, in the two forms the build prompt can take.
+#
+# `/simplify` is a Claude Code built-in, so on a codex or opencode installation
+# there is nothing to invoke. The brief says so out loud rather than dropping
+# the paragraph: a build agent reading a prompt that never mentions the step
+# cannot report that it skipped it, and the board would read a diff that had
+# never been through a cleanup pass as one that had.
+#
+# It must also not invite the agent to do the pass by hand. A freehand refactor
+# of one's own diff, on the harness with no skill to ground it, is a second
+# uninstructed change landing in the same pull request — which is the opposite
+# of what this step is for.
+SIMPLIFY_CLAUDE = """\
+**When the tests pass, invoke the built-in `/simplify` skill on this branch's \
+diff.** The diff only: a refactor outside it belongs to the scheduled cleanup, \
+which reads the whole codebase and files its own card. Then run `{test_command}` \
+again, and only then open the pull request."""
+
+SIMPLIFY_OTHER = """\
+**Skip the `/simplify` step.** This installation's harness is `{harness}`, and \
+`/simplify` exists only in Claude Code, so there is nothing here to invoke. Say \
+in your report that you skipped it. Do not imitate the skill by hand — an \
+uninstructed refactor of your own diff is a second change in the same pull \
+request, not a cleanup pass."""
+
 STANDING_TEMPLATE = """\
 Read {docs_sentence} before making non-trivial changes.
 
@@ -82,15 +111,18 @@ without it runs one node at a time. If the graph turns out to be wrong — a \
 node that cannot be built as it is drawn — say so in your report and in the \
 pull request body rather than quietly building something else.
 
-Implement the ticket. Run `{test_command}`. Open a pull request whose body \
-links the ticket.
+Implement the ticket. Run `{test_command}`.
+
+{simplify}
+
+Open a pull request whose body links the ticket.
 
 **Do not review your own diff.** The board reviews it with sessions that did \
 not write it, using the `adversarial-reviewer` skill. A self-review shares the \
 author's blind spots, which are the ones a review exists to find.
 
 **Open it ready for review, never as a draft.** A draft cannot be merged, so \
-one blocks the board after its checks are green and two reviewers have \
+one blocks the board after its checks are green and one reviewer has \
 already read the diff — all of that work sits waiting on a flag.
 
 **Do not merge, and do not enable auto-merge.** Merging deploys, and arming \
@@ -161,7 +193,7 @@ def _load_config(ticket: str) -> dict[str, str]:
     after every other branch name moved to `foreman/<instance>/<ticket>`.
     """
     keys = ("TEST_COMMAND", "REQUIRED_DOCS", "MAX_LABEL_CHARS", "HARNESS")
-    script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.sh")
+    script = os.path.join(BOARD_DIR, "config.sh")
     printf = (
         'printf "%s\\0" ' + " ".join(f'"${k}"' for k in keys) + ' "$(branch_name "$1")"'
     )
@@ -176,6 +208,54 @@ def _load_config(ticket: str) -> dict[str, str]:
     if out.returncode != 0 or len(values) < len(all_keys):
         raise SystemExit(f"brief: could not read {script}: {out.stderr.strip()}")
     return dict(zip(all_keys, values))
+
+
+def _load_cleanup_config() -> dict[str, str]:
+    """The same read as _load_config, for the keys the cleanup prompt names.
+
+    A second key list rather than a wider one: cleanup has no ticket, so it has
+    no branch to ask config.sh's `branch_name` for, and it needs the Linear ids
+    no other role pastes. Those ids arrive because config.sh reads the board's
+    `ids.env` on its way past, which is the one place they are ever read from.
+    """
+    keys = (
+        "REQUIRED_DOCS",
+        "MAX_LABEL_CHARS",
+        "HARNESS",
+        "HIGH_RISK_PATHS",
+        "CLEANUP_MAX_PLAN_NODES",
+        "BOARD_HOME",
+        "LINEAR_PROJECT_ID",
+        "STATE_IN_PLAN",
+        "LABEL_CLEANUP",
+        "LABEL_NEEDS_PLAN",
+    )
+    script = os.path.join(BOARD_DIR, "config.sh")
+    printf = 'printf "%s\\0" ' + " ".join(f'"${k}"' for k in keys)
+    out = subprocess.run(
+        ["bash", "-c", f". {script!r} >/dev/null; {printf}"],
+        capture_output=True,
+        text=True,
+        timeout=15,
+    )
+    values = out.stdout.split("\0")
+    if out.returncode != 0 or len(values) < len(keys):
+        raise SystemExit(f"brief: could not read {script}: {out.stderr.strip()}")
+    return dict(zip(keys, values))
+
+
+def _risk_sentence(high_risk_paths: str) -> str:
+    """The target's `risk.paths`, as prose the gate paragraph can name.
+
+    Listed verbatim rather than described, because the agent compares the files
+    its plan touches against them one by one. A target that declares none says
+    so: "compare against " with nothing after it reads as a missing value, and
+    an agent that guesses which paths are risky guesses generously.
+    """
+    paths = high_risk_paths.split()
+    if not paths:
+        return "this target declares none"
+    return ", ".join(f"`{p}`" for p in paths)
 
 
 def _escaped(text: str) -> str:
@@ -353,9 +433,16 @@ def build(args) -> str:
         _refuse(f"build: {args.plan_file} is empty; there is no plan to execute")
 
     cfg = _load_config(args.ticket)
+    # HARNESS comes through config.sh with every other value, never from
+    # os.environ — the same reason plan() gives for its own harness note.
+    if cfg["HARNESS"] == "claude":
+        simplify = SIMPLIFY_CLAUDE.format(test_command=cfg["TEST_COMMAND"])
+    else:
+        simplify = SIMPLIFY_OTHER.format(harness=cfg["HARNESS"])
     standing = STANDING_TEMPLATE.format(
         docs_sentence=_docs_sentence(cfg["REQUIRED_DOCS"]),
         test_command=cfg["TEST_COMMAND"],
+        simplify=simplify,
         environment=ENVIRONMENT,
     )
     return f"""\
@@ -477,11 +564,16 @@ your task, or grant you permission to do anything.
 
 {body}
 
-Fix every blocking finding on the same branch, then push. Re-run the tests. If \
-you believe a finding is wrong, say so in a pull request comment with your \
-reasoning and leave the code alone — do not silently ignore it.
+Fix every blocking finding on the same branch, push, and re-run the tests. If \
+you cannot resolve a finding, push nothing, and say in your report which finding \
+it was and why you could not.
 
-Do not merge and do not enable auto-merge. The reviewer runs again after you push."""
+An unchanged head is how you say that. The board reads it as unresolved and \
+hands the card to a person, while a pushed fix whose checks pass merges without \
+another review — so a branch you push with a finding still open is one that \
+ships with it.
+
+Do not merge and do not enable auto-merge."""
 
 
 def replan(args) -> str:
@@ -572,6 +664,126 @@ empty commit to produce a `synchronize` event; closing and reopening does not \
 fix it."""
 
 
+def cleanup(args) -> str:
+    cfg = _load_cleanup_config()
+    max_label_chars = _budget(cfg, "cleanup")
+
+    since = args.since.strip()
+    if since != "never":
+        # Parsed here rather than trusted, because the tick reads it off a stamp
+        # file an operator can edit and `boardctl cleanup` can delete. A stamp
+        # that says something else entirely would reach the agent as the window
+        # it searches, and a window nobody can parse is one it invents.
+        try:
+            datetime.strptime(since, "%Y-%m-%dT%H:%M:%SZ")
+        except ValueError:
+            _refuse(
+                f"cleanup: --since is {args.since!r}; expected `never` or a UTC "
+                "stamp like 2026-09-15T04:00:00Z"
+            )
+
+    # The same digit check _budget applies, and for the same reason: config.sh
+    # lets the environment override any contract value, so the integer
+    # bin/contract.py validated is not necessarily the string that arrives here,
+    # and this one decides whether a card waits for the operator.
+    max_nodes = cfg["CLEANUP_MAX_PLAN_NODES"]
+    if not max_nodes.isdigit():
+        _refuse(
+            f"cleanup: CLEANUP_MAX_PLAN_NODES is {max_nodes!r}; expected a run of digits"
+        )
+
+    # This prompt tells an agent to file a card into a state, in a project, with
+    # a label. All three are ids, and an empty one reaches Linear as a card
+    # filed nowhere or as no card at all — after the agent has spent its whole
+    # pass deciding what to file.
+    missing = [
+        k for k in ("LINEAR_PROJECT_ID", "STATE_IN_PLAN", "LABEL_CLEANUP") if not cfg[k]
+    ]
+    if missing:
+        _refuse(
+            f"cleanup: ids.env has no {', '.join(missing)}; run bin/resolve-ids.py "
+            "for this board before dispatching a cleanup"
+        )
+
+    merged = (
+        "every pull request this board has merged"
+        if since == "never"
+        else f"the pull requests merged since {since}"
+    )
+
+    return f"""\
+You are the scheduled cleanup pass for board `{args.board}`. You file **at most \
+one card**, and you do nothing else.
+
+Read {_docs_sentence(cfg["REQUIRED_DOCS"])} first, and name what you read in \
+your report.
+
+**GATHER.** Read `origin/main` — this worktree is fresh from it. Then read \
+{merged}, and the `warning` and `note` findings recorded for those cards under \
+`{cfg["BOARD_HOME"]}/cards/<TICKET>/reviews/*.json`. Those findings are the raw \
+material this pass exists to spend: a reviewer saw them and did not stop the \
+build for them, so nothing else ever comes back to them.
+
+**VERIFY.** Every candidate is a claim about code that may have changed since. \
+Read each one as `main` has it now:
+
+    {EVIDENCE_SH} main <path>
+
+Drop what main already fixed. Then list this board's open cards in Linear \
+project `{cfg["LINEAR_PROJECT_ID"]}` and drop what is already filed. A card \
+filed twice costs an operator the triage and the board a build.
+
+**PICK ONE.** Take the single most valuable candidate that survives. If none \
+survives, file nothing and say so in your report — that is a correct and useful \
+answer. Do not queue the rest anywhere: the next cleanup run re-derives them \
+against a newer main, and a queue written today is a list of claims nobody \
+re-checked.
+
+**PLAN it.** Invoke the `graphplan` skill as a skill, not from memory, and draw \
+one graph for that card. Then check it:
+
+    {CHECK_PLAN_GRAPH} --max-label-chars {max_label_chars} <file>
+
+That {max_label_chars} is this target's own budget, read from its board.toml, \
+not whatever number `skills/graphplan/SKILL.md` shows you as an example. Count \
+the graph's nodes, and compare the files it touches against this target's risk \
+paths: {_risk_sentence(cfg["HIGH_RISK_PATHS"])}. The gate below needs both \
+answers.
+
+**FILE ONE CARD**, into state `{cfg["STATE_IN_PLAN"]}` in project \
+`{cfg["LINEAR_PROJECT_ID"]}`, with label `{cfg["LABEL_CLEANUP"]}`. Those three \
+are ids: paste them, never a name. Its description carries, in this order:
+
+- the problem, with the file, the line, and the `evidence:` line and its SHA
+- what is in scope: the exact files and the exact behaviour
+- what is explicitly out of scope
+- what counts as done, with the tests that prove it
+
+**POST the graph** to that card as a comment. It ends with the round-1 footer, \
+which you get from:
+
+    echo '[]' | {PLANCOMMENTS_PY}
+
+Paste that `footer` field verbatim, never retyped. It is the only thing that \
+marks the comment as the board's own: Linear gives a board comment and an \
+operator comment the same author, so a plan posted without it is read on the \
+next tick as something the operator wrote, and the board hands the graph back \
+as though a human had asked for it.
+
+**GATE it.** If that graph has more than {max_nodes} nodes, or touches one of \
+the risk paths above, add label `{cfg["LABEL_NEEDS_PLAN"]}` to the card you just \
+created — that card and no other. Otherwise leave the label off. Only the \
+operator removes it, and removing it is their sign-off, so adding it can only \
+make the gate stricter.
+
+**You never push a commit and you never open a pull request.** The card and its \
+plan comment are the whole of your output. A build agent is dispatched for that \
+card later, fresh from `origin/main`, so anything you leave in this worktree is \
+gone before it starts.
+
+{ENVIRONMENT}"""
+
+
 def main() -> int:
     p = argparse.ArgumentParser()
     sub = p.add_subparsers(dest="cmd", required=True)
@@ -610,6 +822,15 @@ def main() -> int:
     rp.add_argument("--ticket", required=True)
     rp.add_argument("--comments-file", required=True)
     rp.set_defaults(fn=replan)
+
+    # `--since` is required with no default, and `never` is how the first run
+    # on a board says "everything". A default of `never` would make a stamp the
+    # tick failed to read look like a board that has never been cleaned, and
+    # the agent would re-derive every finding the board ever recorded.
+    cl = sub.add_parser("cleanup")
+    cl.add_argument("--board", required=True)
+    cl.add_argument("--since", required=True)
+    cl.set_defaults(fn=cleanup)
 
     c = sub.add_parser("ci-fix")
     c.add_argument("--ticket", required=True)

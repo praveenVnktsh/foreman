@@ -285,6 +285,28 @@ else
 $fix_prompt"
 fi
 
+# Review is one round now, so the refute route is gone. It used to send a fix
+# agent that disagreed with a finding to argue in a pull request comment and
+# wait for the next reviewer -- and there is no next reviewer: a pushed fix
+# whose checks pass merges without another read. An agent left arguing on a
+# card that merges anyway is the one outcome that route cannot have.
+if [[ "$fix_prompt" == *"pull request comment"* ]]; then
+  bad "the fix prompt still sends a disagreeing agent to argue in a pull request comment, but no second reviewer reads it:
+$fix_prompt"
+else
+  ok "the fix prompt no longer offers the pull-request-comment refute route"
+fi
+
+# What replaced it: an unchanged head. The board reads one as unresolved and
+# hands the card to a person, so "I could not fix this" has to mean pushing
+# nothing rather than pushing a branch with the finding still open.
+if [[ "$fix_prompt" == *"push nothing"* ]]; then
+  ok "the fix prompt tells an agent that cannot resolve a finding to push nothing"
+else
+  bad "the fix prompt does not tell an agent that cannot resolve a finding to push nothing:
+$fix_prompt"
+fi
+
 # ============================================================================
 # Part 3 -- dispatch.sh: BOOTSTRAP_COMMAND runs in the fresh worktree before
 # the agent starts, gates rather than warns, and never runs for a role that

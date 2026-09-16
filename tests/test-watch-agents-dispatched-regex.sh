@@ -87,6 +87,14 @@ for role in ("plan", "build", "review"):
           f"a {role} agent matches DISPATCHED",
           repr(watch_agents._dispatched(name)))
 
+# A scheduled cleanup run has no card yet, so its ticket segment is the
+# literal word "cleanup", not a Linear key -- and dispatch.sh names the
+# agent's role "cleanup" too.
+cleanup_agent = "foreman/demo/cleanup/cleanup-202609150900"
+check(watch_agents._dispatched(cleanup_agent) == ("cleanup", "cleanup", "202609150900"),
+      "the cleanup agent matches DISPATCHED",
+      repr(watch_agents._dispatched(cleanup_agent)))
+
 if failures:
     sys.exit(1)
 PY

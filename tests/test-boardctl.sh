@@ -7,7 +7,9 @@
 # runtime directory alone, and reverts the same way; `list` and `status`
 # read boards.toml through bin/boards.py; `halt`/`resume` toggle
 # $FOREMAN_HOME/instances/<name>/HALT even before that directory otherwise
-# exists, and refuse an undeclared board; `migrate` writes boards.toml from
+# exists, and refuse an undeclared board; `cleanup` deletes
+# instances/<name>/last-cleanup (a no-op when it is not there) and refuses an
+# undeclared board without creating its runtime directory; `migrate` writes boards.toml from
 # instance.env files without ever deleting them, all-or-nothing, reports
 # a per-board linear.key that differs from the shared default, and reports
 # itself a no-op rather than refusing once boards.toml exists -- migrate has a
@@ -355,6 +357,42 @@ if [[ $status -ne 0 ]]; then
   ok "resume REFUSES an undeclared board"
 else
   not_ok "resume REFUSES an undeclared board: status=$status"
+fi
+
+# =============================================================================
+# Case: cleanup removes an existing last-cleanup stamp
+# =============================================================================
+mkdir -p "$home9/instances/solo"
+: >"$home9/instances/solo/last-cleanup"
+status=0
+run "$home9" cleanup solo >"$work_dir/cleanup1.out" 2>"$work_dir/cleanup1.err" || status=$?
+if [[ $status -eq 0 ]] && [[ ! -e "$home9/instances/solo/last-cleanup" ]]; then
+  ok "cleanup removes an existing last-cleanup stamp"
+else
+  not_ok "cleanup removes an existing last-cleanup stamp: status=$status err=$(cat "$work_dir/cleanup1.err")"
+fi
+
+# =============================================================================
+# Case: cleanup with no stamp still exits 0 -- removing a stamp that is not
+# there is the same outcome, not an error
+# =============================================================================
+status=0
+run "$home9" cleanup solo >"$work_dir/cleanup2.out" 2>"$work_dir/cleanup2.err" || status=$?
+if [[ $status -eq 0 ]]; then
+  ok "cleanup with no stamp present still exits 0"
+else
+  not_ok "cleanup with no stamp present still exits 0: status=$status err=$(cat "$work_dir/cleanup2.err")"
+fi
+
+# =============================================================================
+# Case: cleanup REFUSES an undeclared board, creating no directory
+# =============================================================================
+status=0
+run "$home9" cleanup nosuch >"$work_dir/cleanup3.out" 2>"$work_dir/cleanup3.err" || status=$?
+if [[ $status -ne 0 ]] && [[ ! -e "$home9/instances/nosuch" ]]; then
+  ok "cleanup REFUSES an undeclared board, creating no directory"
+else
+  not_ok "cleanup REFUSES an undeclared board, creating no directory: status=$status err=$(cat "$work_dir/cleanup3.err") created=$([[ -e "$home9/instances/nosuch" ]] && echo yes || echo no)"
 fi
 
 # =============================================================================

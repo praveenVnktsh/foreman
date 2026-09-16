@@ -17,7 +17,7 @@ A standalone repository holding the autonomous build loop that today lives
 inside murmr: Linear as the control plane, a card moved into `Todo` as the only
 dispatch authorisation, an agent that builds it in a worktree, adversarial
 review rounds by sessions that did not write the diff, gated merge, deploy
-evidence, follow-up cards.
+evidence, a scheduled cleanup card.
 
 It is installed on a machine once and pointed at one or more repositories. A
 repository becomes buildable by adding one file. Forking this repository gives
@@ -86,9 +86,14 @@ required = ["STYLEGUIDE.md"]
 [limits]
 max_concurrent = 1
 max_build_attempts = 3
-max_review_rounds = 2
-reviewers_per_round = 2
+max_review_rounds = 1
+reviewers_per_round = 1
 ```
+
+`max_review_rounds` and `reviewers_per_round` dropped to 1: see
+`docs/specs/2026-09-15-cleanup-and-light-review-design.md` for why review
+gates on `blocking` findings alone and quality work moved to scheduled
+cleanup.
 
 **Parsed, never sourced.** Today's `config.sh` is shell and every knob is an
 environment variable, so a sourced file would be the obvious port. It is

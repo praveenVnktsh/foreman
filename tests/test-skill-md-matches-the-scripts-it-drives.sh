@@ -93,6 +93,20 @@ seed_sha="$(git_q -C "$target" rev-parse HEAD)"
 home="$work/home"
 fixture_add_instance "$home" demo "$target"
 
+# The ids brief.py cleanup pastes into the prompt it writes. bin/resolve-ids.py
+# reads these out of Linear, which nothing in this suite may reach, so the four
+# the cleanup brief needs are written here instead. brief.py refuses an empty
+# LINEAR_PROJECT_ID, STATE_IN_PLAN or LABEL_CLEANUP rather than dispatching an
+# agent that would file its card nowhere -- so an ids.env without them is a
+# cleanup block that refuses, not one this test would catch saying the wrong
+# thing.
+cat > "$home/.foreman/instances/demo/ids.env" <<'IDS'
+LINEAR_PROJECT_ID=project-demo
+STATE_IN_PLAN=state-in-plan
+LABEL_CLEANUP=label-cleanup
+LABEL_NEEDS_PLAN=label-needs-plan
+IDS
+
 # A `claude` that keeps a registry. dispatch.sh spawns with `--name` and then
 # asks `claude agents` whether the agent registered, and refuses when it did
 # not -- so a stub that always answers `[]` makes every fresh dispatch exit
@@ -176,6 +190,7 @@ subs = [
     ("<ticket-body>", body),
     ("<headRefOid>", sha),
     ("<TICKET>", ticket),
+    ("<board>", "demo"),
     ("<title>", "Make the widget do the thing"),
     ("<T>", ticket),
     ("<n>", "1"),
@@ -183,7 +198,7 @@ subs = [
     ("<N>", "1"),
 ]
 
-KINDS = ["plan", "build", "replan", "review"]
+KINDS = ["plan", "build", "replan", "review", "cleanup"]
 seen = {}
 for block in blocks:
     if "brief.py " not in block and "dispatch.sh " not in block:
@@ -379,7 +394,71 @@ else
 $out"
 fi
 
-# --- 5. Every board-failed exit lands in Needs Human -----------------------
+# --- 5. The scheduled cleanup block ----------------------------------------
+#
+# SKILL.md asks at the END of a slice, on capacity the cards did not need -- so
+# the card this slice worked has to have released its slot first. Without that,
+# demo holds its one MAX_CONCURRENT slot, `--cleanup-due` correctly answers "not
+# due", and every assertion below would be green about a block that never ran.
+cat > "$work/release.sh" <<EOF
+card_log "$TICKET" '{"action":"released","reason":"done"}'
+EOF
+if ! out="$(run_block "$work/release.sh" 2>&1)"; then
+  bad "could not release the card's slot before the cleanup block:
+$out"
+fi
+
+# The agent a cleanup pass spawns is named from the literal ticket `cleanup` and
+# an attempt that is a UTC minute, so it is matched by shape rather than by a
+# fixed string -- the attempt is whatever `date` said when the block ran.
+cleanup_spawns() { grep -cE '^foreman/demo/cleanup/cleanup-[0-9]+$' "$argv_log"; }
+
+if out="$(run_block "$blocks/cleanup.sh" 2>&1)"; then
+  ok "SKILL.md's cleanup block runs: reconcile.py, brief.py cleanup and dispatch.sh all accept it"
+else
+  bad "SKILL.md's cleanup block does not run as written:
+$out"
+fi
+
+if [[ "$(cleanup_spawns)" == 1 ]]; then
+  ok "the cleanup block spawns a cleanup agent for the board"
+else
+  bad "the cleanup block spawned no agent named foreman/demo/cleanup/cleanup-<digits>:
+$(cat "$argv_log")"
+fi
+
+if [[ -s "$home/.foreman/instances/demo/last-cleanup" ]]; then
+  ok "the cleanup block stamps last-cleanup before it dispatches"
+else
+  bad "no last-cleanup stamp under $home/.foreman/instances/demo"
+fi
+
+# The one thing the whole pass is bounded by. A prompt that does not say it is a
+# cleanup agent free to file as many cards as it finds work for.
+if grep -q 'at most one' "$work/c.md" 2>/dev/null; then
+  ok "the cleanup prompt caps the pass at one card"
+else
+  bad "the cleanup prompt does not cap the pass at one card:
+$(cat "$work/c.md" 2>/dev/null)"
+fi
+
+# Twice in one slice is what the stamp exists to stop, and the stamp the first
+# run wrote is now minutes old against a cadence counted in days. Running the
+# same block again must dispatch nothing at all.
+if out="$(run_block "$blocks/cleanup.sh" 2>&1)"; then
+  ok "SKILL.md's cleanup block runs again without failing"
+else
+  bad "SKILL.md's cleanup block failed on a board that is not due:
+$out"
+fi
+if [[ "$(cleanup_spawns)" == 1 ]]; then
+  ok "a second cleanup is not dispatched: the stamp the first one wrote is fresh"
+else
+  bad "the cleanup block dispatched a second pass over a fresh stamp:
+$(cat "$argv_log")"
+fi
+
+# --- 6. Every board-failed exit lands in Needs Human -----------------------
 #
 # The exits are found by their released marker rather than by prose, because
 # that marker is the one string every one of them must write. Each is read with
@@ -414,7 +493,7 @@ else
   ok "every board-failed exit SKILL.md documents moves the card to Needs Human ($exits_out)"
 fi
 
-# --- 6. The states table names the columns the resolver resolves -----------
+# --- 7. The states table names the columns the resolver resolves -----------
 #
 # Both directions. A column in the table that resolve-ids.py never resolves is
 # an id the tick will not find in ids.env; a column the resolver requires and
@@ -449,7 +528,7 @@ else
   ok "SKILL.md's states table names exactly the columns bin/resolve-ids.py resolves ($states_out)"
 fi
 
-# --- 7. The config table's snippet prints knobs config.sh sets -------------
+# --- 8. The config table's snippet prints knobs config.sh sets -------------
 #
 # SKILL.md deliberately refuses to write the values down -- they drifted once
 # and the table advertised a fan-out seven times the real one -- so the snippet

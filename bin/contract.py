@@ -18,6 +18,11 @@ Because the repository is untrusted, anything the loader cannot make sense of
 is refused rather than silently degraded to a default: a wrong-typed ancestor,
 an unrecognised key, a required value that is empty, and a value that would
 desynchronize the wire format below are all die()s, not None.
+
+One exception: `limits.max_followups` is deprecated now that scheduled cleanup
+(the `[cleanup]` table below) replaces follow-ups. It warns on stderr and is
+dropped rather than refused, so a board.toml written before this change keeps
+loading instead of breaking on a key nothing needs anymore.
 """
 
 from __future__ import annotations
@@ -125,10 +130,15 @@ LIMITS = {
     # operator removes needs-plan, but nothing merges unreviewed, so zero is a
     # legitimate (if unusual) operator choice, not a disarmed gate.
     "MAX_PLAN_ROUNDS": 2,
-    "MAX_REVIEW_ROUNDS": 2,
-    "REVIEWERS_PER_ROUND": 2,
+    # Review now runs once: a blocking finding buys exactly one fix and the
+    # fix merges with no re-review, and one reviewer is enough to gate a
+    # single round. Follow-ups (MAX_FOLLOWUPS, below) funded the second and
+    # third look this used to need; scheduled cleanup replaces them instead
+    # of stacking review rounds on every merge. LIMIT_MINIMUMS still floors
+    # both at 1, so a target cannot disarm the gate by zeroing them.
+    "MAX_REVIEW_ROUNDS": 1,
+    "REVIEWERS_PER_ROUND": 1,
     "STALL_MINUTES": 30,
-    "MAX_FOLLOWUPS": 3,
     # statvfs free-space floors. Necessary but not sufficient -- see
     # preflight.py's module docstring for why the write probes below exist at
     # all -- but still worth keeping comfortably above zero so a nearly-full
@@ -176,6 +186,34 @@ LIMITS = {
     "MAX_LABEL_CHARS": 80,
 }
 
+# Keys `[limits]` used to accept and no longer does. Present, they warn on
+# stderr and are dropped rather than refusing the whole contract -- see the
+# module docstring. Kept out of LIMITS (which also drives KNOWN_TABLES) so a
+# deprecated key never round-trips through the normal load-and-emit path.
+DEPRECATED_LIMITS = {"max_followups"}
+
+# Scheduled cleanup runs on its own clock, outside the build/review loop
+# above -- see docs/specs/2026-09-15-cleanup-and-light-review-design.md.
+#
+# Cleanup is ON BY DEFAULT: a board that declares no `[cleanup]` table at all
+# runs one every 3 days anyway. Follow-ups are gone as of this change, so a
+# board with nothing configured must not silently lose the only thing left
+# that files cleanup work.
+#
+# `every_days = 0` is the operator's explicit off switch -- unlike the
+# review-gate limits above, disabling cleanup merges nothing unreviewed, so
+# zero is a legitimate value rather than a gate this loader has to floor.
+#
+# `max_plan_nodes = 0` does not disarm anything either. Step 7 of the cleanup
+# agent's flow already sends anything over the limit to `needs-plan` for the
+# operator; a floor of 0 just means EVERY cleanup card, however small, waits
+# for that sign-off instead of building unattended on a later tick.
+CLEANUP = {
+    "CLEANUP_EVERY_DAYS": 3,
+    "CLEANUP_MODEL": "",
+    "CLEANUP_MAX_PLAN_NODES": 8,
+}
+
 # Every top-level table this loader reads, and the keys it recognises inside
 # each one. A key or table outside this map is refused rather than ignored:
 # the identical typo (`commnad` for `command`) that `[limits]` already caught
@@ -190,7 +228,8 @@ KNOWN_TABLES = {
     "test": {"command"},
     "bootstrap": {"command"},
     "docs": {"required"},
-    "limits": {key.lower() for key in LIMITS},
+    "limits": {key.lower() for key in LIMITS} | DEPRECATED_LIMITS,
+    "cleanup": {"every_days", "model", "max_plan_nodes"},
 }
 
 
@@ -298,6 +337,14 @@ def load(path: str) -> list[tuple[str, str]]:
     limits = dig_checked(("limits",)) or {}
     if not isinstance(limits, dict):
         die(f"{path}: limits must be a table")
+    # Warn and drop rather than refuse -- see DEPRECATED_LIMITS and the module
+    # docstring. An existing board.toml that still sets this must keep loading.
+    for key in DEPRECATED_LIMITS:
+        if key in limits:
+            sys.stderr.write(
+                f"contract: {path}: limits.{key} is deprecated and ignored; "
+                "the scheduled cleanup replaced follow-ups\n"
+            )
     for key, fallback in LIMITS.items():
         value = limits.get(key.lower(), fallback)
         floor = LIMIT_MINIMUMS.get(key, 0)
@@ -307,6 +354,28 @@ def load(path: str) -> list[tuple[str, str]]:
                     f"(0 would disarm the adversarial review gate)")
             die(f"{path}: limits.{key.lower()} must be a non-negative integer")
         out.append((key, str(value)))
+
+    cleanup = dig_checked(("cleanup",)) or {}
+    if not isinstance(cleanup, dict):
+        die(f"{path}: cleanup must be a table")
+    for key, toml_key in (
+        ("CLEANUP_EVERY_DAYS", "every_days"),
+        ("CLEANUP_MAX_PLAN_NODES", "max_plan_nodes"),
+    ):
+        value = cleanup.get(toml_key, CLEANUP[key])
+        if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+            die(f"{path}: cleanup.{toml_key} must be a non-negative integer")
+        out.append((key, str(value)))
+    # Optional, unlike everything else that is a str: absent means "no
+    # override", not "required and missing", so "" round-trips same as never
+    # having set it -- see CLEANUP_MODEL's default and config.sh's fallback
+    # to PLAN_MODEL.
+    model = cleanup.get("model", CLEANUP["CLEANUP_MODEL"])
+    if not isinstance(model, str):
+        die(f"{path}: cleanup.model must be a string")
+    if "\0" in model:
+        die(f"{path}: cleanup.model may not contain a NUL byte")
+    out.append(("CLEANUP_MODEL", model))
 
     return out
 
