@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Join everything the board tick needs to know about a set of cards.
 
-    reconcile.py MUR-42 MUR-43 ...
+    reconcile.py ABC-42 ABC-43 ...
 
 Emits one JSON object per ticket on stdout. The tick reasons over this instead
 of running twenty shell commands and eyeballing the output.

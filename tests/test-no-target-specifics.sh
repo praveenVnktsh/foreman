@@ -44,11 +44,17 @@
 # Baileys runtime") and this scan never caught it -- it was dead code, deleted
 # rather than generalised, but the class it represents can come back in a
 # comment this scan does catch.
+#
+# `MUR-[0-9]` is the origin project's ticket key. It survived in the usage
+# examples at the top of brief.py, dispatch.sh, reconcile.py and sweep.sh until
+# 2026-09-16, when an audit before making this repository public found it: this
+# list banned the project's name but not its ticket prefix, so the examples
+# kept naming its tickets. Usage examples invent a plainly generic key instead.
 set -euo pipefail
 here="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 root="$(dirname -- "$here")"
 self="$(basename -- "${BASH_SOURCE[0]}")"
-banned='murmr|mango|Praveen|MURMR_|just test-all|deploy-mango|\.murmr-|backend/|design/build_system|test_design_invariants|ops/'
+banned='murmr|mango|Praveen|MURMR_|MUR-[0-9]|just test-all|deploy-mango|\.murmr-|backend/|design/build_system|test_design_invariants|ops/'
 banned_ci='whatsapp|baileys'
 
 # STYLEGUIDE.md and AGENTS.md are in scope even though they sit at the root.
