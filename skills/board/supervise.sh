@@ -18,6 +18,10 @@
 # CLI's flags. Its five verbs are in
 # docs/specs/2026-09-14-installations-per-harness-design.md.
 #
+# Run mode's reasons to replace the tick are the elif chain at the bottom of
+# this file, one comment per branch. One of them reads Linear: a tick that has
+# left a dispatchable Todo card waiting (starved.py).
+#
 # Why cron supervises a self-looping agent rather than firing each tick itself:
 # a spawn returns as soon as the agent is SPAWNED, not when the tick ends.
 # Wrapping that in withlock.py would release the lock a second later while the
@@ -131,6 +135,27 @@ export PATH="$HOME/.local/bin:/usr/local/bin:/usr/bin:/bin:/snap/bin:$PATH"
 # dead and restarts it every pass, which looks like a crash loop and never ticks.
 [[ "$TICK_DEAD_MINUTES" -gt "$TICK_INTERVAL_MINUTES" ]] \
   || die "TICK_DEAD_MINUTES ($TICK_DEAD_MINUTES) must exceed TICK_INTERVAL_MINUTES ($TICK_INTERVAL_MINUTES)"
+
+# A tick that is alive can still stop doing a board's work. On 2026-09-16 a tick
+# alive for two hours stopped reading one board's Todo column: a card waited 30
+# minutes with 8 free slots, `reconcile.py --may-dispatch` allowed it, queue.py
+# ranked it, and only a manual `supervise.sh --restart` moved it. Every check
+# above passed, because the transcript kept moving. starved.py reads Linear
+# outside the tick, and a tick older than this with a card older than this on a
+# board with a free slot is replaced.
+#
+# Defined HERE and not in config.sh, because this script is its only reader.
+# It MUST exceed TICK_INTERVAL_MINUTES: a fresh tick needs at least one interval
+# to reach every board, and a threshold inside that window restarts the
+# replacement before it has had a turn -- a restart loop that never dispatches.
+TICK_STARVED_MINUTES="${TICK_STARVED_MINUTES:-60}"
+[[ "$TICK_STARVED_MINUTES" =~ ^[0-9]+$ ]] \
+  || die "TICK_STARVED_MINUTES ($TICK_STARVED_MINUTES) must be a whole number of minutes"
+[[ "$TICK_STARVED_MINUTES" -gt "$TICK_INTERVAL_MINUTES" ]] \
+  || die "TICK_STARVED_MINUTES ($TICK_STARVED_MINUTES) must exceed TICK_INTERVAL_MINUTES ($TICK_INTERVAL_MINUTES)"
+# Where starved.py sends its Linear query. Empty means starved.py's own default,
+# the real API; tests point it at tests/lib/linear-stub.py.
+STARVED_API_URL="${STARVED_API_URL:-}"
 
 
 # How often a drain or a start-confirmation re-reads the registry. A grain, not
@@ -791,6 +816,62 @@ repair_tick() {
   log "ERROR: $TICK_AGENT_NAME is still live as: $(surviving_tick_ids), ${TICK_STOP_TIMEOUT_SECONDS}s after being asked to stop. Starting no replacement beside it; the next fire asks again. Stop it by id if this repeats."
 }
 
+# The tick has run longer than TICK_STARVED_MINUTES, so it has had a full window
+# to reach every board. Judging a younger tick would restart each replacement
+# before its first pass over the boards could adopt the waiting card, forever.
+tick_outlived_starved_window() {
+  [[ "$AGE" != "None" ]] && awk "BEGIN{exit !($AGE * 60 > $TICK_STARVED_MINUTES)}"
+}
+
+# Ask starved.py about every declared board. Sets STARVED_REASON and returns 0
+# at the first starved board; returns 1 when none is.
+#
+# NO VERDICT IS NOT EVIDENCE. A board starved.py cannot read -- Linear down, an
+# ids.env never resolved, a key file missing -- is logged and skipped, never
+# restarted for. A restart cannot fix Linear, and restarting on every failed
+# read replaces a healthy tick each fire for as long as the outage lasts.
+#
+# EACH CHILD LOSES THIS SCRIPT'S BOARD. This script sourced config.sh for the
+# first declared board, and config.sh is environment-wins, so a child sourcing
+# it for another board would keep FOREMAN_BOARD_EXPORTS' values. Measured while
+# building starved.py on 2026-09-16: an inherited REPO and KEY_FILE won,
+# MAX_CONCURRENT came from the wrong board.toml, and the wrong Linear key was
+# sent. Only those names are stripped, not `env -i`: the rest of the
+# environment is the machine's and the operator's (HOST_MAX_CONCURRENT among
+# it), and starved.py must weigh the same ceiling as the tick it judges.
+#
+# Halted boards are starved.py's to answer, so every declared board is asked.
+find_starved_board() {
+  local scratch board out rc unset_args=() name
+  STARVED_REASON=""
+  for name in $FOREMAN_BOARD_EXPORTS; do unset_args+=(-u "$name"); done
+  # A file and not `$(...)` for the board list: bash 3.2 drops the NUL
+  # separators in a command substitution (bin/load-pairs.sh has the measurement).
+  scratch="$(mktemp -d)" || { log "starved: cannot create a temporary directory; skipping the starved check"; return 1; }
+  if ! "$INSTALL_ROOT/bin/boards.py" --list >"$scratch/boards" 2>"$scratch/err"; then
+    log "starved: could not list the declared boards: $(tr '\n' ' ' <"$scratch/err")"
+    rm -rf "$scratch"
+    return 1
+  fi
+  while IFS= read -r -d '' board; do
+    [[ -n "$board" ]] || continue
+    rc=0
+    out="$(env "${unset_args[@]}" FOREMAN_INSTANCE="$board" \
+      "$SKILL_DIR/starved.py" "$board" --older-than "$TICK_STARVED_MINUTES" \
+      ${STARVED_API_URL:+--api-url "$STARVED_API_URL"} 2>"$scratch/err")" || rc=$?
+    if [[ "$rc" -ne 0 ]]; then
+      log "starved: could not read $board: $(sed 's/^starved: //' "$scratch/err" | tr '\n' ' ' | sed 's/ *$//')"
+      continue
+    fi
+    if [[ "$(field "$out" starved)" == "True" ]]; then
+      STARVED_REASON="$(field "$out" reason)"
+      break
+    fi
+  done <"$scratch/boards"
+  rm -rf "$scratch"
+  [[ -n "$STARVED_REASON" ]]
+}
+
 # Reasons to (re)start, most specific first. Each prints why, because a watchdog
 # that restarts silently is indistinguishable from one that does nothing.
 #
@@ -817,6 +898,12 @@ elif [[ "$STATE" == "working" && "$IDLE" != "None" ]] \
   repair_tick
 elif [[ "$IDLE" != "None" ]] && awk "BEGIN{exit !($IDLE > $TICK_DEAD_MINUTES)}"; then
   log "$TICK_AGENT_NAME loop stopped rescheduling: idle ${IDLE}m (> ${TICK_DEAD_MINUTES}m)"
+  repair_tick
+# After the liveness checks, because those need no network call and a tick they
+# replace is judged afresh next fire. Before the age recycle, so the log names
+# the starved board rather than calling the restart routine.
+elif tick_outlived_starved_window && find_starved_board; then
+  log "$TICK_AGENT_NAME is starving a board: $STARVED_REASON"
   repair_tick
 elif [[ "$AGE" != "None" ]] && awk "BEGIN{exit !($AGE > $TICK_MAX_AGE_HOURS)}"; then
   log "recycling $TICK_AGENT_NAME to bound context: age ${AGE}h (> ${TICK_MAX_AGE_HOURS}h)"
