@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Merge one card's pull request, copying the card's fast-track label first.
+"""Merge one card's pull request, making its fast-track label match the card's first.
 
     merge.py <pr-number> < card.json
 
@@ -10,37 +10,46 @@ Settings come from config.sh: REPO and FAST_TRACK_LABEL.
     stdout  exactly one JSON object on exit 0, 1 and 3:
             {"pr": <n>, "merged": bool, "fast_tracked": bool,
              "label": "<FAST_TRACK_LABEL or empty>", "reason": "<one sentence>"}
-            fast_tracked is true only when the label was added to the PR.
+            fast_tracked is true exactly when the label is on the PR at the
+            moment `gh pr merge` is called.
     stderr  one line on exit 2. Nothing otherwise.
-    exit 0  merged. fast_tracked says whether the label went on first.
-    exit 1  NOT merged: the card carries the label and copying it to the PR
-            failed. reason quotes gh's stderr. The tick leaves the card in In
+    exit 0  merged. fast_tracked says whether the label was on the PR.
+    exit 1  NOT merged: making the PR's label match the card failed -- reading
+            the PR's labels failed or gave an unreadable answer, adding the
+            label the card carries failed, or removing the label the card lacks
+            failed. reason quotes gh's error. The tick leaves the card in In
             Review, charges no attempt, reports it, and tries again next tick.
     exit 2  called wrong or unreadable input: a missing or non-integer PR
             number, extra arguments, stdin that is not JSON, labels in a shape
             route.py refuses, or config.sh failing to load. No JSON on stdout.
-    exit 3  NOT merged: `gh pr merge` itself failed. The label may or may not
-            be on the PR; fast_tracked says. reason quotes gh's stderr.
+    exit 3  NOT merged: `gh pr merge` itself failed. fast_tracked says whether
+            the label was on the PR when the merge was tried. reason quotes
+            gh's stderr.
     exit 4  NOT merged, and nothing was done to the PR: its head branch is not
             in this repository -- it comes from a fork -- or where it comes
-            from could not be established. The label is never copied first.
+            from could not be established. No label call runs first, not even
+            a read.
 
 Why this exists. A target may queue deploys: a merge deploys on a schedule,
 unless the merged pull request carries the GitHub label that
 `[deploy] fast_track_label` names, which deploys as soon as main is green. The
 operator marks urgency with the same-named label on the Linear card.
 
-- **The card is the only source.** foreman never decides a card is urgent.
-  With FAST_TRACK_LABEL empty, or the card lacking the label, no label call
-  runs at all.
-- **A failed copy refuses the merge.** Merging without the label silently
-  queues a deploy the operator asked to hurry. The merge waits a tick instead,
-  and the failure is reported, so the operator can create the label on the
-  repository or fix gh.
-- **The label goes on right before the merge.** The operator can add the Linear
-  label after the PR opened, so copying it at PR creation would miss it.
+- **The card is the only source.** foreman never decides a card is urgent. The
+  PR's label is synced to the card, not only copied: a label already on the PR
+  -- left by a failed earlier tick, a build agent, or a person -- is removed
+  when the card lacks it, because it would fast-track the deploy all the same.
+  With FAST_TRACK_LABEL empty no label call runs at all, not even a read.
+- **A failed sync refuses the merge.** Merging without the label silently
+  queues a deploy the operator asked to hurry; merging with a label the card
+  lacks hurries one the operator did not. The merge waits a tick instead, and
+  the failure is reported, so the operator can create the label on the
+  repository or fix gh. A failed read of the PR's labels refuses too.
+- **The label is synced right before the merge.** The operator can add or
+  remove the Linear label after the PR opened, so syncing it at PR creation
+  would miss that.
 - **Never auto-merge.** `--auto` would merge later, after this process has
-  reported, and nothing would check the label is still there.
+  reported, and nothing would check the label is still right.
 """
 
 from __future__ import annotations
@@ -120,13 +129,8 @@ def _read_card_labels(text: str) -> list[str]:
         _refuse(f"cannot read the card's labels: {exc}")
 
 
-def should_copy_label(fast_track_label: str, card_labels: list[str]) -> bool:
-    """True when the contract names a label and the card carries exactly it."""
-    return bool(fast_track_label) and fast_track_label in card_labels
-
-
-def _gh(args: list[str], repo: str) -> tuple[bool, str]:
-    """Run one gh call in REPO. Returns (succeeded, stderr).
+def _gh(args: list[str], repo: str) -> tuple[bool, str, str]:
+    """Run one gh call in REPO. Returns (succeeded, stdout, stderr).
 
     cwd is REPO because a bare PR number resolves against the working
     directory's repository. A missing gh or a timeout is a failed call.
@@ -137,10 +141,10 @@ def _gh(args: list[str], repo: str) -> tuple[bool, str]:
             capture_output=True, text=True, timeout=GH_TIMEOUT_SECONDS,
         )
     except subprocess.TimeoutExpired:
-        return False, f"gh {' '.join(args)} timed out after {GH_TIMEOUT_SECONDS}s"
+        return False, "", f"gh {' '.join(args)} timed out after {GH_TIMEOUT_SECONDS}s"
     except OSError as exc:
-        return False, f"could not run gh {' '.join(args)}: {exc}"
-    return out.returncode == 0, out.stderr.strip()
+        return False, "", f"could not run gh {' '.join(args)}: {exc}"
+    return out.returncode == 0, out.stdout, out.stderr.strip()
 
 
 def head_origin(pr: int, repo: str) -> tuple[str, str]:
@@ -180,6 +184,27 @@ def head_origin(pr: int, repo: str) -> tuple[str, str]:
     return "unknown", f"gh pr view answered {answer!r} for isCrossRepository, not true or false"
 
 
+def pr_labels(pr: int, repo: str) -> tuple[list[str] | None, str]:
+    """The names of the labels on PR #pr: (names, "") or (None, why).
+
+    A failed call, or an answer that is not {"labels": [{"name": str}, ...]},
+    is a failed read: guessing the label is absent could merge a PR that still
+    fast-tracks the deploy.
+    """
+    ok, stdout, err = _gh(["pr", "view", str(pr), "--json", "labels"], repo)
+    if not ok:
+        return None, f"gh pr view --json labels failed: {err}"
+    try:
+        data = json.loads(stdout)
+    except json.JSONDecodeError:
+        data = None
+    labels = data.get("labels") if isinstance(data, dict) else None
+    if not isinstance(labels, list) or not all(
+            isinstance(item, dict) and isinstance(item.get("name"), str) for item in labels):
+        return None, f"gh pr view --json labels answered {stdout.strip()!r}, not a label list"
+    return [item["name"] for item in labels], ""
+
+
 def _report(pr: int, merged: bool, fast_tracked: bool, label: str, reason: str, code: int) -> NoReturn:
     print(json.dumps({
         "pr": pr, "merged": merged, "fast_tracked": fast_tracked,
@@ -208,17 +233,31 @@ def main(argv: list[str]) -> NoReturn:
                 f"this repository, and merging on a guess could put a fork's code on main: {why}",
                 EXIT_NOT_THIS_REPOSITORY)
 
+    # After a sync that succeeds, the PR carries the label exactly when the card
+    # does, so fast_tracked is true exactly when the deploy will be fast-tracked.
     fast_tracked = False
-    if should_copy_label(label, card_labels):
-        ok, err = _gh(["pr", "edit", str(pr), "--add-label", label], repo)
-        if not ok:
+    if label:
+        on_pr, err = pr_labels(pr, repo)
+        if on_pr is None:
             _report(pr, False, False, label,
-                    f"Did not merge PR #{pr}: the card carries {label!r} but adding it "
-                    f"to the PR failed, and merging without it would queue the deploy: {err}",
+                    f"Did not merge PR #{pr}: could not read its labels, so whether "
+                    f"{label!r} on it matches the card is unknown: {err}",
                     EXIT_LABEL_FAILED)
-        fast_tracked = True
+        wanted = label in card_labels
+        if wanted != (label in on_pr):
+            flag = "--add-label" if wanted else "--remove-label"
+            ok, _, err = _gh(["pr", "edit", str(pr), flag, label], repo)
+            if not ok:
+                why = (f"the card carries {label!r} but adding it to the PR failed, "
+                       f"and merging without it would queue the deploy"
+                       if wanted else
+                       f"the card lacks {label!r} but the PR carries it and removing it "
+                       f"failed, and merging with it would fast-track the deploy")
+                _report(pr, False, False, label, f"Did not merge PR #{pr}: {why}: {err}",
+                        EXIT_LABEL_FAILED)
+        fast_tracked = wanted
 
-    ok, err = _gh(["pr", "merge", str(pr), "--squash"], repo)
+    ok, _, err = _gh(["pr", "merge", str(pr), "--squash"], repo)
     if not ok:
         _report(pr, False, fast_tracked, label,
                 f"gh pr merge failed for PR #{pr}: {err}", EXIT_MERGE_FAILED)
