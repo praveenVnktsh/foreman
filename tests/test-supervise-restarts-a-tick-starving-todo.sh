@@ -12,11 +12,13 @@
 #   - a tick younger than TICK_STARVED_MINUTES has not had its window yet, and
 #     judging it would restart every replacement before its first pass;
 #   - a Linear read that failed is no verdict, and a restart cannot fix Linear;
+#   - a red main stands the board down, and a restart cannot fix main either;
 #   - a threshold inside TICK_INTERVAL_MINUTES is refused outright.
 #
 # It drives the real supervise.sh, and the real starved.py, reconcile.py and
-# queue.py under it. Only the harness (a stub `claude` on PATH) and Linear
-# (tests/lib/linear-stub.py) are stubbed.
+# queue.py and preflight.py under it. Only the harness (a stub `claude` on
+# PATH), GitHub (a stub `gh` on PATH) and Linear (tests/lib/linear-stub.py) are
+# stubbed; the target's origin is a local bare repository.
 set -uo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -52,8 +54,13 @@ done
 
 target="$work/target"
 mkdir -p "$target"
+git init -q --bare "$work/origin"
 git -C "$target" init -q -b main
 fixture_board_toml "$target"
+git -C "$target" add -A
+git -C "$target" -c user.email=t@e -c user.name=t commit -qm seed
+git -C "$target" remote add origin "$work/origin"
+git -C "$target" push -q origin main
 printf '[limits]\nmax_concurrent = 3\n' >>"$target/board.toml"
 home="$work/home"
 fh="$home/.foreman"
@@ -117,6 +124,22 @@ fi
 exit 0
 STUB
 chmod +x "$home/.local/bin/claude"
+
+# `gh run list` answers with $work/ci.json, the newest CI run on main, which
+# starved.py reads through `reconcile.py --main-ci`. Every other call succeeds,
+# so preflight.py's gh and runner checks pass.
+cat >"$home/.local/bin/gh" <<GH
+#!/usr/bin/env bash
+if [[ "\$1" == "run" && "\$2" == "list" ]]; then cat "$work/ci.json"; exit 0; fi
+if [[ "\$1" == "api" ]]; then echo '{"total_count": 0, "runners": []}'; fi
+exit 0
+GH
+chmod +x "$home/.local/bin/gh"
+main_ci() { # <conclusion> -- the newest, completed CI run on main
+  printf '[{"databaseId": 1, "headSha": "abc", "status": "completed", "conclusion": "%s", "url": "u"}]\n' \
+    "$1" >"$work/ci.json"
+}
+main_ci success
 
 # scenario <minutes in Todo> [fail_after] -- ABC-7 was created ten hours ago
 # and entered Todo <minutes> before the real now. supervise.sh cannot pass
@@ -200,6 +223,20 @@ out="$(run)"
 grep -q 'starved: could not read demo: .*500' <<<"$out" \
   && ok "and the log names the board it could not read" \
   || bad "the log did not name the unreadable board: $out"
+
+# --- d2: main CI is red -------------------------------------------------------
+# Found in review: SKILL.md step 0 stands a board with a red main down, so its
+# Todo card waits by design. Judged starved, the tick was replaced once a window
+# for as long as main stayed red.
+reset; tick 3; scenario 120; start_stub; main_ci failure
+out="$(run)"
+[[ ! -s "$stopped" && ! -s "$started" ]] \
+  && ok "a board whose main CI is red restarts nothing" \
+  || bad "a red main restarted the tick: $out"
+grep -q 'healthy' <<<"$out" \
+  && ok "and run mode calls the tick healthy" \
+  || bad "run mode did not call the tick healthy beside a red main: $out"
+main_ci success
 
 # --- e: a threshold inside the tick interval ----------------------------------
 reset; tick 3; scenario 120; start_stub

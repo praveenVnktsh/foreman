@@ -663,7 +663,8 @@ misjudged liveness, and misjudging liveness is what watchdogs do under load.
 declares, `supervise.sh` runs `skills/board/starved.py <board> --older-than
 $TICK_STARVED_MINUTES`. When the tick has been alive longer than that and
 `starved.py` answers `starved: true` — a routed, unblocked `Todo` card has
-waited longer than `TICK_STARVED_MINUTES` with a free slot open —
+waited longer than `TICK_STARVED_MINUTES` with a free slot open, on a board
+whose `main` and machine pass [0. Preflight](#0-preflight) —
 `supervise.sh` replaces the tick exactly as it replaces a wedged one, logging
 the board, the card's identifier and how many minutes it waited. It is the
 outside check on the rule in [6. Dispatch](#6-dispatch) that every slice reads

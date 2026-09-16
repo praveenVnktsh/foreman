@@ -29,7 +29,9 @@ NOT STARVED, in the order the reasons are checked (cheapest first):
 - the board holds `MAX_CONCURRENT` slots already (`reconcile.py --host-slots`);
 - the machine refuses a dispatch (`reconcile.py --may-dispatch`);
 - no Todo card is routed to this installation and rankable (`queue.py`);
-- no such card is unblocked and has waited longer than `--older-than`.
+- no such card is unblocked and has waited longer than `--older-than`;
+- this board's `main` is not `green` or `running` (`reconcile.py --main-ci`);
+- this machine is unfit to build this board (`preflight.py`).
 
 Every one of those is a board the tick is right to leave alone. Anything else
 with a waiting card is starved.
@@ -51,6 +53,7 @@ BIN_DIR = os.path.join(os.path.dirname(os.path.dirname(SKILL_DIR)), "bin")
 CONFIG_SH = os.path.join(SKILL_DIR, "config.sh")
 RECONCILE_PY = os.path.join(SKILL_DIR, "reconcile.py")
 QUEUE_PY = os.path.join(SKILL_DIR, "queue.py")
+PREFLIGHT_PY = os.path.join(SKILL_DIR, "preflight.py")
 INSTALLATION_PY = os.path.join(BIN_DIR, "installation.py")
 BOARDS_PY = os.path.join(BIN_DIR, "boards.py")
 
@@ -82,6 +85,14 @@ LOCAL_TIMEOUT_SECONDS = 60
 # blocks, and SKILL.md step 6 skips a blocked card on purpose.
 COMPLETED_STATE_TYPE = "completed"
 BLOCKS_RELATION = "blocks"
+
+# The `reconcile.py --main-ci` verdicts under which SKILL.md step 0 lets a board
+# dispatch. Every other one -- red, rerunning, untested, none, unknown -- stands
+# the board down: it "merges nothing and dispatches nothing". Found in review:
+# without this gate a board with a red main read as starved, and supervise.sh
+# replaced a healthy tick once a window for as long as main stayed red. A
+# restart cannot fix main any more than it can fix Linear.
+DISPATCHABLE_MAIN = frozenset({"green", "running"})
 
 CONFIG_KEYS = (
     "INSTANCE", "INSTALLATION", "IS_DEFAULT", "KEY_FILE",
@@ -189,6 +200,26 @@ def todo_verdict(board: str, free_slots: int, cards: list[TodoCard],
     if len(waiting) > 1:
         reason += f", with {len(waiting) - 1} more waiting behind it"
     return Verdict(board, True, reason, tuple(waiting))
+
+
+def main_ci_verdict(board: str, main_ci: dict, waiting: tuple[Waiting, ...]) -> Verdict | None:
+    """Not starved when this board's `main` stands its dispatching down."""
+    verdict = main_ci.get("verdict")
+    if verdict in DISPATCHABLE_MAIN:
+        return None
+    return Verdict(board, False,
+                   f"{board}'s main CI is {verdict} ({main_ci.get('reason', 'no reason given')}), "
+                   f"so the board dispatches nothing", waiting)
+
+
+def preflight_verdict(board: str, failed_checks: list[str],
+                      waiting: tuple[Waiting, ...]) -> Verdict | None:
+    """Not starved when preflight says this machine cannot build this board."""
+    if not failed_checks:
+        return None
+    return Verdict(board, False,
+                   f"this machine is unfit to build {board} ({', '.join(failed_checks)}), "
+                   f"so dispatch.sh refuses every dispatch", waiting)
 
 
 # --- parsing at the edge ---------------------------------------------------
@@ -331,6 +362,38 @@ def machine_refusal(config: dict[str, str], board: str) -> str:
     return done.stdout.strip()
 
 
+def main_ci(board: str) -> dict:
+    done = run([RECONCILE_PY, "--main-ci"], "reconcile.py --main-ci")
+    try:
+        state = json.loads(done.stdout) if done.returncode == 0 else None
+    except json.JSONDecodeError:
+        state = None
+    if not isinstance(state, dict) or not isinstance(state.get("verdict"), str):
+        raise NoVerdict(f"reconcile.py --main-ci gave no verdict for {board} "
+                        f"(exit {done.returncode})")
+    return state
+
+
+def failed_preflight_checks() -> list[str]:
+    """The names of the preflight checks that fail; empty when the machine is fit.
+
+    The FULL gate, because that is the one dispatch.sh runs: `--quick` passes a
+    machine the full gate refuses (a dead token, an unreachable origin), and a
+    board dispatch.sh refuses is not starved.
+    """
+    done = run([PREFLIGHT_PY, "--quiet"], "preflight.py")
+    if done.returncode == 0:
+        return []
+    try:
+        report = json.loads(done.stdout)
+        failed = [str(check["name"]) for check in report["checks"] if not check["ok"]]
+    except (json.JSONDecodeError, KeyError, TypeError) as exc:
+        raise NoVerdict(f"preflight.py exited {done.returncode} with no readable verdict") from exc
+    if report.get("fit") is not False or not failed:
+        raise NoVerdict(f"preflight.py exited {done.returncode} but named no failed check")
+    return failed
+
+
 def read_key(key_file: str) -> str:
     try:
         with open(key_file, encoding="utf-8") as handle:
@@ -437,8 +500,17 @@ def verdict_for(args: argparse.Namespace) -> Verdict:
     nodes = todo_nodes(args.api_url, read_key(config["KEY_FILE"]), config)
     cards = [parse_card(node, config["STATE_TO_PICK_UP"]) for node in nodes]
     routed = routed_identifiers(home, config, nodes)
-    return todo_verdict(board, max_concurrent - held, cards, routed,
-                        args.now, args.older_than)
+    verdict = todo_verdict(board, max_concurrent - held, cards, routed,
+                           args.now, args.older_than)
+    if not verdict.starved:
+        return verdict
+    # The two stand-downs of SKILL.md step 0, asked last and only of a board that
+    # would otherwise be starved: --main-ci calls gh, and the full preflight
+    # fetches and writes its probes, which is too much to spend on every board
+    # every fire.
+    return (main_ci_verdict(board, main_ci(board), verdict.waiting)
+            or preflight_verdict(board, failed_preflight_checks(), verdict.waiting)
+            or verdict)
 
 
 def main(argv: list[str]) -> int:

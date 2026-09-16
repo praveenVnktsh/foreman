@@ -8,13 +8,16 @@
 # until a manual `supervise.sh --restart`. Nothing in the repository could
 # tell that tick from a board with no work, because both print nothing.
 #
-# It also pins the other direction. A halted board, a board at its ceiling and
-# a blocked card are the tick doing its job, and a restart there would only
-# interrupt work. A Linear read that failed has no verdict at all: reported as
-# "not starved", it is the incident's own silence.
+# It also pins the other direction. A halted board, a board at its ceiling, a
+# blocked card, a main that is not green and a machine preflight calls unfit
+# are the tick doing its job, and a restart there would only interrupt work. A
+# Linear read that failed has no verdict at all: reported as "not starved", it
+# is the incident's own silence.
 #
 # It drives the real script, and reconcile.py and queue.py under it, against a
-# temporary FOREMAN_HOME. Only Linear is stubbed, with tests/lib/linear-stub.py.
+# temporary FOREMAN_HOME. Linear is stubbed with tests/lib/linear-stub.py, and
+# `gh` and `claude` with scripts on PATH; preflight.py runs for real against a
+# local bare origin.
 set -uo pipefail
 
 root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -48,14 +51,41 @@ done
 home="$work/home"
 fh="$home/.foreman"
 repo="$work/repo"
+origin="$work/origin"
 mkdir -p "$repo"
+git init -q --bare "$origin"
 git init -q -b main "$repo"
 fixture_board_toml "$repo"
+git -C "$repo" add -A
+git -C "$repo" -c user.email=t@e -c user.name=t commit -qm seed
+git -C "$repo" remote add origin "$origin"
+git -C "$repo" push -q origin main
 # Three slots, so one held card still leaves free ones.
 printf '[limits]\nmax_concurrent = 3\n' >> "$repo/board.toml"
 fixture_add_board "$home" demo "$repo"
 board_dir="$fh/instances/demo"
 printf 'LINEAR_PROJECT_ID=project-1\nSTATE_TO_PICK_UP=state-todo\n' > "$board_dir/ids.env"
+
+# `gh run list` answers with $work/ci.json, the newest CI run on main. `gh api
+# user` fails while $work/gh-dead exists, which fails preflight's gh check.
+stubs="$work/bin"
+mkdir -p "$stubs"
+printf '#!/usr/bin/env bash\nexit 0\n' > "$stubs/claude"
+cat > "$stubs/gh" <<GH
+#!/usr/bin/env bash
+if [[ "\$1" == "run" && "\$2" == "list" ]]; then cat "$work/ci.json"; exit 0; fi
+if [[ "\$1" == "api" && "\$2" == "user" && -e "$work/gh-dead" ]]; then
+  echo "HTTP 401: Requires authentication" >&2; exit 1
+fi
+if [[ "\$1" == "api" ]]; then echo '{"total_count": 0, "runners": []}'; exit 0; fi
+exit 0
+GH
+chmod +x "$stubs/claude" "$stubs/gh"
+main_ci() {  # $1 conclusion of the newest, completed CI run on main
+  printf '[{"databaseId": 1, "headSha": "abc", "status": "completed", "conclusion": "%s", "url": "u"}]\n' \
+    "$1" > "$work/ci.json"
+}
+main_ci success
 
 now="2026-09-16T12:00:00Z"
 minutes_before_now() {  # $1 minutes -> an ISO stamp in Linear's own format
@@ -116,7 +146,7 @@ start_stub() {
 # $work/err. $1 is the FOREMAN_INSTANCE, the rest is argv.
 ask() {
   local instance="$1"; shift
-  env HOME="$home" FOREMAN_HOME="$fh" FOREMAN_INSTANCE="$instance" \
+  env HOME="$home" FOREMAN_HOME="$fh" FOREMAN_INSTANCE="$instance" PATH="$stubs:$PATH" \
     "$starved" "$@" --older-than 60 --api-url "$api_url" --now "$now" 2>"$work/err"
 }
 
@@ -196,6 +226,30 @@ else
   bad "a board at its ceiling is not starved: status=$status out=$out $(cat "$work/err")"
 fi
 rm -rf "$board_dir/cards/ABC-4" "$board_dir/cards/ABC-5"
+
+# --- e2: main CI is red, so step 0 stands the board down ----------------------
+scenario 90 ""
+start_stub
+main_ci failure
+out="$(ask demo demo)"; status=$?
+if [[ "$status" -eq 0 && "$(field 'v["starved"]' <<<"$out")" == False \
+      && "$(field 'v["reason"]' <<<"$out")" == *"main CI is red"* ]]; then
+  ok "a board whose main CI is red is not starved, and the reason names main"
+else
+  bad "a board whose main CI is red is not starved: status=$status out=$out $(cat "$work/err")"
+fi
+main_ci success
+
+# --- e3: preflight calls the machine unfit, so dispatch.sh refuses ------------
+touch "$work/gh-dead"
+out="$(ask demo demo)"; status=$?
+if [[ "$status" -eq 0 && "$(field 'v["starved"]' <<<"$out")" == False \
+      && "$(field 'v["reason"]' <<<"$out")" == *unfit*"gh auth"* ]]; then
+  ok "a board this machine is unfit to build is not starved, naming the failed check"
+else
+  bad "a board this machine is unfit to build is not starved: status=$status out=$out $(cat "$work/err")"
+fi
+rm -f "$work/gh-dead"
 
 # --- f: Linear answers HTTP 500 ----------------------------------------------
 scenario 90 "" 0
