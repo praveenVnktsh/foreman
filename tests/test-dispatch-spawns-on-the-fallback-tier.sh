@@ -93,7 +93,7 @@ else
   show_history PRA-2
 fi
 if grep -q 'plan model fable is rate-limited until' "$DISPATCH_RUN_LOG" &&
-   grep -q 'dispatching .*PRA-2.*on opus' "$DISPATCH_RUN_LOG"; then
+   grep -q 'running on opus' "$DISPATCH_RUN_LOG"; then
   ok "stderr names the limited model, until when, and what it dispatched on instead"
 else
   bad "stderr names the limited model, until when, and what it dispatched on instead"

@@ -38,8 +38,8 @@ fb() {
     FALLBACK_NOW="2026-09-16T06:00:00Z" \
     FALLBACK_TIERS="fable opus sonnet haiku" \
     FALLBACK_COOLDOWN_MINUTES=60 \
-    TICK_MODEL=fable PLAN_MODEL=fable BUILD_MODEL=opus REVIEW_MODEL=opus CLEANUP_MODEL=fable \
-    TICK_FLOOR= PLAN_FLOOR= BUILD_FLOOR= REVIEW_FLOOR= \
+    PLAN_MODEL=fable BUILD_MODEL=opus REVIEW_MODEL=opus CLEANUP_MODEL=fable \
+    PLAN_FLOOR= BUILD_FLOOR= REVIEW_FLOOR= \
     ${overrides[@]+"${overrides[@]}"} \
     "$fallback" "$@" 2>"$work_dir/stderr"
 }
@@ -67,6 +67,11 @@ expect "with no stamps, the plan stage runs on its first choice" \
 fb -- mark fable >/dev/null
 expect "with fable limited, the plan stage runs on opus" \
   "$(fb -- model plan)" "opus"
+if grep -q 'plan model fable is rate-limited until 2026-09-16T07:00:00Z; running on opus' "$work_dir/stderr"; then
+  ok "model says on stderr which model was limited, until when, and what it runs on"
+else
+  bad "model says on stderr why it fell back: got $(cat "$work_dir/stderr")"
+fi
 
 resolved="$(fb -- resolve plan)"
 expect "resolve says the plan stage fell back" "$(field "$resolved" fell_back)" "true"
@@ -119,8 +124,6 @@ expect "mark writes that expiry as the stamp's one line" \
   "$(cat "$home/rate-limits/fable")" "2026-09-16T07:30:00Z"
 expect "mark --minutes overrides the cooldown" \
   "$(fb -- mark fable --minutes 5)" '{"model":"fable","until":"2026-09-16T06:05:00Z"}'
-expect "status lists the live stamp" \
-  "$(fb -- status)" '[{"model":"fable","until":"2026-09-16T06:05:00Z"}]'
 
 if fb -- mark ../x >/dev/null; then
   bad "mark refuses a model that would write outside the stamp directory: it exited 0"

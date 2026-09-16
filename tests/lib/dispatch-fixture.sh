@@ -32,7 +32,7 @@ _DISPATCH_MODEL_KNOBS="PLAN_MODEL BUILD_MODEL REVIEW_MODEL"
 # before config.sh derives this harness's default the way PLAN_MODEL always
 # could. test-dispatch-spawns-on-the-fallback-tier.sh sets PLAN_FLOOR after
 # dispatch_fixture_setup, the same hole the model knobs leave open on purpose.
-_DISPATCH_FALLBACK_KNOBS="FALLBACK_TIERS FALLBACK_COOLDOWN_MINUTES TICK_FLOOR PLAN_FLOOR BUILD_FLOOR REVIEW_FLOOR"
+_DISPATCH_FALLBACK_KNOBS="FALLBACK_TIERS FALLBACK_COOLDOWN_MINUTES PLAN_FLOOR BUILD_FLOOR REVIEW_FLOOR"
 
 # The programs dispatch.sh runs. Read dispatch.sh and check this list rather
 # than trusting it; each name says where it is run:

@@ -9,7 +9,8 @@
 Emits NUL-separated KEY, VALUE pairs on stdout: INSTALLATION, HARNESS,
 IS_DEFAULT, LEGACY_NAMES, FOREMAN_HOME, FOREMAN_ROOT, TICK_MODEL, PLAN_MODEL,
 BUILD_MODEL, REVIEW_MODEL, FALLBACK_TIERS, FALLBACK_COOLDOWN_MINUTES,
-TICK_FLOOR, PLAN_FLOOR, BUILD_FLOOR, REVIEW_FLOOR. Consumers count fields to detect a failed load, so
+PLAN_FLOOR, BUILD_FLOOR, REVIEW_FLOOR. Consumers count fields to detect a
+failed load, so
 EVERY key is always emitted -- this file follows bin/boards.py in structure,
 wire format and refusal style, and boards.py's docstring gives the reasoning
 behind all three.
@@ -84,6 +85,11 @@ TIERS_KEY = "tiers"
 COOLDOWN_KEY = "cooldown_minutes"
 FLOOR_TABLE = "floor"
 FALLBACK_KEYS = {TIERS_KEY, COOLDOWN_KEY, FLOOR_TABLE}
+
+# The stages that fall back. Not the tick: skills/board/supervise.sh starts it
+# on TICK_MODEL directly and no dispatch ever resolves it, so a tick floor
+# would be a declared protection that nothing reads.
+FALLBACK_STAGES = ("plan", "build", "review")
 
 # Claude's own models, strongest first. Codex and OpenCode get no list: their
 # model names are the operator's to type, and a guessed order would downgrade
@@ -307,12 +313,12 @@ def resolve_floors(where: str, tiers: list[str], models: dict, given: object) ->
         given = {}
     if not isinstance(given, dict):
         die(f"{where}: {key} must be a table")
-    unknown = sorted(set(given) - set(STAGES))
+    unknown = sorted(set(given) - set(FALLBACK_STAGES))
     if unknown:
         die(f"{where}: unknown key(s) in {key}: {', '.join(unknown)}; "
-            f"expected any of {', '.join(STAGES)}")
+            f"expected any of {', '.join(FALLBACK_STAGES)}")
     out = {}
-    for stage in STAGES:
+    for stage in FALLBACK_STAGES:
         floor = given.get(stage)
         if floor is None:
             out[stage] = ""
@@ -616,10 +622,9 @@ def fields(name: str, harness: str, is_default: bool, legacy_names: bool,
         "REVIEW_MODEL", models["review"],
         "FALLBACK_TIERS", " ".join(fallback["tiers"]),
         "FALLBACK_COOLDOWN_MINUTES", str(fallback["cooldown"]),
-    ] + [
-        field
-        for stage in STAGES
-        for field in (f"{stage.upper()}_FLOOR", fallback["floors"][stage])
+        "PLAN_FLOOR", fallback["floors"]["plan"],
+        "BUILD_FLOOR", fallback["floors"]["build"],
+        "REVIEW_FLOOR", fallback["floors"]["review"],
     ]
 
 

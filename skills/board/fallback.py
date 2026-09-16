@@ -2,11 +2,12 @@
 """Pick the model a board stage runs on while its first choice is rate-limited.
 
     fallback.py resolve <stage>              one line of JSON: the model, and why
-    fallback.py model <stage>                the resolved model name alone, for bash
+    fallback.py model <stage>                the resolved model name alone, for bash;
+                                             says on stderr when it fell back
     fallback.py mark <model> [--minutes N]   record that <model> is limited for N minutes
-    fallback.py status                       one line of JSON: every live stamp
 
-<stage> is tick, plan, build, review or cleanup.
+<stage> is plan, build, review or cleanup. The tick is not a stage here:
+skills/board/supervise.sh starts it on TICK_MODEL, and no dispatch resolves it.
 
 WHY THIS EXISTS. On 2026-09-16 the plan stage ran on `PLAN_MODEL=fable` while
 fable was rate-limited. Every plan agent died on its first API call. The tick
@@ -82,7 +83,6 @@ DEFAULT_COOLDOWN_MINUTES = 60
 # Each stage's first-choice model and floor, by environment variable. Cleanup
 # has no floor of its own: see WHAT IT READS above.
 STAGE_VARS = {
-    "tick": ("TICK_MODEL", "TICK_FLOOR"),
     "plan": ("PLAN_MODEL", "PLAN_FLOOR"),
     "build": ("BUILD_MODEL", "BUILD_FLOOR"),
     "review": ("REVIEW_MODEL", "REVIEW_FLOOR"),
@@ -259,21 +259,13 @@ def live_limit(directory: Path, moment: datetime) -> Callable[[str], Limit | Non
     return read
 
 
-def live_stamps(directory: Path, moment: datetime) -> list[Limit]:
-    if not directory.is_dir():
-        return []
-    read = live_limit(directory, moment)
-    found = (read(entry.name) for entry in sorted(directory.iterdir()))
-    return [limit for limit in found if limit is not None]
-
-
 def write_stamp(directory: Path, limit: Limit) -> None:
     """Replace <model>'s stamp in one rename.
 
     A dispatch on another board may read the stamp while the tick writes it.
     A half-written line would read as unreadable, and so as not limited, and
     cost a spawn on the limited model. The temporary file starts with a dot,
-    which no model name may, so status never lists it.
+    which no model name may, so it can never be read as a stamp.
     """
     directory.mkdir(parents=True, exist_ok=True)
     fd, temporary = tempfile.mkstemp(dir=directory, prefix=f".{limit.model}.")
@@ -319,7 +311,6 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     mark = commands.add_parser("mark")
     mark.add_argument("model")
     mark.add_argument("--minutes", type=minutes_argument)
-    commands.add_parser("status")
     return parser.parse_args(argv)
 
 
@@ -331,21 +322,26 @@ def main(argv: list[str]) -> int:
         stage = read_stage(args.stage)
         resolution = resolve(stage, live_limit(stamp_dir(), moment))
         if args.command == "model":
+            # Said here, by the one component that knows why the model changed,
+            # so dispatch.sh reads a name and never the JSON's shape.
+            if resolution.limited:
+                until = resolution.limited[0].as_record()["until"]
+                outcome = ("no tier below it is allowed, so running on "
+                           f"{resolution.model} anyway" if resolution.floor_reached
+                           else f"running on {resolution.model}")
+                sys.stderr.write(f"foreman: {stage.name} model {stage.first_choice} "
+                                 f"is rate-limited until {until}; {outcome}\n")
             print(resolution.model)
         else:
             print_json(resolution.as_record())
         return 0
 
-    if args.command == "mark":
-        if not is_stamp_name(args.model):
-            die(f"cannot mark model {args.model!r}; expected a model name that is "
-                "not empty, contains no '/' and does not start with '.'")
-        limit = Limit(args.model, moment + timedelta(minutes=cooldown_minutes(args.minutes)))
-        write_stamp(stamp_dir(), limit)
-        print_json(limit.as_record())
-        return 0
-
-    print_json([limit.as_record() for limit in live_stamps(stamp_dir(), moment)])
+    if not is_stamp_name(args.model):
+        die(f"cannot mark model {args.model!r}; expected a model name that is "
+            "not empty, contains no '/' and does not start with '.'")
+    limit = Limit(args.model, moment + timedelta(minutes=cooldown_minutes(args.minutes)))
+    write_stamp(stamp_dir(), limit)
+    print_json(limit.as_record())
     return 0
 
 

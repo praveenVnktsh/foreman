@@ -55,10 +55,10 @@ export HOME="$work" FOREMAN_HOME="$fh" FOREMAN_INSTANCE=demo
 # One stopped plan agent per ticket, its transcript written from stdin at the
 # path the claude adapter reports for its cwd and session.
 stopped_agent() {  # $1 ticket; transcript rows on stdin
-  local ticket="$1" cwd="/wt/$1" slug
-  slug="$(printf '%s' "$cwd" | tr './' '--')"
-  mkdir -p "$HOME/.claude/projects/$slug"
-  cat > "$HOME/.claude/projects/$slug/s-$ticket.jsonl"
+  local ticket="$1" cwd="/wt/$1" transcript
+  transcript="$("$root/skills/board/harness/claude.sh" transcript "$cwd" "s-$ticket")"
+  mkdir -p "$(dirname "$transcript")"
+  cat > "$transcript"
   python3 - "$work/agents.json" "$BOARD_NAME_PREFIX/$ticket/plan-1" "$cwd" "s-$ticket" <<'PY'
 import json, sys
 path, name, cwd, session = sys.argv[1:]

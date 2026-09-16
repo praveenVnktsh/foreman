@@ -1918,13 +1918,15 @@ def death_report(path: str | None) -> dict | None:
                 last_text = b.get("text") or last_text
 
     unanswered = list(pending.values())
+    if ran_tool:
+        rate_limit_error = None
     return {
         "killed_mid_tool": bool(unanswered),
         "unanswered_tool": unanswered[-1] if unanswered else None,
         "last_text": " ".join(last_text.split())[-400:] if last_text else None,
         "rows": len(rows),
-        "rate_limited": rate_limit_error is not None and not ran_tool,
-        "rate_limit_error": rate_limit_error if not ran_tool else None,
+        "rate_limited": rate_limit_error is not None,
+        "rate_limit_error": rate_limit_error,
     }
 
 

@@ -87,7 +87,7 @@ is why it no longer does.
   Claude to turn fallback off the same way.
 - **`cooldown_minutes`** is how long a rate-limited model is skipped before a
   stage tries it again. It defaults to 60 minutes.
-- **`[fallback.floor]`** names, per stage (`tick`, `plan`, `build`, `review`),
+- **`[fallback.floor]`** names, per stage (`plan`, `build`, `review`),
   the weakest model that stage may fall back to. A stage with no floor may
   fall all the way to the bottom of `tiers`. A floor must name a model in
   `tiers`, and it must sit at or below the stage's own model in that list;

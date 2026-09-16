@@ -330,50 +330,17 @@ MAX_BUDGET_USD="${MAX_BUDGET_USD:-}"
 # session's model" -- the way back to the previous behaviour, and the same
 # distinction every other override in this file makes.
 #
-# Exported, unlike CLEANUP_EVERY_DAYS/CLEANUP_MODEL/CLEANUP_MAX_PLAN_NODES
-# below: skills/board/fallback.py is a CHILD PROCESS dispatch.sh runs (it
-# resolves the model for a fresh spawn), and a child sees only what its parent
-# exports. These four are safe to export where the cleanup trio is not,
-# because of WHERE each one comes from. TICK_MODEL/PLAN_MODEL/BUILD_MODEL/
-# REVIEW_MODEL are this INSTALLATION's own declaration (bin/installation.py,
-# read above, before boards.toml is even opened) -- identical for every board
-# it serves, so exporting them cannot leak one board's contract into another.
-# CLEANUP_MODEL is the opposite kind of value: it can be overridden per board
-# (board.toml's `[cleanup] model`, read below), which is exactly the leak the
-# cleanup trio's own comment describes -- so it stays unexported here.
-# dispatch.sh's cleanup spawn passes it to fallback.py explicitly instead
-# (`CLEANUP_MODEL="$CLEANUP_MODEL" fallback.py model cleanup`), the same way it
-# already reads $CLEANUP_MODEL from this same, single, per-invocation shell.
-export TICK_MODEL PLAN_MODEL BUILD_MODEL REVIEW_MODEL
-
-# RATE-LIMIT FALLBACK, the tiers a stage falls back through when its model is
-# rate-limited, how long a fallback lasts, and the floor below which a stage
-# may never fall (docs/plans/2026-09-16-rate-limit-fallback.md). All six come
-# from bin/installation.py above, alongside the four stage models, for the
-# same reason: one installation declares one fallback policy, shared by every
-# board it serves, and a board's own board.toml has no say in it -- a board
-# whose plan model is rate-limited waits exactly as long as any other board on
-# this installation would.
-#
-# FALLBACK_TIERS is the ordered list, strongest first ("" means fallback is
-# off, e.g. every non-claude harness by default). FALLBACK_COOLDOWN_MINUTES is
-# how long a rate-limit stamp lives once fallback.py marks a model limited. The
-# four *_FLOOR values are per-stage: the weakest model that stage may ever be
-# dropped to, so a board that would rather void than run its build on `haiku`
-# declares `[fallback.floor] build = "sonnet"` and installation.py refuses a
-# floor that names a model outside FALLBACK_TIERS. CLEANUP_MODEL has no floor
-# of its own -- SKILL.md uses PLAN_FLOOR for it, the same way CLEANUP_MODEL
-# above inherits PLAN_MODEL's default.
-#
-# skills/board/fallback.py is the ONLY thing that decides a resolved model from
-# these: it walks FALLBACK_TIERS down from a stage's *_MODEL while the current
-# tier has a live rate-limit stamp, never past that stage's floor. Nothing
-# here computes a fallback model directly, so there is exactly one place that
-# rule can be wrong.
-#
-# Exported for the same reason as the four models just above: fallback.py runs
-# as a child process and cannot read a variable this shell never exported.
-export FALLBACK_TIERS FALLBACK_COOLDOWN_MINUTES TICK_FLOOR PLAN_FLOOR BUILD_FLOOR REVIEW_FLOOR
+# RATE-LIMIT FALLBACK. skills/board/fallback.py picks the model a fresh spawn
+# runs on when a stage's first choice is rate-limited, from the stage models
+# above and the [fallback] values bin/installation.py emits beside them. It is a
+# child process of dispatch.sh, so it sees only what this shell exports.
+# Exporting these is safe where the cleanup trio below is not: they are the
+# installation's own declaration, identical for every board it serves. So
+# CLEANUP_MODEL, which a board can override, stays unexported and dispatch.sh
+# hands it to fallback.py on the one call that needs it. fallback.py holds the
+# rule itself.
+export PLAN_MODEL BUILD_MODEL REVIEW_MODEL
+export FALLBACK_TIERS FALLBACK_COOLDOWN_MINUTES PLAN_FLOOR BUILD_FLOOR REVIEW_FLOOR
 
 # How many times a card may FAIL to be planned before it is parked, separate
 # from MAX_BUILD_ATTEMPTS and MAX_PLAN_ROUNDS.

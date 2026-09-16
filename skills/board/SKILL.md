@@ -301,7 +301,7 @@ A number carried from one slice into the next is the previous board's answer.
 | `PLAN_MODEL`, `BUILD_MODEL`, `REVIEW_MODEL` | the model each dispatched role runs on — see *One model per stage* below |
 | `CLEANUP_MODEL` | the model the cleanup agent runs on, defaulting to `PLAN_MODEL` — same section |
 | `FALLBACK_TIERS`, `FALLBACK_COOLDOWN_MINUTES` | the models a rate-limited stage falls down through, strongest first, and how long a limit is believed — `installation.toml` `[fallback]`, see *A rate-limited model* in step 2. Empty tiers turn fallback off |
-| `TICK_FLOOR`, `PLAN_FLOOR`, `BUILD_FLOOR`, `REVIEW_FLOOR` | the weakest model each stage may fall back to, from `[fallback.floor]`; empty means the bottom of the tiers. Cleanup uses `PLAN_FLOOR` |
+| `PLAN_FLOOR`, `BUILD_FLOOR`, `REVIEW_FLOOR` | the weakest model each stage may fall back to, from `[fallback.floor]`; empty means the bottom of the tiers. Cleanup uses `PLAN_FLOOR` |
 | `BOARD_DRY_RUN` | print every mutation instead of performing it |
 
 `MAX_CONCURRENT` counts **cards, not processes** — a card in review adds up to

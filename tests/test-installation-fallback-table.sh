@@ -77,7 +77,7 @@ check "a claude installation falls back fable, opus, sonnet, haiku by default" \
   "fable opus sonnet haiku" "$(read_key FALLBACK_TIERS --home "$claude")"
 check "the cooldown defaults to 60 minutes" \
   "60" "$(read_key FALLBACK_COOLDOWN_MINUTES --home "$claude")"
-for key in TICK_FLOOR PLAN_FLOOR BUILD_FLOOR REVIEW_FLOOR; do
+for key in PLAN_FLOOR BUILD_FLOOR REVIEW_FLOOR; do
   check "$key is emitted empty when no floor is declared" \
     "" "$(read_key "$key" --home "$claude")"
 done
