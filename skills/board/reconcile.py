@@ -366,7 +366,7 @@ def pr_for(ticket: str) -> dict | None:
         [
             "gh", "pr", "list", "--head", branch, "--state", "all",
             "--json", "number,state,headRefOid,mergeStateStatus,mergeCommit,"
-                      "url,isDraft,title,statusCheckRollup",
+                      "url,isDraft,title,statusCheckRollup,isCrossRepository",
         ],
         cwd=REPO,
     )
@@ -378,6 +378,33 @@ def pr_for(ticket: str) -> dict | None:
     if prs is None:
         return {"lookup_failed": True,
                 "reason": "gh pr list failed; whether a pull request exists is unknown"}
+
+    # ONLY A PULL REQUEST FROM THIS REPOSITORY IS EVER THE CARD'S.
+    #
+    # `--head` matches a branch by NAME, and gh says so: '"<owner>:<branch>"
+    # syntax not supported'. A fork's pull request whose branch has the same
+    # name is therefore returned here exactly like the board's own. On a private
+    # repository nobody can open one, so this never mattered. On a public one,
+    # anyone can -- and the name is not a secret: the prefix is fixed by
+    # config.sh, and the ticket keys in flight are printed in merged pull
+    # request titles.
+    #
+    # Found on 2026-09-16, auditing the repository before making it public. The
+    # chain it closes: a stranger forks, names a branch for a card that is being
+    # built, and opens a pull request after the board's own. `newest()` below
+    # picks theirs. The board then reviews and merges a diff the stranger wrote,
+    # and since each installation now fast-forwards to `main` on a timer, that
+    # diff is running on the operator's machine minutes later, beside the gh
+    # token and every harness session. Adversarial review would be the only
+    # thing standing in the way, and it reads the diff the attacker chose.
+    #
+    # Kept only when `isCrossRepository` is exactly False. A row that omits it
+    # has an origin nobody established, and this returns the one pull request
+    # step 4 may merge autonomously -- so an unknown origin is dropped, not
+    # trusted. merge.py refuses a cross-repository pull request as well: the
+    # merge is the irreversible step, and it checks its own precondition rather
+    # than relying on this having run.
+    prs = [p for p in prs if p.get("isCrossRepository") is False]
     if not prs:
         return None
     # `--state all` is needed so step 5 can still see a MERGED pull request while
