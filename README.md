@@ -11,8 +11,8 @@ without anyone present.
 A repository becomes buildable by adding one `board.toml`. Forking this
 repository gives you a project that already has a builder.
 
-Seeded from the board orchestrator built inside `murmr`, which remains its own
-installation. See `docs/specs/`.
+Extracted from a board orchestrator that grew up inside one private project,
+and generalised until nothing about that project remained. See `docs/specs/`.
 
 ## Installing
 
@@ -141,3 +141,24 @@ installations created from now on put their installation name into their
 names. `migrate` still refuses if any `foreman/` agent is live, because it
 moves the home, and with it the card history and scratch, under a running
 agent.
+
+## Self-updating
+
+foreman updates itself by pulling, not by anything inbound. Nothing a pull
+request runs ever executes on the host: CI runs on GitHub-hosted runners, and
+the only way a merged commit reaches an installation is the installation
+fetching it. That is deliberate now that this repository is public — a
+self-hosted runner would let a stranger's fork send code straight to an
+operator's machine.
+
+`bin/self-update.sh` is the automated form of the `git pull` and
+`supervise.sh --restart` described above. It fast-forwards this
+installation's clone to `origin/main` and restarts the tick, leaving any
+in-flight card alone. It refuses rather than guess: a dirty clone, a clone
+that is not on `main`, or an `origin/main` that was force-pushed all stop it
+instead of producing a clone nobody asked for.
+
+`bin/install-self-update.sh` schedules it as a systemd user timer, beside the
+watchdog `install-service.sh` installs:
+
+    ~/.foreman/claude/install/bin/install-self-update.sh
