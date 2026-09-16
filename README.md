@@ -11,8 +11,8 @@ without anyone present.
 A repository becomes buildable by adding one `board.toml`. Forking this
 repository gives you a project that already has a builder.
 
-Seeded from the board orchestrator built inside `murmr`, which remains its own
-installation. See `docs/specs/`.
+Extracted from a board orchestrator that grew up inside one private project,
+and generalised until nothing about that project remained. See `docs/specs/`.
 
 ## Installing
 
