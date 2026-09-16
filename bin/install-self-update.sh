@@ -79,6 +79,19 @@ Type=oneshot
 # each fire that updated anything would kill the very tick it just started,
 # and with it every card agent sharing that cgroup.
 KillMode=process
+# A BACKSTOP, NOT THE GUARD. A oneshot that never finishes stays 'activating'
+# for ever, and systemd computes no next elapse for its timer while it does --
+# so a single hung fire would silently end every future update. Measured on
+# 2026-09-16, the first time this ran on a real host: a stalled fetch left
+# NextElapseUSecMonotonic=infinity.
+#
+# self-update.sh bounds its own fetch, which is the real fix. This catches
+# anything that bound misses. Note what it cannot do under KillMode=process: on
+# timeout systemd signals only the main process, so a hung CHILD would be left
+# running. That is exactly why the fetch has to end itself rather than rely on
+# this -- and why this is set well above anything a healthy fire needs, so it
+# only ever fires on something genuinely wedged.
+TimeoutStartSec=10min
 WorkingDirectory=$INSTALL_ROOT
 Environment=FOREMAN_HOME=$FOREMAN_HOME
 # systemd gives a user unit a minimal PATH. supervise.sh runs the harness CLI,
@@ -102,6 +115,15 @@ OnBootSec=3min
 # be frequent; the expensive part -- the restart -- happens only when the SHA
 # actually moved.
 OnUnitActiveSec=5min
+# SPREAD THE INSTALLATIONS APART. Every installation on a machine gets one of
+# these timers, and an operator installs them back to back, so their schedules
+# start within a second of each other and stay in lockstep for ever: every five
+# minutes, every installation fetches the same remote at the same instant.
+# Measured on 2026-09-16 with three installations installed together -- all
+# three fetches stalled at once. Whether the lockstep caused the stall or only
+# multiplied it, it is a thundering herd this machine inflicts on itself, and a
+# random offset per fire costs nothing.
+RandomizedDelaySec=90s
 # A host that sleeps would otherwise skip every fire it was off for, and the
 # clone would stay behind until someone noticed.
 Persistent=true
