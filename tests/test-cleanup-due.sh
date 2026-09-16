@@ -213,5 +213,47 @@ case "$status:$(cat "$work/err")" in
   *) bad "an undeclared board is refused by name: status=$status err=$(cat "$work/err")" ;;
 esac
 
+# --- the slot a finished cleanup pass is still holding ------------------------
+#
+# A cleanup agent is dispatched under the ticket `cleanup`, so it holds a slot
+# through `cards/cleanup/history.jsonl` exactly like a card. When its pass ends
+# and nothing sweeps it, that pseudo-card holds the board's only slot for
+# HOST_SLOT_STALE_MINUTES -- and the reason line read identically to a slot held
+# by real card work, so the one thing that releases it was invisible. The live
+# check above has already answered `no cleanup agent is running`, so a held
+# `cleanup` slot here is always a finished pass.
+rm -rf "$fh/instances/demo/cards"
+rm -f "$fh/instances/demo/last-cleanup"
+card_history cleanup "$(stamp_now 0)"
+out="$(reconcile --cleanup-due demo)"; status=$?
+case "$status:$out" in
+  1:*"sweep.sh cleanup"*) ok "a slot held by a finished cleanup names the sweep that frees it" ;;
+  *) bad "a slot held by a finished cleanup names the sweep that frees it: status=$status out=$out $(cat "$work/err")" ;;
+esac
+rm -rf "$fh/instances/demo/cards"
+
+# --- a board that is not the one this process resolved ------------------------
+#
+# `cleanup_verdict` takes a board argument, but CLEANUP_EVERY_DAYS,
+# MAX_CONCURRENT and the agent-name prefix all come from the contract config.sh
+# resolved for $FOREMAN_INSTANCE. Answering about another board weighs one
+# board's stamp against another board's cadence, agents and ceiling -- and
+# `--cleanup-started` would stamp a board nobody asked about, skipping its next
+# three days of cleanup with nothing saying so. A stale FOREMAN_INSTANCE is this
+# skill's oldest bug shape, so the mismatch refuses and names both boards.
+fixture_add_board "$home" other "$repo"
+out="$(reconcile --cleanup-due other)"; status=$?
+case "$status:$(cat "$work/err")" in
+  2:*demo*other*|2:*other*demo*) ok "--cleanup-due refuses a board this process did not resolve" ;;
+  *) bad "--cleanup-due refuses a board this process did not resolve: status=$status out=$out err=$(cat "$work/err")" ;;
+esac
+
+out="$(reconcile --cleanup-started other)"; status=$?
+if [[ "$status" -eq 2 && ! -f "$fh/instances/other/last-cleanup" ]]; then
+  ok "--cleanup-started stamps no board but the one this process resolved"
+else
+  bad "--cleanup-started stamps no board but the one this process resolved: status=$status out=$out"
+fi
+
 [[ "$fail" -eq 0 ]] && printf 'PASS: cleanup is due on the stamp, the agents and the slots\n'
 exit "$fail"

@@ -1553,6 +1553,11 @@ def cleanup_verdict(foreman_home: str, board: str, every_days: int,
     `agents` is `load_agents()`'s list, and the caller owes it the same None
     check every other reader here does: an unreadable registry reported as an
     empty list is a cleanup dispatched on top of a live one.
+
+    `board` NAMES THE STAMP, and everything else here -- `CLEANUP_EVERY_DAYS`,
+    `MAX_CONCURRENT`, `INSTALLATION` and the agent-name prefix `agents_for()`
+    matches on -- is the contract config.sh resolved for $FOREMAN_INSTANCE. The
+    two must be the same board, so `main()` refuses a call where they are not.
     """
     if every_days <= 0:
         return f"cleanup is off (every_days = {every_days})"
@@ -1573,10 +1578,24 @@ def cleanup_verdict(foreman_home: str, board: str, every_days: int,
         return f"{live[-1]['name']} is {live[-1]['phase']}"
     key = slot_key(INSTALLATION, board)
     installations = siblings()
-    held = (host_slots(installations).get("instances") or {}).get(key, 0)
+    # The TICKETS, not just the count. A cleanup agent is dispatched under the
+    # ticket `cleanup`, so a finished pass keeps holding a slot through
+    # `cards/cleanup/history.jsonl` until `sweep.sh cleanup` logs `released`
+    # or HOST_SLOT_STALE_MINUTES expires. That read identically to a slot held
+    # by real card work, so a board stalled on its own last cleanup could not
+    # be diagnosed from the reason line -- which is the only line the operator
+    # sees. The liveness check above has already answered "no cleanup agent is
+    # running", so a `cleanup` slot reaching here is always a finished pass.
+    holding = (host_slots(installations).get("tickets") or {}).get(key) or []
+    held = len(holding)
     if held >= MAX_CONCURRENT:
-        return (f"{board} holds {held} of its {MAX_CONCURRENT} card "
-                f"{'slot' if MAX_CONCURRENT == 1 else 'slots'}")
+        reason = (f"{board} holds {held} of its {MAX_CONCURRENT} card "
+                  f"{'slot' if MAX_CONCURRENT == 1 else 'slots'}")
+        if CLEANUP_TICKET in holding:
+            reason += (f"; cards/{CLEANUP_TICKET} is one of them -- a finished "
+                       f"cleanup pass nothing has released, freed by "
+                       f"`sweep.sh {CLEANUP_TICKET}`")
+        return reason
     # The machine's ceiling last, and asked through the same function every
     # dispatch is weighed by: a cleanup agent eats the same RAM and disk as a
     # build, so it owes the other boards on this machine the same floors.
@@ -1870,14 +1889,21 @@ def review_verdict(ticket: str, entries: list[dict], pr: dict | None,
       unreviewed       no review agent was ever dispatched. Dispatch one.
       awaiting-review  the round is dispatched and its files are not all
                        readable yet. NOT "found nothing": see review_findings.
+      head-moved       no blocking finding, but the head has moved past the sha
+                       the round read, so nobody has reviewed what would merge.
+                       Dispatch `next_round`, which MAX_REVIEW_ROUNDS bounds.
       needs-fix        a blocking finding, and no build resume after it.
                        Resume the build with the findings.
       fixing           resumed, and the fix is not pushed yet -- the head is
                        still the sha the reviewer read, and the build agent is
                        running. Wait.
-      fix-unresolved   resumed, the head never moved, and the build agent is
-                       no longer running. `Needs Human`: the fix agent stopped
-                       without pushing anything.
+      ref-unknown      resumed, and whether the fix was pushed cannot be
+                       judged: the round recorded no ref, or the head could not
+                       be read. Wait. Never a person's card -- see below.
+      fix-unresolved   resumed, the round's ref IS recorded, the head still
+                       equals it, and the build agent is no longer running.
+                       `Needs Human`: the fix agent stopped without pushing
+                       anything.
       awaiting-checks  the fix is pushed and its checks have not concluded.
       checks-failing   the fix is pushed and a required check failed.
       mergeable        no blocking finding at all, or the fix is pushed and
@@ -1886,10 +1912,20 @@ def review_verdict(ticket: str, entries: list[dict], pr: dict | None,
 
     `ref` is what makes "the fix was pushed" observable: `dispatch.sh` records
     the sha each reviewer was dispatched against, and a head that has moved
-    past it is a commit that landed after the review. A round with no recorded
-    ref, or a pull request whose head could not be read, therefore reads as
-    NOT pushed -- the direction that waits or asks for a human, never the one
-    that merges on evidence nobody gathered.
+    past it is a commit that landed after the review. The round's LAST ref is
+    the one that counts: a reviewer that died is re-dispatched, and by then the
+    head may have moved, so one round carries several shas and the earliest of
+    them is one the findings predate.
+
+    A ROUND WITH NO REF, OR A HEAD NOBODY COULD READ, IS `ref-unknown`. Both
+    used to read as `fix-unresolved`, which the tick turns into `Needs Human`
+    with `board-failed` -- so a fix that was pushed and green was retired
+    because no history written before this carried a `ref` at all, and one
+    transient `gh pr list` failure (`pr.lookup_failed`, which has no
+    headRefOid) retired another. This is the rule the build path already
+    states for `pr.lookup_failed`: "I could not read it" and "it never moved"
+    are not the same answer. So `fix-unresolved` requires a RECORDED ref that
+    the head provably still equals, and everything else waits.
 
     `ticket` is a parameter because nothing else here names the card: the
     reviews live at `$BOARD_HOME/cards/<ticket>/reviews/<round><slot>.json`.
@@ -1915,12 +1951,27 @@ def review_verdict(ticket: str, entries: list[dict], pr: dict | None,
     # belongs to the round its attempt names.
     rnd = max(rounds)
     spawned = rounds[rnd]
-    ref = next((r for _, _, r in spawned if r), "")
+    # The LAST ref the round recorded, in file order. Taking the first one made
+    # "the fix was pushed" true at a sha that landed BEFORE the findings were
+    # written: a reviewer that died and was re-dispatched after the build pushed
+    # carries a newer sha on its second spawn line, and against the first one a
+    # fix agent that pushed nothing reached `mergeable`.
+    ref = next((r for _, _, r in reversed(spawned) if r), "")
     state.update(round=rnd, ref=ref or None)
+
+    # One reviewer SLOT is one review file, however many spawn lines name it. A
+    # re-dispatched slot appears here twice, and reading `reviews/<round><slot>`
+    # once per spawn line counted its single blocking finding twice -- and told
+    # the reviewer count below that a round short of its reviewers was fully
+    # dispatched.
+    slots: list[str] = []
+    for _, slot, _ in spawned:
+        if slot not in slots:
+            slots.append(slot)
 
     reviews = os.path.join(BOARD_HOME, "cards", ticket, "reviews")
     unread, blocking = [], 0
-    for _, slot, _ in spawned:
+    for slot in slots:
         findings = review_findings(os.path.join(reviews, f"{rnd}{slot}.json"))
         if findings is None:
             unread.append(f"{rnd}{slot}")
@@ -1934,14 +1985,35 @@ def review_verdict(ticket: str, entries: list[dict], pr: dict | None,
     # A round the tick was interrupted part-way through dispatching has been
     # read in full and still not reviewed in full. Merging on it spends one
     # reviewer where the operator asked for REVIEWERS_PER_ROUND.
-    if len(spawned) < REVIEWERS_PER_ROUND:
+    if len(slots) < REVIEWERS_PER_ROUND:
         state.update(
             verdict="awaiting-review",
-            reason=f"round {rnd} dispatched {len(spawned)} of "
+            reason=f"round {rnd} dispatched {len(slots)} of "
                    f"{REVIEWERS_PER_ROUND} reviewers",
         )
         return state
+
+    # Did a commit land after this round was dispatched? Only a RECORDED ref
+    # and a READABLE head can answer that. Either one missing is "unknown", and
+    # unknown is never "no" -- both paths below turn on this.
+    pushed = bool(head and ref and head != ref)
+
     if not blocking:
+        # A clean round licensed a merge on its round number alone, so a head
+        # the reviewer never read could merge: round 1 passes at sha A, a
+        # required check fails, the build is resumed and pushes B, and B merges
+        # unreviewed. Ask for a fresh round instead. This is what keeps
+        # MAX_REVIEW_ROUNDS meaningful -- it now bounds the re-reviews a moving
+        # head causes, and a card that reaches it with the head still moving is
+        # the existing `Needs Human` exit.
+        if pushed:
+            state.update(
+                verdict="head-moved", next_round=rnd + 1,
+                reason=f"round {rnd} filed no blocking finding at {ref[:12]}, "
+                       f"but the head is now {head[:12]}, which no reviewer has "
+                       f"read; round {rnd + 1} has to read it",
+            )
+            return state
         state.update(verdict="mergeable",
                      reason=f"round {rnd} filed no blocking finding")
         return state
@@ -1964,13 +2036,33 @@ def review_verdict(ticket: str, entries: list[dict], pr: dict | None,
                             f"{'finding' if blocking == 1 else 'findings'}")
         return state
 
-    if not (head and ref and head != ref):
+    # "The fix cannot be judged" is its own answer, and it WAITS. Folding it
+    # into `fix-unresolved` sent the card to `Needs Human` with `board-failed`
+    # on evidence nobody gathered -- see this function's docstring for the two
+    # ways that happens to a card whose fix is pushed and green.
+    unknown = []
+    if not ref:
+        unknown.append(f"round {rnd} recorded no ref")
+    if not head:
+        unknown.append("the pull request head could not be read")
+    if unknown:
+        state.update(
+            verdict="ref-unknown",
+            reason=f"{' and '.join(unknown)}, so whether the fix for round "
+                   f"{rnd} was pushed cannot be judged",
+        )
+        return state
+
+    if not pushed:
+        # The ref is recorded and the head still equals it: the fix really was
+        # never pushed.
         running = any(a.get("role") == "build" and a.get("alive")
                       and a.get("phase") == "running" for a in agents)
         state.update(
             verdict="fixing" if running else "fix-unresolved",
             reason=f"the build was resumed for round {rnd} and the head is "
-                   f"still {head[:12] or 'unknown'}; the build agent is "
+                   f"still {head[:12]}, the sha the round was dispatched "
+                   f"against; the build agent is "
                    + ("running" if running else "no longer running"),
         )
         return state
@@ -2137,6 +2229,17 @@ def main(argv: list[str]) -> int:
             return 2
         board = argv[1]
         if not _is_declared(board, mode):
+            return 2
+        # Declared is not enough: it has to be the board THIS process resolved.
+        # Answering about a neighbour weighs one board's stamp against another
+        # board's cadence, ceiling and agents, and `--cleanup-started` stamps
+        # the neighbour -- skipping the cleanup it was owed, silently, for a
+        # whole `every_days`. A stale FOREMAN_INSTANCE is this skill's oldest
+        # bug shape, so both names go in the refusal.
+        if board != INSTANCE:
+            print(f"reconcile: {mode}: this process resolved the contract for "
+                  f"board {INSTANCE}, so it cannot answer for {board}; run it "
+                  f"with FOREMAN_INSTANCE={board}", file=sys.stderr)
             return 2
         if mode == "--cleanup-started":
             # Written BEFORE the dispatch, never after -- cleanup_verdict()

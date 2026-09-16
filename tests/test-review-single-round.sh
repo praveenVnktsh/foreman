@@ -53,9 +53,18 @@ printf '[]\n' > "$registry"
 # `gh pr list` answers from a file each case writes, and `gh pr diff` names one
 # ordinary file so the diff reads as low risk. Nothing else is asked of gh on
 # an OPEN pull request.
+#
+# `$work/gh-list-fails` makes the list exit non-zero, which is how a transient
+# GitHub failure reaches `pr_for` as `lookup_failed` with no headRefOid. One
+# such blip must not retire a card, so a case below asserts what the verdict is
+# when the head cannot be read at all.
 cat > "$stub_bin/gh" <<STUB
 #!/usr/bin/env bash
 if [[ "\$1" == "pr" && "\$2" == "list" ]]; then
+  if [[ -f "$work/gh-list-fails" ]]; then
+    echo "gh: could not connect to github.com" >&2
+    exit 1
+  fi
   cat "$pr_json"
   exit 0
 fi
@@ -112,7 +121,8 @@ open(path, "w").write(json.dumps({"findings": [
 PY
 }
 
-# Prints the card's `review` verdict as `<verdict> <blocking> <merged_after_fix>`.
+# Prints the card's `review` verdict as
+# `<verdict> <blocking> <merged_after_fix> <next_round> <reason>`.
 # The status is the script's own, so a refusal is visible rather than parsed as
 # an empty verdict.
 verdict() {
@@ -123,8 +133,16 @@ verdict() {
 import json, sys
 review = json.load(sys.stdin)[0]["review"]
 print(review["verdict"], review["blocking"],
-      review.get("merged_after_fix", False), review.get("reason", ""))
+      review.get("merged_after_fix", False), review.get("next_round", 0),
+      review.get("reason", ""))
 '
+}
+
+# Every case below the first block starts from an empty history and no review
+# files. One case leaving its spawn lines behind is how a later case reads a
+# round it never dispatched.
+reset_card() {
+  rm -f "$card/history.jsonl" "$card/reviews/"*.json
 }
 
 # --- round 1 blocked, nothing fixed yet --------------------------------------
@@ -227,6 +245,92 @@ out="$(verdict)"
 case "$out" in
   "unreviewed 0 False"*) ok "a card with no review spawn is unreviewed" ;;
   *) bad "a card with no review spawn is unreviewed: $out" ;;
+esac
+
+# --- a round re-dispatched at a newer sha -------------------------------------
+#
+# A reviewer that dies is re-dispatched, and by then the head may have moved --
+# so ONE round carries two spawn lines at two different shas. The round's LAST
+# ref is the sha the review that actually ran was asked about. Reading the
+# FIRST one made "the fix was pushed" true at a sha that landed BEFORE the
+# findings were even written, so a fix agent that pushed nothing reached
+# `mergeable` and the blocking finding merged unfixed.
+#
+# The same two lines name one reviewer slot, `1a`. Reading its file once per
+# spawn line counted its single blocking finding twice.
+reset_card
+history_line '{"action":"spawn","name":"foreman/demo/ACME-1/review-1a","role":"review","attempt":"1a","ref":"'"$SHA1"'"}'
+history_line '{"action":"spawn","name":"foreman/demo/ACME-1/review-1a","role":"review","attempt":"1a","ref":"'"$SHA2"'"}'
+findings 1a.json blocking
+history_line '{"action":"resume","name":"foreman/demo/ACME-1/build-1","session":"s3"}'
+write_pr "$SHA2" "COMPLETED:SUCCESS"
+printf '[]\n' > "$registry"
+out="$(verdict)"
+case "$out" in
+  mergeable*) bad "a round re-dispatched at the head's own sha is not a pushed fix: $out" ;;
+  "fix-unresolved 1"*) ok "a round re-dispatched at the head's own sha is not a pushed fix" ;;
+  *) bad "a round re-dispatched at the head's own sha is not a pushed fix: $out $(cat "$work/err")" ;;
+esac
+# The count is read as a field, not matched inside the line: every verdict's
+# reason names a round number, so a substring match on `1` passes whatever the
+# count says.
+blocking_count="$(printf '%s\n' "$out" | awk '{print $2}')"
+if [[ "$blocking_count" == "1" ]]; then
+  ok "one reviewer slot spawned twice files one blocking finding, not two"
+else
+  bad "one reviewer slot spawned twice files one blocking finding, not two: $out"
+fi
+
+# --- a round that recorded no ref at all --------------------------------------
+#
+# No history written before this change carries a `ref`, so the head cannot be
+# compared with anything. That is "I cannot judge the fix", not "the fix was
+# never pushed" -- and the tick turns the latter into `Needs Human` with
+# `board-failed`, retiring a green, pushed fix on a reason nobody gathered.
+reset_card
+history_line '{"action":"spawn","name":"foreman/demo/ACME-1/review-1a","role":"review","attempt":"1a"}'
+findings 1a.json blocking
+history_line '{"action":"resume","name":"foreman/demo/ACME-1/build-1","session":"s4"}'
+write_pr "$SHA2" "COMPLETED:SUCCESS"
+out="$(verdict)"
+case "$out" in
+  "ref-unknown 1 False"*) ok "a round with no recorded ref waits as ref-unknown" ;;
+  *) bad "a round with no recorded ref waits as ref-unknown: $out $(cat "$work/err")" ;;
+esac
+
+# --- a head nobody could read -------------------------------------------------
+#
+# `pr_for` reports a failed `gh pr list` as `lookup_failed`, which carries no
+# headRefOid. Exactly the same rule as the build path's: "I could not read it"
+# and "it never moved" are not the same answer, and one transient gh failure
+# must not hand the card to a person.
+reset_card
+history_line '{"action":"spawn","name":"foreman/demo/ACME-1/review-1a","role":"review","attempt":"1a","ref":"'"$SHA1"'"}'
+findings 1a.json blocking
+history_line '{"action":"resume","name":"foreman/demo/ACME-1/build-1","session":"s5"}'
+: > "$work/gh-list-fails"
+out="$(verdict)"
+rm -f "$work/gh-list-fails"
+case "$out" in
+  "ref-unknown 1 False"*) ok "an unreadable pull request head waits as ref-unknown" ;;
+  *) bad "an unreadable pull request head waits as ref-unknown: $out $(cat "$work/err")" ;;
+esac
+
+# --- a clean round whose head has moved ---------------------------------------
+#
+# Round 1 read SHA1 and found nothing blocking. The head is SHA2, which no
+# reviewer has ever read -- a resumed build pushing a fix for a failing check
+# is enough to produce this. Merging on the round number alone ships code
+# nobody reviewed, so the answer is a fresh round, and `MAX_REVIEW_ROUNDS` is
+# what bounds how many times a moving head may ask for one.
+reset_card
+history_line '{"action":"spawn","name":"foreman/demo/ACME-1/review-1a","role":"review","attempt":"1a","ref":"'"$SHA1"'"}'
+findings 1a.json warning
+write_pr "$SHA2" "COMPLETED:SUCCESS"
+out="$(verdict)"
+case "$out" in
+  "head-moved 0 False 2"*) ok "a clean round whose head has moved asks for round 2" ;;
+  *) bad "a clean round whose head has moved asks for round 2: $out $(cat "$work/err")" ;;
 esac
 
 [[ "$fail" -eq 0 ]] && printf 'PASS: review runs once and a fix merges on its checks\n'

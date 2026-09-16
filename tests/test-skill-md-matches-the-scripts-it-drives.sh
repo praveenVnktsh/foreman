@@ -198,7 +198,11 @@ subs = [
     ("<N>", "1"),
 ]
 
-KINDS = ["plan", "build", "replan", "review", "cleanup"]
+# `fix` is here because review now runs ONCE: a blocking finding buys exactly
+# one fix, and that fix merges on its own checks with no second reviewer. That
+# resume is the last thing any agent does to the diff before it merges, so a
+# document that only describes it in a sentence is a dispatch nothing runs.
+KINDS = ["plan", "build", "replan", "review", "fix", "cleanup"]
 seen = {}
 for block in blocks:
     if "brief.py " not in block and "dispatch.sh " not in block:
@@ -241,6 +245,26 @@ run_block() {
     . "$shim/config.sh"
     B="$shim"
     eval "$(cat "$1")" )
+}
+
+# The same block, with NO `set -e` around it. The tick's own shell has none:
+# SKILL.md is prose an agent follows, and nothing wraps the commands it shows.
+# `run_block`'s `set -e` therefore stops a block at its first failing line under
+# bash 3.2, which is the one thing a block that chains nothing must not be
+# credited with -- the guard has to be in the document, not in this runner.
+run_block_unguarded() {
+  ( export HOME="$home" FOREMAN_HOME="$home/.foreman" FOREMAN_INSTANCE=demo \
+      PATH="$stub_bin:$PATH"
+    # shellcheck disable=SC1090
+    . "$shim/config.sh"
+    B="$shim"
+    eval "$(cat "$1")" )
+}
+
+# `--cleanup-due` as the tick asks it, printing the reason on either exit code.
+cleanup_due() {
+  env HOME="$home" FOREMAN_HOME="$home/.foreman" FOREMAN_INSTANCE=demo \
+    PATH="$stub_bin:$PATH" "$shim/reconcile.py" --cleanup-due demo 2>&1
 }
 
 spawned() { # <agent name> -- did the stub record a spawn under this name?
@@ -394,12 +418,71 @@ else
 $out"
 fi
 
+# --- 4b. The fix resume ----------------------------------------------------
+#
+# The card's ONE fix. A blocking finding sends the build agent back once, and
+# whatever it pushes merges on its own checks with no second reviewer -- so this
+# resume is the last dispatch any diff gets before it lands. It is also the only
+# one whose prompt splices text another agent wrote into a session holding real
+# git and gh credentials, which is what brief.py's fencing is for.
+reviews_dir="$home/.foreman/instances/demo/cards/$TICKET/reviews"
+mkdir -p "$reviews_dir"
+cat > "$reviews_dir/1a.json" <<'JSON'
+{"findings": [
+  {"severity": "blocking", "file": "widget.py", "line": 12,
+   "summary": "the empty queue is never handled",
+   "failure": "widget.py crashes on the first tick after a drain"},
+  {"severity": "note", "file": "widget.py", "summary": "spelling"}
+]}
+JSON
+
+if out="$(run_block "$blocks/fix.sh" 2>&1)"; then
+  ok "SKILL.md's fix block runs: brief.py fix and dispatch.sh --resume both accept it"
+else
+  bad "SKILL.md's fix block does not run as written:
+$out"
+fi
+
+if grep -q 'the empty queue is never handled' "$work/f.md" 2>/dev/null \
+   && grep -q '<review-finding>' "$work/f.md" 2>/dev/null; then
+  ok "the fix prompt carries the blocking finding, fenced as another agent's words"
+else
+  bad "the fix prompt does not carry the finding inside a review-finding tag:
+$(cat "$work/f.md" 2>/dev/null)"
+fi
+
+# The resume, not a fresh spawn: the build agent keeps the worktree that holds
+# the branch the fix has to land on. dispatch.sh logs the name it resumed.
+if grep -q "\"name\":\"foreman/demo/$TICKET/build-1\"" \
+     "$home/.foreman/instances/demo/cards/$TICKET/history.jsonl"; then
+  ok "the fix block resumes the card's own build agent"
+else
+  bad "no resume of foreman/demo/$TICKET/build-1 in the card's history:
+$(cat "$home/.foreman/instances/demo/cards/$TICKET/history.jsonl")"
+fi
+
 # --- 5. The scheduled cleanup block ----------------------------------------
 #
 # SKILL.md asks at the END of a slice, on capacity the cards did not need -- so
 # the card this slice worked has to have released its slot first. Without that,
 # demo holds its one MAX_CONCURRENT slot, `--cleanup-due` correctly answers "not
 # due", and every assertion below would be green about a block that never ran.
+#
+# That "without that" is a fact about the cadence and not an artefact of this
+# fixture, so it is asserted before it is arranged away: the board has never had
+# a cleanup, its stamp is missing, and CLEANUP_EVERY_DAYS is still 3 -- and it is
+# STILL not due, because one card is in flight. CLEANUP_EVERY_DAYS is a floor on
+# the interval and the config table has to say so, or an operator reads a board
+# that cleans up every third day out of a knob that promises nothing of the kind.
+due_out="$(cleanup_due)"; due_status=$?
+case "$due_status:$due_out" in
+  1:*"of its 1 card slot"*)
+    ok "a board whose one slot holds a card is not due a cleanup, stale stamp or not" ;;
+  *)
+    bad "expected --cleanup-due to refuse on the held slot, got exit $due_status:
+$due_out" ;;
+esac
+
 cat > "$work/release.sh" <<EOF
 card_log "$TICKET" '{"action":"released","reason":"done"}'
 EOF
@@ -455,6 +538,107 @@ if [[ "$(cleanup_spawns)" == 1 ]]; then
   ok "a second cleanup is not dispatched: the stamp the first one wrote is fresh"
 else
   bad "the cleanup block dispatched a second pass over a fresh stamp:
+$(cat "$argv_log")"
+fi
+
+# --- 5b. The finished cleanup pass still holds the board's only slot --------
+#
+# The stamp is what the cadence turns on, so removing it is `boardctl cleanup`:
+# the operator asking for a pass now. What answers instead is the slot the pass
+# that just ran is still holding, through `cards/cleanup/history.jsonl`, because
+# nothing has swept it. At MAX_CONCURRENT 1 that is a board that dispatches
+# nothing at all -- not one cleanup and not one card -- until
+# HOST_SLOT_STALE_MINUTES expires, which is twelve hours.
+#
+# reconcile.py names that case in the reason line it prints, and the reason line
+# is the only thing the operator sees. So step 8 has to carry the same sentence:
+# a reason nobody can look up is a board that reads as idle.
+rm -f "$home/.foreman/instances/demo/last-cleanup"
+held_out="$(cleanup_due)"; held_status=$?
+if [[ "$held_status" == 1 && "$held_out" == *"cards/cleanup"* ]]; then
+  ok "a finished cleanup pass keeps holding the board's slot, and --cleanup-due says so"
+else
+  bad "expected --cleanup-due to name the unswept cleanup slot, got exit $held_status:
+$held_out"
+fi
+
+if ! reason_out="$(python3 - "$skill" "$held_out" 2>&1 <<'PY'
+import pathlib, re, sys
+
+skill, reason = sys.argv[1], sys.argv[2]
+
+# Everything after the first semicolon is the part about the cleanup slot
+# itself; the clause before it names the board and its count, which SKILL.md
+# must not hardcode. Backticks and line breaks differ between a terminal line
+# and a wrapped markdown paragraph and nothing else may.
+#
+# NO APOSTROPHE AND NO BACKTICK below reaches the here-doc: the whole block runs
+# inside a command substitution, which bash tokenises before the quoted here-doc
+# protects anything.
+tail = reason.split("; ", 1)[1] if "; " in reason else reason
+flat = lambda s: re.sub(r"\s+", " ", s.replace(chr(96), "")).strip()
+
+lines = pathlib.Path(skill).read_text().split("\n")
+start = next(i for i, l in enumerate(lines) if l.startswith("### 8."))
+end = next((i for i in range(start + 1, len(lines)) if lines[i].startswith("### ")),
+           len(lines))
+section = flat("\n".join(lines[start:end]))
+
+if flat(tail) not in section:
+    sys.exit("step 8 does not carry the reason --cleanup-due prints for a board "
+             "whose only slot is a finished cleanup, so an operator reading that "
+             "line has nowhere to look it up.\n"
+             "  reconcile.py says: " + flat(tail) + "\n"
+             "  step 8 says nothing that contains it")
+print("step 8 quotes the reason line verbatim")
+PY
+)"; then
+  bad "$reason_out"
+else
+  ok "step 8 explains the reason --cleanup-due prints for an unswept cleanup ($reason_out)"
+fi
+
+# --- 5c. A failing step 8 must not reach the dispatch ----------------------
+#
+# The sweep step 8 documents is what frees that slot; `card_log` is the marker
+# it writes, and writing it here is what puts the board back in the state the
+# next case is about.
+cat > "$work/release-cleanup.sh" <<'EOF'
+card_log cleanup '{"action":"released","reason":"swept"}'
+EOF
+if ! out="$(run_block "$work/release-cleanup.sh" 2>&1)"; then
+  bad "could not release the finished cleanup's slot:
+$out"
+fi
+
+# brief.py refuses without LABEL_CLEANUP rather than telling an agent to file a
+# card with no label -- and the shell has already truncated the prompt file by
+# then, because `>` opens it before brief.py runs. Unchained, the next command
+# is dispatch.sh, reading a prompt that is now empty. The stamp is already
+# written at that point, so the board is not due again for CLEANUP_EVERY_DAYS
+# days and nothing ran.
+sed 's/^LABEL_CLEANUP=.*/LABEL_CLEANUP=/' \
+  "$home/.foreman/instances/demo/ids.env" > "$work/ids.env"
+cp "$work/ids.env" "$home/.foreman/instances/demo/ids.env"
+
+guard_out="$(run_block_unguarded "$blocks/cleanup.sh" 2>&1)"
+case "$guard_out" in
+  *"ids.env has no LABEL_CLEANUP"*) : ;;
+  *) bad "the cleanup block did not reach brief.py's refusal, so this case proves nothing:
+$guard_out" ;;
+esac
+case "$guard_out" in
+  *"prompt file is empty"*)
+    bad "step 8's block ran dispatch.sh after brief.py failed; chain the commands so a
+failure stops before the dispatch:
+$guard_out" ;;
+  *)
+    ok "step 8's block stops at the failure and never reaches dispatch.sh" ;;
+esac
+if [[ "$(cleanup_spawns)" == 1 ]]; then
+  ok "no cleanup agent is spawned when the prompt was never written"
+else
+  bad "a cleanup agent was spawned from a prompt brief.py refused to write:
 $(cat "$argv_log")"
 fi
 
@@ -552,6 +736,154 @@ else
   else
     bad "SKILL.md prints knobs config.sh never sets:$unset_knobs"
   fi
+fi
+
+# --- 9. Step 3 names every verdict reconcile.py can return, and no other ---
+#
+# The tick does not compute this: reconcile.py does, and step 3 is the dispatch
+# table the tick reads it against. A verdict with no bullet is a tick with no
+# instruction for an answer it will be handed -- it improvises, on a card, with
+# a merge at the end of it. A bullet for a verdict that no longer exists is the
+# same defect pointing the other way.
+#
+# Read out of the function with ast rather than by grepping strings, so a
+# verdict spelled inside a conditional expression still counts.
+if ! verdicts_out="$(python3 - "$skill" "$board_dir/reconcile.py" 2>&1 <<'PY'
+import ast, pathlib, re, sys
+
+skill = pathlib.Path(sys.argv[1]).read_text()
+source = pathlib.Path(sys.argv[2]).read_text()
+
+fn = next(n for n in ast.walk(ast.parse(source))
+          if isinstance(n, ast.FunctionDef) and n.name == "review_verdict")
+
+returned = set()
+for node in ast.walk(fn):
+    values = []
+    if isinstance(node, ast.keyword) and node.arg == "verdict":
+        values.append(node.value)
+    if isinstance(node, ast.Dict):
+        for key, value in zip(node.keys, node.values):
+            if isinstance(key, ast.Constant) and key.value == "verdict":
+                values.append(value)
+    for value in values:
+        for leaf in ast.walk(value):
+            if isinstance(leaf, ast.Constant) and isinstance(leaf.value, str):
+                returned.add(leaf.value)
+
+# Step 3 down to its first subsection. Each verdict is a bullet opening with the
+# name in bold code, and nothing else in that range is written that way.
+bt = chr(96)
+lines = skill.split("\n")
+start = next(i for i, l in enumerate(lines) if l.startswith("### 3."))
+end = next((i for i in range(start + 1, len(lines))
+            if lines[i].startswith("### ") or lines[i].startswith("#### ")),
+           len(lines))
+body = "\n".join(lines[start:end])
+documented = set(re.findall(r"\*\*" + bt + r"([a-z][a-z-]*)" + bt + r"\*\*", body))
+
+problems = []
+for name in sorted(returned - documented):
+    problems.append("reconcile.py answers " + name + " and step 3 has no bullet "
+                    "for it: the tick is handed a verdict with no instruction")
+for name in sorted(documented - returned):
+    problems.append("step 3 documents " + name + ", which review_verdict never "
+                    "returns: the tick waits for an answer nothing sends")
+if problems:
+    sys.exit("\n".join(problems))
+print(str(len(returned)) + " verdicts")
+PY
+)"; then
+  bad "step 3 and reconcile.py disagree about the review verdicts:
+$verdicts_out"
+else
+  ok "step 3 documents exactly the verdicts review_verdict returns ($verdicts_out)"
+fi
+
+# --- 10. The claims about this document nothing else can check -------------
+#
+# Each of these is a sentence the tick acts on. They are checked as
+# instructions -- who does the thing, and under what condition -- and never as
+# a word being present somewhere in the file.
+if ! prose_out="$(python3 - "$skill" 2>&1 <<'PY'
+import pathlib, re, sys
+
+bt = chr(96)
+lines = pathlib.Path(sys.argv[1]).read_text().split("\n")
+problems = []
+
+
+def section(prefix):
+    """One step, as one line -- markdown wraps a sentence wherever it fits."""
+    start = next((i for i, l in enumerate(lines) if l.startswith(prefix)), None)
+    if start is None:
+        return ""
+    end = next((i for i in range(start + 1, len(lines))
+                if lines[i].startswith("### ") or lines[i].startswith("## ")),
+               len(lines))
+    return re.sub(r"\s+", " ", "\n".join(lines[start:end]))
+
+
+def row(key):
+    hits = [l for l in lines if l.startswith("| " + bt + key + bt + " |")]
+    return hits[0] if hits else ""
+
+
+# CLEANUP_EVERY_DAYS is a FLOOR, not a cadence. Step 8 sits at the end of a
+# slice, a slice ends the moment one card moves, and cleanup needs a free board
+# slot -- so a busy board reaches step 8 rarely and qualifies rarer still. A
+# table that reads as a promise is how an operator concludes cleanup is broken.
+every_days = row("CLEANUP_EVERY_DAYS")
+if not every_days:
+    problems.append("the config table has no CLEANUP_EVERY_DAYS row at all")
+elif "earliest" not in every_days or "slot" not in every_days:
+    problems.append(
+        "the CLEANUP_EVERY_DAYS row states a cadence it cannot promise. It is "
+        "the EARLIEST a cleanup may run, and a board with no free slot runs "
+        "none however stale the stamp is:\n  " + every_days)
+
+# The cleanup agent reads other agents, findings and operator-written card text
+# -- a wider intake than the fix path, which has carried the caveat since it
+# first spliced a reviewer into the build prompt. Both sections say it, or the
+# rule is not a rule.
+for prefix, what in (("### 3.", "the fix resume"),
+                     ("### 8.", "the cleanup pass")):
+    if "never an instruction" not in section(prefix):
+        problems.append(
+            "the step covering " + what + " never says that what the agent "
+            "reads is data and never an instruction, though that text was "
+            "written by other agents and by the operator")
+
+# needs-plan is one-directional: only the operator REMOVES it, the cleanup agent
+# may ADD it to the card it just filed, and the tick does neither. The table is
+# what gets skimmed, so the row carries the last clause itself.
+needs_plan = row("needs-plan")
+if not needs_plan:
+    problems.append("the labels table has no needs-plan row at all")
+elif "never the tick" not in needs_plan:
+    problems.append(
+        "the needs-plan row names its writers and stops there. The tick neither "
+        "adds nor removes it, and a reader who skims the table takes the row as "
+        "the whole rule:\n  " + needs_plan)
+
+# The paragraph below that table used to say the board never writes needs-plan,
+# which the cleanup agent has done since step 8 existed.
+for i, line in enumerate(lines):
+    if re.search(r"(?i)board never writ", line):
+        problems.append(
+            "line " + str(i + 1) + " says the board never writes needs-plan, "
+            "which the cleanup agent does whenever its plan is over "
+            "CLEANUP_MAX_PLAN_NODES nodes:\n  " + line.strip())
+
+if problems:
+    sys.exit("\n\n".join(problems))
+print("cadence, injection caveat and the needs-plan rule all stated")
+PY
+)"; then
+  bad "SKILL.md states something the scripts contradict:
+$prose_out"
+else
+  ok "SKILL.md reads correctly on the cadence, the injection caveat and needs-plan ($prose_out)"
 fi
 
 exit "$fail"

@@ -25,7 +25,11 @@ set -uo pipefail
 
 here="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 root="$(dirname -- "$here")"
-skill="$root/skills/board/SKILL.md"
+# The document under test, overridable by argument. Every assertion below is
+# about what SKILL.md SAYS, so the only way to show one of them can fail is to
+# run it over a copy that says the wrong thing. A check nobody has ever watched
+# go red is a check whose wording nobody has tested.
+skill="${1:-$root/skills/board/SKILL.md}"
 
 fail=0
 ok()  { printf 'ok   %s\n' "$1"; }
@@ -77,13 +81,42 @@ if stray:
 # "board-failed: fix unresolved" is the released reason for a fix agent that
 # pushed nothing. reconcile.py computes the verdict behind each; a document that
 # names neither is a tick that writes neither.
-for needle, what in (
-    ("merged-after-fix", "the history entry logged before a fix merges"),
-    ("board-failed: fix unresolved",
-     "the released reason for a finding the fix agent could not resolve"),
+#
+# Both are checked as the INSTRUCTION and not as the string. A sentence saying
+# the board no longer logs merged-after-fix contains the word merged-after-fix,
+# and a bare "is it present" check passes on the prose that deletes the step it
+# is guarding. What has to be there is the card_log line the tick runs, and the
+# destination the released reason sends its card to.
+quote = chr(34)
+for action, what in (
+    ("merged-after-fix", "logged on the card before a fixed diff merges"),
+    ("released", "logged when a finding the fix agent could not resolve retires "
+                 "the card"),
 ):
-    if needle not in text:
-        problems.append("SKILL.md never names " + needle + " -- " + what)
+    marker = quote + "action" + quote + ":" + quote + action + quote
+    entries = [i for i, l in enumerate(lines)
+               if re.search(r"card_log\b.*" + re.escape(marker), l)]
+    if action == "released":
+        entries = [i for i in entries
+                   if "board-failed: fix unresolved" in lines[i]]
+    if not entries:
+        problems.append("SKILL.md tells the tick to run no card_log with "
+                        + action + " -- " + what)
+        continue
+    # The bullet around it has to say where the card goes. merged-after-fix
+    # merges with no second reviewer; the unresolved fix goes to a person.
+    for i in entries:
+        window = "\n".join(lines[max(0, i - 8):i + 9])
+        if action == "merged-after-fix" and "without" not in window:
+            problems.append(
+                "the merged-after-fix entry no longer says the merge happens "
+                "WITHOUT dispatching another reviewer, which is the whole of "
+                "what one round means:\n" + window)
+        if action == "released" and "Needs Human" not in window:
+            problems.append(
+                "the board-failed: fix unresolved exit names no destination; "
+                "it goes to Needs Human and never back round the loop:\n"
+                + window)
 
 if problems:
     sys.exit("\n\n".join(problems))

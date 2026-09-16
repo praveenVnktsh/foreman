@@ -20,9 +20,13 @@ an unrecognised key, a required value that is empty, and a value that would
 desynchronize the wire format below are all die()s, not None.
 
 One exception: `limits.max_followups` is deprecated now that scheduled cleanup
-(the `[cleanup]` table below) replaces follow-ups. It warns on stderr and is
-dropped rather than refused, so a board.toml written before this change keeps
-loading instead of breaking on a key nothing needs anymore.
+(the `[cleanup]` table below) replaces follow-ups. It is dropped rather than
+refused, so a board.toml written before this change keeps loading instead of
+breaking on a key nothing needs anymore. It warns on stderr, but only when
+stderr is a terminal: this loader runs on every dispatch, sweep, evidence.sh
+call and reconcile.py query, and none of those redirect its stderr, so an
+unconditional warning would repeat dozens of times a tick for a board that
+still sets the key -- a warning nobody would read.
 """
 
 from __future__ import annotations
@@ -334,17 +338,34 @@ def load(path: str) -> list[tuple[str, str]]:
             die(f"{path}: {'.'.join(path_)} entries may not contain a NUL byte")
         out.append((key, joiner.join(value)))
 
-    limits = dig_checked(("limits",)) or {}
-    if not isinstance(limits, dict):
+    # `... or {}` here used to run BEFORE the isinstance check below, so a
+    # falsy wrong-typed value (`limits = false`, `0`, `""`, `[]`) turned into
+    # {} first and never reached the check at all -- the exact "wrong-typed
+    # ancestor" case this module's docstring already claims is a die(). Only
+    # genuine absence (None) may default; every other type must still hit the
+    # isinstance check and die.
+    limits = dig_checked(("limits",))
+    if limits is None:
+        limits = {}
+    elif not isinstance(limits, dict):
         die(f"{path}: limits must be a table")
     # Warn and drop rather than refuse -- see DEPRECATED_LIMITS and the module
     # docstring. An existing board.toml that still sets this must keep loading.
     for key in DEPRECATED_LIMITS:
         if key in limits:
-            sys.stderr.write(
-                f"contract: {path}: limits.{key} is deprecated and ignored; "
-                "the scheduled cleanup replaced follow-ups\n"
-            )
+            # A board that still sets this key loads it on every dispatch,
+            # sweep, evidence.sh call and reconcile.py query -- dozens of
+            # times a tick -- and load-pairs.sh does not redirect contract.py's
+            # stderr. A warning that fires that often is one nobody reads, so
+            # it only prints where a human is actually watching: an
+            # interactive terminal. This file carries no verbosity flag of its
+            # own to gate on instead, and a tty check needs no config to keep
+            # working once one exists.
+            if sys.stderr.isatty():
+                sys.stderr.write(
+                    f"contract: {path}: limits.{key} is deprecated and ignored; "
+                    "the scheduled cleanup replaced follow-ups\n"
+                )
     for key, fallback in LIMITS.items():
         value = limits.get(key.lower(), fallback)
         floor = LIMIT_MINIMUMS.get(key, 0)
@@ -355,8 +376,13 @@ def load(path: str) -> list[tuple[str, str]]:
             die(f"{path}: limits.{key.lower()} must be a non-negative integer")
         out.append((key, str(value)))
 
-    cleanup = dig_checked(("cleanup",)) or {}
-    if not isinstance(cleanup, dict):
+    # Same bug, same fix as `limits` above: only None (genuine absence) may
+    # default to {}. A falsy wrong-typed `cleanup` (`false`, `0`, `""`, `[]`)
+    # must still hit the isinstance check and die, not silently load defaults.
+    cleanup = dig_checked(("cleanup",))
+    if cleanup is None:
+        cleanup = {}
+    elif not isinstance(cleanup, dict):
         die(f"{path}: cleanup must be a table")
     for key, toml_key in (
         ("CLEANUP_EVERY_DAYS", "every_days"),
@@ -373,6 +399,18 @@ def load(path: str) -> list[tuple[str, str]]:
     model = cleanup.get("model", CLEANUP["CLEANUP_MODEL"])
     if not isinstance(model, str):
         die(f"{path}: cleanup.model must be a string")
+    # "" is the legitimate "no override" spelling (see above), but a
+    # whitespace-only value like "   " is not empty by that check, so it used
+    # to survive here and reach config.sh's `CLEANUP_MODEL="${CLEANUP_MODEL:-$PLAN_MODEL}"`
+    # as a non-empty string -- `:-` never falls back to PLAN_MODEL, so
+    # dispatch.sh hands "--model \"   \"" to the adapter. codex and opencode
+    # don't refuse a bad model at spawn time (bin/installation.py's
+    # resolve_models says why): the agent dies inside its own log, the card
+    # never moves, and the cleanup stamp is already written, so the board
+    # repeats it silently every every_days. Refuse it here instead, matching
+    # installation.py's wording for the same failure on the four stage models.
+    if model and not model.strip():
+        die(f"{path}: cleanup.model may not be empty; omit the key to use PLAN_MODEL")
     if "\0" in model:
         die(f"{path}: cleanup.model may not contain a NUL byte")
     out.append(("CLEANUP_MODEL", model))

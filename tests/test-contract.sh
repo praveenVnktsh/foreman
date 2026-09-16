@@ -577,9 +577,9 @@ else
     *) printf 'FAIL error did not name every_days: %s\n' "$err"; fail=1 ;; esac
 fi
 
-# [limits] max_followups is deprecated, not refused: it warns on stderr, the
-# contract still loads, and MAX_FOLLOWUPS is gone from the emitted pairs --
-# an existing board.toml written before this change must keep loading.
+# [limits] max_followups is deprecated, not refused: the contract still
+# loads and MAX_FOLLOWUPS is gone from the emitted pairs -- an existing
+# board.toml written before this change must keep loading.
 cat >"$work/maxfollowups.toml" <<'TOML'
 [linear]
 team = "PRA"
@@ -592,13 +592,56 @@ command = "make test"
 [limits]
 max_followups = 3
 TOML
+
+# Finding 3 (this round): the deprecation warning used to fire
+# unconditionally, so a board that still sets the key printed it on every
+# dispatch, sweep, evidence.sh call and reconcile.py query -- dozens of times
+# a tick, none of them redirected by load-pairs.sh. A warning that fires that
+# often is one nobody reads. It is still a warning (the contract below still
+# loads), but now fires only when stderr is a terminal -- this test harness
+# captures stderr through command substitution, which is never a tty, so the
+# warning must be silent here.
 if err="$("$root/bin/contract.py" "$work/maxfollowups.toml" 2>&1 >/dev/null)"; then
-  case "$err" in *max_followups*) printf 'ok   limits.max_followups warns on stderr and does not refuse\n' ;;
-    *) printf 'FAIL stderr did not mention max_followups: %s\n' "$err"; fail=1 ;; esac
+  if [[ -z "$err" ]]; then
+    printf 'ok   limits.max_followups does not warn when stderr is not a terminal\n'
+  else
+    printf 'FAIL limits.max_followups warned even though stderr is not a terminal: %s\n' "$err"; fail=1
+  fi
 else
   printf 'FAIL limits.max_followups must not refuse the contract\n'; fail=1
 fi
 check "MAX_FOLLOWUPS is gone from the emitted pairs" "<missing>" "$(read_key "$work/maxfollowups.toml" MAX_FOLLOWUPS)"
+
+# The warning must still reach the one reader who can see it: an operator
+# running contract.py by hand at an interactive terminal. python3's pty module
+# gives the subprocess a real tty on stderr, so isatty() reports True inside
+# it exactly as it would for a human at a shell -- this is the positive half
+# of the firing rule; the block above is the negative half.
+tty_stderr="$(python3 -c '
+import os, pty, subprocess, sys
+master, slave = pty.openpty()
+proc = subprocess.Popen(sys.argv[1:], stdout=subprocess.DEVNULL, stderr=slave)
+os.close(slave)
+# Read to EOF BEFORE reaping the child, not after: waiting first let the
+# kernel tear the pty down on macOS once the child (the only remaining
+# holder of the slave fd) exited, and the buffered warning was gone by the
+# time this script got around to reading it -- os.read() came back b""
+# even though the child had written and flushed the line.
+chunks = []
+while True:
+    try:
+        chunk = os.read(master, 65536)
+    except OSError:
+        break
+    if not chunk:
+        break
+    chunks.append(chunk)
+os.close(master)
+proc.wait()
+sys.stdout.buffer.write(b"".join(chunks))
+' "$root/bin/contract.py" "$work/maxfollowups.toml")"
+case "$tty_stderr" in *max_followups*) printf 'ok   limits.max_followups still warns when stderr is a terminal\n' ;;
+  *) printf 'FAIL warning did not fire with a tty stderr: %s\n' "$tty_stderr"; fail=1 ;; esac
 
 # Unknown-key rejection under [cleanup] is symmetric with every other table.
 cat >"$work/cleanupunknownkey.toml" <<'TOML'
@@ -619,5 +662,94 @@ else
   case "$err" in *every_dyas*) printf 'ok   unknown key under [cleanup] is refused\n' ;;
     *) printf 'FAIL error did not name every_dyas: %s\n' "$err"; fail=1 ;; esac
 fi
+
+# Finding 1 (this round): `dig_checked(...) or {}` ran the `or {}` BEFORE the
+# isinstance check that follows it, so a FALSY wrong-typed ancestor --
+# `false`, `0`, `""`, `[]` are all falsy in Python -- turned into {} first and
+# never reached the check at all. `risk = "high"` (truthy) was already
+# refused above; `limits = false` and `cleanup = 0` loaded silently with
+# every default instead, which is the identical "wrong-typed ancestor" case
+# this module's docstring already claims is a die(). Only genuine absence
+# (the key missing) may default; every other type must die, naming the table.
+check_falsy_wrongtype() { # table  toml_value  label
+  local table="$1" value="$2" label="$3"
+  local f="$work/falsy_${table}_${label}.toml"
+  # The assignment must come BEFORE any [table] header: TOML attaches a bare
+  # `key = value` line to whichever table was most recently opened, so one
+  # written after [test] would set test.limits, not the top-level ancestor
+  # this case means to test. `risk = "high"` above uses the same placement.
+  cat >"$f" <<TOML
+${table} = ${value}
+[linear]
+team = "PRA"
+project = "foreman"
+[checks]
+required = ["Tests"]
+ci_workflow = "CI"
+[test]
+command = "make test"
+TOML
+  if err="$("$root/bin/contract.py" "$f" 2>&1 >/dev/null)"; then
+    printf 'FAIL %s = %s (falsy, wrong type) must be refused\n' "$table" "$value"; fail=1
+  else
+    case "$err" in *"$table"*) printf 'ok   %s = %s (falsy, wrong type) is refused\n' "$table" "$value" ;;
+      *) printf 'FAIL error did not name %s: %s\n' "$table" "$err"; fail=1 ;; esac
+  fi
+}
+check_falsy_wrongtype limits false false
+check_falsy_wrongtype limits 0 zero
+check_falsy_wrongtype limits '""' emptystr
+check_falsy_wrongtype limits '[]' emptylist
+check_falsy_wrongtype cleanup false false
+check_falsy_wrongtype cleanup 0 zero
+check_falsy_wrongtype cleanup '""' emptystr
+check_falsy_wrongtype cleanup '[]' emptylist
+
+# Finding 2 (this round): cleanup.model was checked for str and for NUL, but
+# not for emptiness, so "   " (whitespace only) is non-empty by that check
+# and used to survive. config.sh's `CLEANUP_MODEL="${CLEANUP_MODEL:-$PLAN_MODEL}"`
+# only falls back to PLAN_MODEL on a truly empty value, so dispatch.sh would
+# hand the adapter `--model "   "`. codex and opencode do not refuse a wrong
+# model at spawn time (see bin/installation.py's resolve_models): the agent
+# dies inside its own log, the card never moves, and the cleanup stamp is
+# already written, so the board would repeat this silently every
+# every_days with nothing in Linear to diagnose. Refuse it here instead,
+# naming the key the way installation.py names a stage model.
+cat >"$work/cleanupmodelwhitespace.toml" <<'TOML'
+[linear]
+team = "PRA"
+project = "foreman"
+[checks]
+required = ["Tests"]
+ci_workflow = "CI"
+[test]
+command = "make test"
+[cleanup]
+model = "   "
+TOML
+if err="$("$root/bin/contract.py" "$work/cleanupmodelwhitespace.toml" 2>&1 >/dev/null)"; then
+  printf 'FAIL cleanup.model = "   " (whitespace only) must be refused\n'; fail=1
+else
+  case "$err" in *cleanup.model*) printf 'ok   whitespace-only cleanup.model is refused, naming the key\n' ;;
+    *) printf 'FAIL error did not name cleanup.model: %s\n' "$err"; fail=1 ;; esac
+fi
+
+# An explicit empty string is the documented "no override" spelling (see
+# CLEANUP_MODEL's default above) and must keep round-tripping as empty, not
+# regress into a refusal alongside the whitespace case above.
+cat >"$work/cleanupmodelempty.toml" <<'TOML'
+[linear]
+team = "PRA"
+project = "foreman"
+[checks]
+required = ["Tests"]
+ci_workflow = "CI"
+[test]
+command = "make test"
+[cleanup]
+model = ""
+TOML
+check "explicit empty cleanup.model still round-trips as no override" \
+  "" "$(read_key "$work/cleanupmodelempty.toml" CLEANUP_MODEL)"
 
 exit "$fail"

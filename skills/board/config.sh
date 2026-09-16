@@ -282,8 +282,17 @@ fi
 # "inherit the caller's model" reading of its own -- it means the plan's model,
 # because a cleanup pass is graphplan's own work in miniature.
 CLEANUP_MODEL="${CLEANUP_MODEL:-$PLAN_MODEL}"
+# These three are deliberately NOT exported, like MAX_CONCURRENT and for the
+# same reason. bin/load-pairs.sh resolves every key as
+# `eval "$key=\"\${$key-\$value}\""`, so THE ENVIRONMENT WINS OVER THE
+# CONTRACT: exporting them makes the first board a shell loads the authority on
+# every board it loads afterwards. A board declaring `every_days = 0` -- the
+# documented off switch -- would still get cleanups, and one declaring
+# `max_plan_nodes = 0` would get its cleanup cards filed with no `needs-plan`
+# and built unattended. Every consumer reads them in the sourcing shell
+# instead: dispatch.sh sources this file, and reconcile.py and brief.py each
+# use a same-shell `bash -c ". config.sh; printf ..."`.
 export REPO KEY_FILE INSTANCE INSTANCE_HOME BOARD_HOME BOARD_NAME_PREFIX BOARD_WORKTREE_PREFIX
-export CLEANUP_EVERY_DAYS CLEANUP_MODEL CLEANUP_MAX_PLAN_NODES
 
 MAX_BUDGET_USD="${MAX_BUDGET_USD:-}"
 
