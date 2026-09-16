@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """Render the prompt a dispatched board agent receives.
 
-    brief.py plan   --ticket MUR-42 --title "…" --body-file ticket.md \
+    brief.py plan   --ticket ABC-42 --title "…" --body-file ticket.md \
                     --footer '<!-- … -->'
-    brief.py build  --ticket MUR-42 --title "…" --body-file ticket.md \
+    brief.py build  --ticket ABC-42 --title "…" --body-file ticket.md \
                     --plan-file plan.md
-    brief.py review --ticket MUR-42 --pr 91 --round 1
-    brief.py fix    --ticket MUR-42 --findings-file reviews/1a.json
-    brief.py ci-fix --ticket MUR-42 --pr 91 --jobs "Backend,Operations"
-    brief.py replan --ticket MUR-42 --comments-file plan-comments/1a.json
+    brief.py review --ticket ABC-42 --pr 91 --round 1
+    brief.py fix    --ticket ABC-42 --findings-file reviews/1a.json
+    brief.py ci-fix --ticket ABC-42 --pr 91 --jobs "Tests,Lint"
+    brief.py replan --ticket ABC-42 --comments-file plan-comments/1a.json
     brief.py cleanup --board widgets --since 2026-09-12T04:00:00Z
 
 Writes the prompt to stdout; pipe it to a file and pass that to dispatch.sh.

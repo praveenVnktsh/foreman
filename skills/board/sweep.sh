@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Reap board worktrees for cards that are finished, and prune dead ones.
 #
-#   sweep.sh MUR-42 MUR-43        # tickets that are terminal; their idle agents
+#   sweep.sh ABC-42 ABC-43        # tickets that are terminal; their idle agents
 #                                 # are stopped, and their trees and sessions go
 #   sweep.sh --orphans            # board-* trees with no live agent
 #

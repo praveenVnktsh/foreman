@@ -6,11 +6,11 @@
 # a dispatched card starts. A spawn that precedes the move gets dispatched twice
 # by the next tick.
 #
-#   dispatch.sh --ticket MUR-42 --role plan   --attempt 1 --prompt-file plan.md
-#   dispatch.sh --ticket MUR-42 --role build  --attempt 1 --prompt-file brief.md
-#   dispatch.sh --ticket MUR-42 --role review --attempt 1 --slot a \
+#   dispatch.sh --ticket ABC-42 --role plan   --attempt 1 --prompt-file plan.md
+#   dispatch.sh --ticket ABC-42 --role build  --attempt 1 --prompt-file brief.md
+#   dispatch.sh --ticket ABC-42 --role review --attempt 1 --slot a \
 #               --ref <pr-head-sha> --prompt-file review.md
-#   dispatch.sh --ticket MUR-42 --role build  --attempt 1 --resume \
+#   dispatch.sh --ticket ABC-42 --role build  --attempt 1 --resume \
 #               --prompt-file findings.md
 #   dispatch.sh --ticket cleanup --role cleanup --attempt <yyyymmddHHMM> \
 #               --prompt-file cleanup.md
