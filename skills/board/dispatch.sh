@@ -12,6 +12,8 @@
 #               --ref <pr-head-sha> --prompt-file review.md
 #   dispatch.sh --ticket MUR-42 --role build  --attempt 1 --resume \
 #               --prompt-file findings.md
+#   dispatch.sh --ticket cleanup --role cleanup --attempt <yyyymmddHHMM> \
+#               --prompt-file cleanup.md
 #
 # Prints the resolved agent id on success.
 set -euo pipefail
@@ -35,8 +37,8 @@ while [[ $# -gt 0 ]]; do
 done
 
 [[ -n "$TICKET" ]] || die "--ticket is required"
-[[ "$ROLE" == "plan" || "$ROLE" == "build" || "$ROLE" == "review" ]] \
-  || die "--role must be plan, build or review"
+[[ "$ROLE" == "plan" || "$ROLE" == "build" || "$ROLE" == "review" || "$ROLE" == "cleanup" ]] \
+  || die "--role must be plan, build, review or cleanup"
 [[ -n "$ATTEMPT" ]] || die "--attempt is required"
 [[ -n "$PROMPT_FILE" && -r "$PROMPT_FILE" ]] || die "--prompt-file must be readable"
 
@@ -158,8 +160,8 @@ fi
 # PLAN_MODEL in config.sh for why the plan gets the strongest model and the
 # build agents that execute it do not.
 #
-# A table rather than a chain: there are three roles now, each naming one model
-# and one worktree shape, and a fourth would be one more row. `build` is the
+# A table rather than a chain: there are four roles now, each naming one model
+# and one worktree shape, and a fifth would be one more row. `build` is the
 # only role that writes to the card's own branch, so it is the only one cut
 # with `-B <branch>`. A plan agent posts its graph to the Linear card as a
 # comment and pushes nothing -- a branch on the card would be both unnecessary
@@ -168,7 +170,10 @@ fi
 # name the same way review composes its own from ticket, role and attempt so
 # the two throwaway worktrees can never collide with each other or with the
 # card's build worktree. A reviewer never writes to the branch either, so it
-# gets a throwaway worktree detached at the head it is reading.
+# gets a throwaway worktree detached at the head it is reading. A cleanup agent
+# is a plan agent in every way that matters here -- it reads origin/main and
+# files a card, and pushes nothing -- so it gets the identical throwaway shape,
+# named from its own ticket ("cleanup") rather than a card's.
 case "$ROLE" in
   plan)
     WORKTREE="$(worktree_path "${TICKET}-${ROLE}-${ATTEMPT}${SLOT}")"
@@ -181,6 +186,10 @@ case "$ROLE" in
   review)
     WORKTREE="$(worktree_path "${TICKET}-${ROLE}-${ATTEMPT}${SLOT}")"
     MODEL="$REVIEW_MODEL"
+    ;;
+  cleanup)
+    WORKTREE="$(worktree_path "${TICKET}-${ROLE}-${ATTEMPT}${SLOT}")"
+    MODEL="$CLEANUP_MODEL"
     ;;
 esac
 
@@ -252,12 +261,14 @@ export -f branch_name
   git -C "$REPO" worktree prune
   if [[ "$ROLE" == "review" ]]; then
     git -C "$REPO" worktree add --quiet --detach "$WORKTREE" "$REF"
-  elif [[ "$ROLE" == "plan" ]]; then
+  elif [[ "$ROLE" == "plan" || "$ROLE" == "cleanup" ]]; then
     # A plan always reads origin/main -- there is no branch to detach at yet,
     # since the plan agent is the one that has not run. Detached, like review,
     # because this worktree is thrown away: the plan posts its graph to the
     # Linear card as a comment and never pushes, so a branch cut here would
-    # sit on the card for a later build dispatch to inherit or reset.
+    # sit on the card for a later build dispatch to inherit or reset. A
+    # cleanup agent reads main and files a card the same way a plan agent
+    # does, and pushes nothing either, so it needs no branch of its own.
     git -C "$REPO" worktree add --quiet --detach "$WORKTREE" origin/main
   else
     git -C "$REPO" worktree add --quiet -B "$(branch_name "$TICKET")" "$WORKTREE" origin/main
@@ -315,6 +326,10 @@ SESSION="$("$HARNESS_SH" spawn --name "$NAME" --cwd "$WORKTREE" --model "$MODEL"
   || die "spawned $NAME but the adapter never reported a session id"
 
 mkdir -p "$(card_dir "$TICKET")"
-card_log "$TICKET" "$(printf '{"action":"spawn","name":"%s","session":"%s","worktree":"%s","role":"%s","attempt":"%s"}' \
-  "$NAME" "$SESSION" "$WORKTREE" "$ROLE" "${ATTEMPT}${SLOT}")"
+# "ref" carries the sha a reviewer read (empty for a role that has none, plan
+# and cleanup among them). reconcile.py's review_verdict reads "the fix was
+# pushed" as the pull request head having moved past the sha the reviewer
+# read, and until this the spawn record kept no memory of what that was.
+card_log "$TICKET" "$(printf '{"action":"spawn","name":"%s","session":"%s","worktree":"%s","role":"%s","attempt":"%s","ref":"%s"}' \
+  "$NAME" "$SESSION" "$WORKTREE" "$ROLE" "${ATTEMPT}${SLOT}" "$REF")"
 printf '%s\n' "$SESSION"

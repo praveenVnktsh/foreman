@@ -7,6 +7,7 @@
 #     boardctl status <name>
 #     boardctl halt <name>
 #     boardctl resume <name>
+#     boardctl cleanup <name>
 #     boardctl migrate            boards.toml, then this home under <root>/claude
 #
 # A board is ONE declared fact: the local path of the repository it builds.
@@ -103,6 +104,7 @@ usage:
   boardctl status <name>
   boardctl halt <name>
   boardctl resume <name>
+  boardctl cleanup <name>
   boardctl migrate            boards.toml, then this home under <root>/claude
 USAGE
   exit 2
@@ -426,6 +428,20 @@ cmd_resume() {
   printf 'boardctl: board %s resumed\n' "$name"
 }
 
+# cmd_cleanup <name> -- deletes instances/<name>/last-cleanup, so the next
+# slice finds the board due. skills/board/reconcile.py writes and reads this
+# same literal path (see its own comment); a stamp file two files spell
+# differently is a cleanup that never comes due, or one that never stops,
+# exactly the failure HALT's shared path already avoids.
+cmd_cleanup() {
+  [[ $# -eq 1 ]] || usage
+  local name="$1"
+  board_repo "$name" >/dev/null
+  local inst; inst="$(instance_home "$name")"
+  rm -f "$inst/last-cleanup"
+  printf 'boardctl: cleanup for %s is due on its next slice\n' "$name"
+}
+
 # migrate_boards_toml -- migrate's first step: boards.toml from the per-board
 # instance.env files that predate it.
 migrate_boards_toml() {
@@ -692,6 +708,7 @@ case "$cmd" in
   status) cmd_status "$@" ;;
   halt) cmd_halt "$@" ;;
   resume) cmd_resume "$@" ;;
+  cleanup) cmd_cleanup "$@" ;;
   migrate) cmd_migrate "$@" ;;
   *) usage ;;
 esac

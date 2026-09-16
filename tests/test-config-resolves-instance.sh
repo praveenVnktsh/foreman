@@ -118,6 +118,105 @@ check "an unset HOST_SLOT_STALE_MINUTES still falls back to 720" \
 
 check "board name is exported"           "demo"        "$(ask INSTANCE)"
 
+# An absent [cleanup] table means "same schedule and model as the plan"
+# -- contract.py emits CLEANUP_MODEL="" for it, and config.sh's fallback below
+# reads that empty as "inherit PLAN_MODEL", the same reading fable/fable/opus/opus
+# gives the other three stage models above.
+check "no [cleanup] table gives the plan's every-days default" "3" "$(ask CLEANUP_EVERY_DAYS)"
+check "no [cleanup] table gives the plan's model" "$(ask PLAN_MODEL)" "$(ask CLEANUP_MODEL)"
+
+cleanuptarget="$work/cleanuptarget"; mkdir -p "$cleanuptarget"; git -C "$cleanuptarget" init -q -b main
+cat >"$cleanuptarget/board.toml" <<'TOML'
+[linear]
+team = "PRA"
+project = "example"
+[checks]
+required = ["Tests"]
+ci_workflow = "CI"
+[test]
+command = "make test"
+[cleanup]
+model = "opus"
+TOML
+cleanuphome="$work/cleanuphome"; mkdir -p "$cleanuphome"
+cat >"$cleanuphome/boards.toml" <<TOML
+[boards.demo]
+repo = "$cleanuptarget"
+TOML
+check "a declared [cleanup] model overrides the plan's" "opus" \
+  "$(env FOREMAN_HOME="$cleanuphome" FOREMAN_INSTANCE=demo bash -c \
+       ". '$root/skills/board/config.sh' >/dev/null; printf '%s' \"\$CLEANUP_MODEL\"")"
+
+# The three cleanup keys must NOT be exported. Every loader here is
+# environment-wins, so an exported CLEANUP_EVERY_DAYS, CLEANUP_MODEL or
+# CLEANUP_MAX_PLAN_NODES makes the first board a shell loaded the authority on
+# every board it loads afterwards: a child shell asking about a board that
+# declares `every_days = 0` -- the documented off switch -- gets the first
+# board's cadence and runs cleanups anyway, and a board declaring
+# `max_plan_nodes = 0` gets its cleanup cards filed with no `needs-plan` and
+# built unattended.
+#
+# Asked of a CHILD shell, because that is how the leak travels and why nothing
+# else here caught it: every check above starts from a shell that has loaded no
+# board at all. REPO is scrubbed the way bin/resolve-ids.py scrubs it before it
+# sources this file -- a cross-board caller knows to drop REPO, and cannot know
+# to drop three keys that look like plain contract values.
+cadencehome="$work/cadencehome"; mkdir -p "$cadencehome"
+for board in first second; do
+  mkdir -p "$work/cadence-$board"; git -C "$work/cadence-$board" init -q -b main
+done
+cat >"$work/cadence-first/board.toml" <<'TOML'
+[linear]
+team = "PRA"
+project = "example"
+[checks]
+required = ["Tests"]
+ci_workflow = "CI"
+[test]
+command = "make test"
+[cleanup]
+every_days = 9
+model = "haiku"
+max_plan_nodes = 5
+TOML
+cat >"$work/cadence-second/board.toml" <<'TOML'
+[linear]
+team = "PRA"
+project = "example"
+[checks]
+required = ["Tests"]
+ci_workflow = "CI"
+[test]
+command = "make test"
+[cleanup]
+every_days = 0
+model = "sonnet"
+max_plan_nodes = 0
+TOML
+cat >"$cadencehome/boards.toml" <<TOML
+[boards.first]
+repo = "$work/cadence-first"
+
+[boards.second]
+repo = "$work/cadence-second"
+TOML
+# Two files rather than nested `bash -c` strings: the quoting is what would be
+# read wrong first.
+cat >"$work/ask-second.sh" <<'SH'
+. "$ROOT/skills/board/config.sh" >/dev/null
+printf '%s %s %s' "$CLEANUP_EVERY_DAYS" "$CLEANUP_MODEL" "$CLEANUP_MAX_PLAN_NODES"
+SH
+cat >"$work/cadence-probe.sh" <<'SH'
+. "$ROOT/skills/board/config.sh" >/dev/null
+export FOREMAN_INSTANCE=second
+unset REPO
+bash "$WORK/ask-second.sh"
+SH
+check "a child shell gets the second board's cleanup values, not the first's" \
+  "0 sonnet 0" \
+  "$(env FOREMAN_HOME="$cadencehome" FOREMAN_INSTANCE=first \
+       ROOT="$root" WORK="$work" bash "$work/cadence-probe.sh")"
+
 # The credential.
 #
 # One key per Linear WORKSPACE, in the machine's foreman root, replacing the

@@ -276,6 +276,22 @@ fi
 if ! _foreman_load_pairs "$REPO/board.toml" "$_foreman_install_root/bin/contract.py" "$REPO/board.toml"; then
   if [[ $- == *i* ]]; then return 1; else exit 1; fi
 fi
+# contract.py emits "" for an absent cleanup.model: it deliberately depends on
+# nothing and cannot see this installation's models, which is bin/installation.py's
+# job. Unlike the four stage models above, an empty cleanup model has no
+# "inherit the caller's model" reading of its own -- it means the plan's model,
+# because a cleanup pass is graphplan's own work in miniature.
+CLEANUP_MODEL="${CLEANUP_MODEL:-$PLAN_MODEL}"
+# These three are deliberately NOT exported, like MAX_CONCURRENT and for the
+# same reason. bin/load-pairs.sh resolves every key as
+# `eval "$key=\"\${$key-\$value}\""`, so THE ENVIRONMENT WINS OVER THE
+# CONTRACT: exporting them makes the first board a shell loads the authority on
+# every board it loads afterwards. A board declaring `every_days = 0` -- the
+# documented off switch -- would still get cleanups, and one declaring
+# `max_plan_nodes = 0` would get its cleanup cards filed with no `needs-plan`
+# and built unattended. Every consumer reads them in the sourcing shell
+# instead: dispatch.sh sources this file, and reconcile.py and brief.py each
+# use a same-shell `bash -c ". config.sh; printf ..."`.
 export REPO KEY_FILE INSTANCE INSTANCE_HOME BOARD_HOME BOARD_NAME_PREFIX BOARD_WORKTREE_PREFIX
 
 MAX_BUDGET_USD="${MAX_BUDGET_USD:-}"

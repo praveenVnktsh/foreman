@@ -90,8 +90,15 @@ BOARD_NAME_PREFIX = reconcile.BOARD_NAME_PREFIX
 # it here costs no error at all: the agent runs, finishes, and this Monitor
 # stays silent, so the board discovers the work on its next ordinary poll
 # instead of waking immediately.
+#
+# The literal `cleanup` ticket segment is the same kind of agreement. A
+# scheduled cleanup run has no card to name until it files one, so its agent
+# is foreman/[<installation>/]<instance>/cleanup/cleanup-<attempt> -- the
+# ticket alternative and the role both have to spell that literal, and
+# dispatch.sh has to keep spelling it the same way, or a live cleanup agent
+# finishes silently and this Monitor never wakes the board for it.
 DISPATCHED = re.compile(
-    r"^foreman/(?:([^/]+)/)?([^/]+)/([A-Z0-9]+-\d+)/(plan|build|review)-(\w+)$"
+    r"^foreman/(?:([^/]+)/)?([^/]+)/([A-Z0-9]+-\d+|cleanup)/(plan|build|review|cleanup)-(\w+)$"
 )
 
 # Phases that mean "this agent is no longer working". `done` is a completed turn;

@@ -31,7 +31,7 @@ import subprocess
 import sys
 import time
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 def _load_config() -> dict[str, str]:
     """Read settings from config.sh — the single source of truth.
@@ -47,6 +47,7 @@ def _load_config() -> dict[str, str]:
         "INSTANCE",
         "FOREMAN_HOME", "HOST_SLOT_STALE_MINUTES", "INSTALLATION", "HARNESS_SH",
         "BOARD_NAME_PREFIX", "BOARD_WORKTREE_PREFIX",
+        "CLEANUP_EVERY_DAYS", "MAX_CONCURRENT", "REVIEWERS_PER_ROUND",
     )
     script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.sh")
     printf = 'printf "%s\\0" ' + " ".join(f'"${k}"' for k in keys)
@@ -115,6 +116,38 @@ HARNESS_SH = _CFG["HARNESS_SH"]
 HOST_SLOT_STALE_MINUTES = (
     float(_CFG["HOST_SLOT_STALE_MINUTES"]) if _CFG["HOST_SLOT_STALE_MINUTES"] else None
 )
+
+
+def _int_setting(key: str) -> int:
+    """One contract integer, refused rather than defaulted when it will not parse.
+
+    `bin/contract.py` already refuses a limit that is not an integer, so a
+    value that arrives here unparseable can only be an environment override --
+    config.sh reads every contract key with `-`, so `MAX_CONCURRENT=lots` in
+    the environment wins over a board.toml that said 2. Defaulting there would
+    weigh a ceiling nobody declared, which is the failure the CI_WORKFLOW guard
+    above refuses for an emptied required value.
+    """
+    raw = _CFG[key]
+    try:
+        return int(raw)
+    except ValueError:
+        raise SystemExit(
+            f"reconcile: {key} is {raw!r}, which is not an integer; "
+            f"bin/contract.py refuses that, so this is an environment override"
+        ) from None
+
+
+# How many days apart a board's scheduled cleanups run, 0 meaning off.
+CLEANUP_EVERY_DAYS = _int_setting("CLEANUP_EVERY_DAYS")
+# This BOARD's own ceiling on cards in flight, from board.toml's `[limits]` --
+# not HOST_MAX_CONCURRENT, which bounds the whole machine. `cleanup_verdict()`
+# weighs both, because a cleanup agent occupies a slot like any other agent.
+MAX_CONCURRENT = _int_setting("MAX_CONCURRENT")
+# How many reviewers one round dispatches. `review_verdict()` reads it to tell
+# a round that is fully dispatched from one the tick was interrupted part-way
+# through; a round short of its reviewers has not been reviewed yet.
+REVIEWERS_PER_ROUND = _int_setting("REVIEWERS_PER_ROUND")
 
 # An unreachable GitHub must not stall the whole tick.
 GH_TIMEOUT = 30
@@ -1349,10 +1382,54 @@ def host_slots(installations: list[tuple[str, str]],
 
 
 SERVED_STAMP = "last-served"
+# The scheduled cleanup's stamp, and the SAME literal `bin/boardctl cleanup`
+# removes. An operator who clears the stamp expects the next slice to run a
+# cleanup, so a second spelling of the name here would leave them deleting a
+# file nothing reads and waiting three days for the pass they just asked for.
+CLEANUP_STAMP = "last-cleanup"
 
 
-def _served_path(foreman_home: str, board: str) -> str:
-    return os.path.join(foreman_home, "instances", board, SERVED_STAMP)
+def _stamp_path(foreman_home: str, board: str, name: str) -> str:
+    return os.path.join(foreman_home, "instances", board, name)
+
+
+def write_stamp(foreman_home: str, board: str, name: str) -> None:
+    """Stamp `instances/<board>/<name>` with now. Writes, returns nothing.
+
+    Written through a temporary file in the same directory and `os.replace`,
+    so a reader never sees half a timestamp. A torn stamp reads as no stamp at
+    all, which is recoverable for both callers -- one unrotated pass for
+    `last-served`, one early cleanup for `last-cleanup` -- but the whole file
+    is 21 bytes and the atomic write costs two lines.
+
+    The pid is in the temporary name because two boards' slices can run at
+    once under one machine root, and a shared temporary path is a reader's
+    torn stamp with extra steps.
+    """
+    directory = os.path.join(foreman_home, "instances", board)
+    os.makedirs(directory, exist_ok=True)
+    stamp = datetime.now(timezone.utc).strftime(CARD_LOG_STAMP)
+    tmp = os.path.join(directory, f".{name}.{os.getpid()}")
+    with open(tmp, "w") as fh:
+        fh.write(stamp + "\n")
+    os.replace(tmp, _stamp_path(foreman_home, board, name))
+
+
+def read_stamp(foreman_home: str, board: str, name: str) -> datetime | None:
+    """The `instances/<board>/<name>` stamp, or None if there is none to read.
+
+    None covers every way the file can fail to answer: absent, unreadable, or
+    holding something that is not a `CARD_LOG_STAMP` timestamp. Both callers
+    read None as "never", and never as the direction that costs a turn rather
+    than skips one -- a board sorts first for one pass, or a cleanup runs one
+    slice early.
+    """
+    try:
+        with open(_stamp_path(foreman_home, board, name)) as fh:
+            text = fh.readline().strip()
+    except OSError:
+        return None
+    return _parse_stamp(text)
 
 
 def mark_board_served(foreman_home: str, board: str) -> None:
@@ -1375,28 +1452,16 @@ def mark_board_served(foreman_home: str, board: str) -> None:
     the sidecar can be deleted and the next tick must still reconstruct every
     card's state.
 
-    Written through a temporary file in the same directory and `os.replace`,
-    so a reader never sees half a timestamp. A torn stamp would read as never
-    served, which is recoverable, but the whole file is 21 bytes and the
-    atomic write costs two lines.
+    `write_stamp()` does the writing, and `last-cleanup` is written the same
+    way. One stamp file is one mechanism, so an atomic write fixed for one of
+    them is fixed for both.
     """
-    directory = os.path.join(foreman_home, "instances", board)
-    os.makedirs(directory, exist_ok=True)
-    stamp = datetime.now(timezone.utc).strftime(CARD_LOG_STAMP)
-    tmp = os.path.join(directory, f".{SERVED_STAMP}.{os.getpid()}")
-    with open(tmp, "w") as fh:
-        fh.write(stamp + "\n")
-    os.replace(tmp, _served_path(foreman_home, board))
+    write_stamp(foreman_home, board, SERVED_STAMP)
 
 
 def _served_stamp(foreman_home: str, board: str) -> datetime | None:
     """The `last-served` stamp for `board`, or None if it has none to read."""
-    try:
-        with open(_served_path(foreman_home, board)) as fh:
-            text = fh.readline().strip()
-    except OSError:
-        return None
-    return _parse_stamp(text)
+    return read_stamp(foreman_home, board, SERVED_STAMP)
 
 
 def board_last_served(foreman_home: str, board: str) -> datetime | None:
@@ -1454,6 +1519,87 @@ def board_is_halted(foreman_home: str, board: str) -> bool:
     access `host_slots()` already makes to every board's `cards/`.
     """
     return os.path.exists(os.path.join(foreman_home, "instances", board, "HALT"))
+
+
+# A cleanup agent is not a card, so it is dispatched under the ticket
+# `cleanup` -- `dispatch.sh --ticket cleanup --role cleanup` names it
+# `<BOARD_NAME_PREFIX>/cleanup/cleanup-<attempt>`. That is why the liveness
+# check below can be `agents_for()` and not a second name rule.
+CLEANUP_TICKET = "cleanup"
+
+
+def cleanup_verdict(foreman_home: str, board: str, every_days: int,
+                    agents: list[dict], host_max: int) -> str:
+    """"" if `board` is due a scheduled cleanup, else the first reason it is not.
+
+    WHEN THE TICK ASKS. At the END of a board's slice, after its cards have
+    been handled. A cleanup pass takes a slot, and a slot spent on cleanup is
+    a slot a card cannot have -- so asking first would let a board's own
+    quality work displace the work it exists to do. Asking last means cleanup
+    runs on capacity the cards did not need.
+
+    WHEN THE STAMP IS WRITTEN. BEFORE the dispatch, never after. An agent that
+    dies in its first minute, or that reads everything and honestly files
+    nothing, writes no stamp of its own -- so a stamp written on success would
+    leave the board due again on the very next tick, and a cleanup pass reads
+    the whole codebase on the strongest model. Stamping first costs at most
+    one skipped cycle; stamping last costs a cleanup every tick, forever.
+
+    THE ORDER OF THE REASONS is the order of what they cost to establish, and
+    the FIRST one that holds is the answer. `every_days` is a parsed integer,
+    the stamp is one small file, the agent registry was already read by the
+    caller, and the two slot counts walk every board on the machine.
+
+    `agents` is `load_agents()`'s list, and the caller owes it the same None
+    check every other reader here does: an unreadable registry reported as an
+    empty list is a cleanup dispatched on top of a live one.
+
+    `board` NAMES THE STAMP, and everything else here -- `CLEANUP_EVERY_DAYS`,
+    `MAX_CONCURRENT`, `INSTALLATION` and the agent-name prefix `agents_for()`
+    matches on -- is the contract config.sh resolved for $FOREMAN_INSTANCE. The
+    two must be the same board, so `main()` refuses a call where they are not.
+    """
+    if every_days <= 0:
+        return f"cleanup is off (every_days = {every_days})"
+    stamp = read_stamp(foreman_home, board, CLEANUP_STAMP)
+    if stamp is not None:
+        next_due = stamp + timedelta(days=every_days)
+        if datetime.now(timezone.utc) < next_due:
+            return (f"last cleanup {stamp.strftime(CARD_LOG_STAMP)}, "
+                    f"next due {next_due.strftime(CARD_LOG_STAMP)}")
+    # `alive` already excludes a stopped row; `phase` is what separates an
+    # agent still working from one that finished its turn and idles at `done`
+    # with its pid intact. Both of those are a cleanup pass in progress -- a
+    # turn-complete agent's card may still be landing -- and only a terminal
+    # one is over.
+    live = [a for a in agents_for(agents, CLEANUP_TICKET)
+            if a["alive"] and a["phase"] != "terminal"]
+    if live:
+        return f"{live[-1]['name']} is {live[-1]['phase']}"
+    key = slot_key(INSTALLATION, board)
+    installations = siblings()
+    # The TICKETS, not just the count. A cleanup agent is dispatched under the
+    # ticket `cleanup`, so a finished pass keeps holding a slot through
+    # `cards/cleanup/history.jsonl` until `sweep.sh cleanup` logs `released`
+    # or HOST_SLOT_STALE_MINUTES expires. That read identically to a slot held
+    # by real card work, so a board stalled on its own last cleanup could not
+    # be diagnosed from the reason line -- which is the only line the operator
+    # sees. The liveness check above has already answered "no cleanup agent is
+    # running", so a `cleanup` slot reaching here is always a finished pass.
+    holding = (host_slots(installations).get("tickets") or {}).get(key) or []
+    held = len(holding)
+    if held >= MAX_CONCURRENT:
+        reason = (f"{board} holds {held} of its {MAX_CONCURRENT} card "
+                  f"{'slot' if MAX_CONCURRENT == 1 else 'slots'}")
+        if CLEANUP_TICKET in holding:
+            reason += (f"; cards/{CLEANUP_TICKET} is one of them -- a finished "
+                       f"cleanup pass nothing has released, freed by "
+                       f"`sweep.sh {CLEANUP_TICKET}`")
+        return reason
+    # The machine's ceiling last, and asked through the same function every
+    # dispatch is weighed by: a cleanup agent eats the same RAM and disk as a
+    # build, so it owes the other boards on this machine the same floors.
+    return dispatch_verdict(installations, key, host_max)
 
 
 _BEFORE_ANY_STAMP = datetime.min.replace(tzinfo=timezone.utc)
@@ -1696,6 +1842,250 @@ def death_report(path: str | None) -> dict | None:
     }
 
 
+BLOCKING = "blocking"
+# `<round><slot>`, as dispatch.sh composes `--attempt <r> --slot <s>` and as
+# each reviewer names its file. The leading digits are the round; whatever
+# follows is the slot.
+_ATTEMPT = re.compile(r"^(\d+)(.*)$")
+
+
+def review_findings(path: str) -> list[dict] | None:
+    """One review file's findings, or None because it could not be READ.
+
+    The same rule `waitfor.reviews_state` waits on: a review has arrived only
+    when the file parses AND is an object holding a `findings` list. A
+    half-written file is not a review that found nothing, and reading one as
+    an empty findings list merges a diff nobody finished reading.
+
+    A findings entry that is not an object is dropped rather than raising --
+    every reader below reaches straight for `.get`, and this is the parse
+    boundary.
+    """
+    try:
+        with open(path) as fh:
+            doc = json.load(fh)
+    except (OSError, json.JSONDecodeError):
+        return None
+    if not isinstance(doc, dict) or not isinstance(doc.get("findings"), list):
+        return None
+    return [f for f in doc["findings"] if isinstance(f, dict)]
+
+
+def review_verdict(ticket: str, entries: list[dict], pr: dict | None,
+                   agents: list[dict]) -> dict:
+    """Where this card stands in review, as one named verdict.
+
+    WHAT THIS EXISTS TO STOP. The tick used to read "round 1 blocked, the fix
+    is pushed" as "dispatch round 2", because the only thing it could see was
+    a round whose findings blocked. Review now runs ONCE: a blocking finding
+    buys exactly one fix, and that fix merges on its CHECKS rather than on a
+    second reviewer. `MAX_REVIEW_ROUNDS` stays in the contract as a ceiling
+    and `LIMIT_MINIMUMS` still floors it at 1, so review cannot be disarmed --
+    but one round is the design, and nothing here ever answers "review this
+    again" once a fix has been pushed.
+
+    The verdicts, and what each one licenses:
+
+      unreviewed       no review agent was ever dispatched. Dispatch one.
+      awaiting-review  the round is dispatched and its files are not all
+                       readable yet. NOT "found nothing": see review_findings.
+      head-moved       no blocking finding, but the head has moved past the sha
+                       the round read, so nobody has reviewed what would merge.
+                       Dispatch `next_round`, which MAX_REVIEW_ROUNDS bounds.
+      needs-fix        a blocking finding, and no build resume after it.
+                       Resume the build with the findings.
+      fixing           resumed, and the fix is not pushed yet -- the head is
+                       still the sha the reviewer read, and the build agent is
+                       running. Wait.
+      ref-unknown      resumed, and whether the fix was pushed cannot be
+                       judged: the round recorded no ref, or the head could not
+                       be read. Wait. Never a person's card -- see below.
+      fix-unresolved   resumed, the round's ref IS recorded, the head still
+                       equals it, and the build agent is no longer running.
+                       `Needs Human`: the fix agent stopped without pushing
+                       anything.
+      awaiting-checks  the fix is pushed and its checks have not concluded.
+      checks-failing   the fix is pushed and a required check failed.
+      mergeable        no blocking finding at all, or the fix is pushed and
+                       green -- the second case carries `merged_after_fix`,
+                       which SKILL.md logs before it merges.
+
+    `ref` is what makes "the fix was pushed" observable: `dispatch.sh` records
+    the sha each reviewer was dispatched against, and a head that has moved
+    past it is a commit that landed after the review. The round's LAST ref is
+    the one that counts: a reviewer that died is re-dispatched, and by then the
+    head may have moved, so one round carries several shas and the earliest of
+    them is one the findings predate.
+
+    A ROUND WITH NO REF, OR A HEAD NOBODY COULD READ, IS `ref-unknown`. Both
+    used to read as `fix-unresolved`, which the tick turns into `Needs Human`
+    with `board-failed` -- so a fix that was pushed and green was retired
+    because no history written before this carried a `ref` at all, and one
+    transient `gh pr list` failure (`pr.lookup_failed`, which has no
+    headRefOid) retired another. This is the rule the build path already
+    states for `pr.lookup_failed`: "I could not read it" and "it never moved"
+    are not the same answer. So `fix-unresolved` requires a RECORDED ref that
+    the head provably still equals, and everything else waits.
+
+    `ticket` is a parameter because nothing else here names the card: the
+    reviews live at `$BOARD_HOME/cards/<ticket>/reviews/<round><slot>.json`.
+    """
+    head = (pr or {}).get("headRefOid") or ""
+    rounds: dict[int, list[tuple[int, str, str]]] = {}
+    for index, entry in enumerate(entries):
+        event = entry.get("event") or {}
+        if event.get("action") != "spawn" or event.get("role") != "review":
+            continue
+        match = _ATTEMPT.match(str(event.get("attempt") or ""))
+        if match:
+            rounds.setdefault(int(match.group(1)), []).append(
+                (index, match.group(2), str(event.get("ref") or ""))
+            )
+    state = {"verdict": "unreviewed", "round": 0, "blocking": 0,
+             "ref": None, "head": head or None}
+    if not rounds:
+        state["reason"] = "no review agent has been dispatched for this card"
+        return state
+
+    # The highest round, not the last line: a spawn logged out of order still
+    # belongs to the round its attempt names.
+    rnd = max(rounds)
+    spawned = rounds[rnd]
+    # The LAST ref the round recorded, in file order. Taking the first one made
+    # "the fix was pushed" true at a sha that landed BEFORE the findings were
+    # written: a reviewer that died and was re-dispatched after the build pushed
+    # carries a newer sha on its second spawn line, and against the first one a
+    # fix agent that pushed nothing reached `mergeable`.
+    ref = next((r for _, _, r in reversed(spawned) if r), "")
+    state.update(round=rnd, ref=ref or None)
+
+    # One reviewer SLOT is one review file, however many spawn lines name it. A
+    # re-dispatched slot appears here twice, and reading `reviews/<round><slot>`
+    # once per spawn line counted its single blocking finding twice -- and told
+    # the reviewer count below that a round short of its reviewers was fully
+    # dispatched.
+    slots: list[str] = []
+    for _, slot, _ in spawned:
+        if slot not in slots:
+            slots.append(slot)
+
+    reviews = os.path.join(BOARD_HOME, "cards", ticket, "reviews")
+    unread, blocking = [], 0
+    for slot in slots:
+        findings = review_findings(os.path.join(reviews, f"{rnd}{slot}.json"))
+        if findings is None:
+            unread.append(f"{rnd}{slot}")
+            continue
+        blocking += sum(1 for f in findings if f.get("severity") == BLOCKING)
+    state["blocking"] = blocking
+    if unread:
+        state.update(verdict="awaiting-review",
+                     reason=f"review {', '.join(unread)} has not been written yet")
+        return state
+    # A round the tick was interrupted part-way through dispatching has been
+    # read in full and still not reviewed in full. Merging on it spends one
+    # reviewer where the operator asked for REVIEWERS_PER_ROUND.
+    if len(slots) < REVIEWERS_PER_ROUND:
+        state.update(
+            verdict="awaiting-review",
+            reason=f"round {rnd} dispatched {len(slots)} of "
+                   f"{REVIEWERS_PER_ROUND} reviewers",
+        )
+        return state
+
+    # Did a commit land after this round was dispatched? Only a RECORDED ref
+    # and a READABLE head can answer that. Either one missing is "unknown", and
+    # unknown is never "no" -- both paths below turn on this.
+    pushed = bool(head and ref and head != ref)
+
+    if not blocking:
+        # A clean round licensed a merge on its round number alone, so a head
+        # the reviewer never read could merge: round 1 passes at sha A, a
+        # required check fails, the build is resumed and pushes B, and B merges
+        # unreviewed. Ask for a fresh round instead. This is what keeps
+        # MAX_REVIEW_ROUNDS meaningful -- it now bounds the re-reviews a moving
+        # head causes, and a card that reaches it with the head still moving is
+        # the existing `Needs Human` exit.
+        if pushed:
+            state.update(
+                verdict="head-moved", next_round=rnd + 1,
+                reason=f"round {rnd} filed no blocking finding at {ref[:12]}, "
+                       f"but the head is now {head[:12]}, which no reviewer has "
+                       f"read; round {rnd + 1} has to read it",
+            )
+            return state
+        state.update(verdict="mergeable",
+                     reason=f"round {rnd} filed no blocking finding")
+        return state
+
+    # A build resumed after the round's last reviewer spawned is the fix. The
+    # generic resume line `dispatch.sh` writes carries no role -- only the
+    # agent's name, which ends `/build-<attempt>` -- so both spellings count,
+    # and position in this append-only file orders them rather than the `at`
+    # stamps, which are whole seconds and tie.
+    after = max(index for index, _, _ in spawned)
+    resumed = any(
+        (e.get("event") or {}).get("action") == "resume"
+        and ((e.get("event") or {}).get("role") == "build"
+             or "/build-" in str((e.get("event") or {}).get("name") or ""))
+        for e in entries[after + 1:]
+    )
+    if not resumed:
+        state.update(verdict="needs-fix",
+                     reason=f"round {rnd} filed {blocking} blocking "
+                            f"{'finding' if blocking == 1 else 'findings'}")
+        return state
+
+    # "The fix cannot be judged" is its own answer, and it WAITS. Folding it
+    # into `fix-unresolved` sent the card to `Needs Human` with `board-failed`
+    # on evidence nobody gathered -- see this function's docstring for the two
+    # ways that happens to a card whose fix is pushed and green.
+    unknown = []
+    if not ref:
+        unknown.append(f"round {rnd} recorded no ref")
+    if not head:
+        unknown.append("the pull request head could not be read")
+    if unknown:
+        state.update(
+            verdict="ref-unknown",
+            reason=f"{' and '.join(unknown)}, so whether the fix for round "
+                   f"{rnd} was pushed cannot be judged",
+        )
+        return state
+
+    if not pushed:
+        # The ref is recorded and the head still equals it: the fix really was
+        # never pushed.
+        running = any(a.get("role") == "build" and a.get("alive")
+                      and a.get("phase") == "running" for a in agents)
+        state.update(
+            verdict="fixing" if running else "fix-unresolved",
+            reason=f"the build was resumed for round {rnd} and the head is "
+                   f"still {head[:12]}, the sha the round was dispatched "
+                   f"against; the build agent is "
+                   + ("running" if running else "no longer running"),
+        )
+        return state
+
+    checks = (pr or {}).get("checks") or {}
+    if checks.get("passing"):
+        state.update(verdict="mergeable", merged_after_fix=True,
+                     reason=f"round {rnd} blocked, the fix at {head[:12]} is "
+                            f"pushed and every required check passed")
+        return state
+    if checks.get("failing"):
+        state.update(verdict="checks-failing",
+                     reason=f"the fix at {head[:12]} failed "
+                            f"{', '.join(checks['failing'])}")
+        return state
+    # Pending, empty, missing a required check, or a rollup that could not be
+    # read: none of those is an answer, and only `passing` merges.
+    state.update(verdict="awaiting-checks",
+                 reason=f"the fix at {head[:12]} is pushed and its checks have "
+                        f"not concluded")
+    return state
+
+
 def reconcile(ticket: str, agents: list[dict]) -> dict:
     pr = pr_for(ticket)
     # Composed from config.sh's BOARD_WORKTREE_PREFIX, as config.sh:worktree_path
@@ -1719,6 +2109,7 @@ def reconcile(ticket: str, agents: list[dict]) -> dict:
         "plan_attempts": plan_attempts(entries),
         "agents": mine,
         "worktree": worktree if os.path.isdir(worktree) else None,
+        "review": review_verdict(ticket, entries, pr, mine),
         "pr": pr,
         "merged": bool(pr and pr.get("state") == "MERGED"),
         "deploy": {"verified": False, "reason": "not merged"},
@@ -1731,6 +2122,36 @@ def reconcile(ticket: str, agents: list[dict]) -> dict:
     return record
 
 
+def _host_max() -> int:
+    """`HOST_MAX_CONCURRENT` from the environment, 4 when it cannot be read.
+
+    The machine ceiling reaches this process through the environment and not
+    through the contract: it is a fact about the machine, and `dispatch.sh`
+    passes config.sh's value in on the call. The default is config.sh's own,
+    so a caller that forgets to pass it weighs the same number the shell would
+    have used.
+    """
+    try:
+        return int(os.environ.get("HOST_MAX_CONCURRENT", "4"))
+    except ValueError:
+        return 4
+
+
+def _is_declared(board: str, mode: str) -> bool:
+    """Is `board` in this home's `boards.toml`? Says why on stderr when not.
+
+    Every mode that names a board owes this check, for the reason `--served`
+    gives: acting on a typo creates `instances/<typo>/`, reports success, and
+    leaves the board the operator meant untouched -- never stamped, never
+    cleaned -- with nothing saying so.
+    """
+    if board in declared_boards(FOREMAN_HOME):
+        return True
+    print(f"reconcile: {mode}: no board named {board} in "
+          f"{os.path.join(FOREMAN_HOME, 'boards.toml')}", file=sys.stderr)
+    return False
+
+
 def main(argv: list[str]) -> int:
     if not argv:
         print("usage: reconcile.py <TICKET> [TICKET...]\n"
@@ -1738,7 +2159,10 @@ def main(argv: list[str]) -> int:
               "       reconcile.py --host-slots\n"
               "       reconcile.py --board-order\n"
               "       reconcile.py --served <board>\n"
-              "       reconcile.py --may-dispatch <board>", file=sys.stderr)
+              "       reconcile.py --may-dispatch <board>\n"
+              "       reconcile.py --cleanup-due <board>\n"
+              "       reconcile.py --cleanup-since <board>\n"
+              "       reconcile.py --cleanup-started <board>", file=sys.stderr)
         return 2
     if argv[0] == "--main-ci":
         # No agent registry, no Linear, no cards: this answers one question about
@@ -1757,10 +2181,7 @@ def main(argv: list[str]) -> int:
         if len(argv) < 2:
             print("usage: reconcile.py --may-dispatch <board>", file=sys.stderr)
             return 2
-        try:
-            host_max = int(os.environ.get("HOST_MAX_CONCURRENT", "4"))
-        except ValueError:
-            host_max = 4
+        host_max = _host_max()
         # Takes the BARE board name, as the tick and the operator say it, and
         # composes the machine-wide key from this installation. A caller that
         # had to spell `<installation>/<board>` itself would be a second place
@@ -1783,17 +2204,68 @@ def main(argv: list[str]) -> int:
         if len(argv) < 2:
             print("usage: reconcile.py --served <board>", file=sys.stderr)
             return 2
-        board = argv[1]
-        if board not in declared_boards(FOREMAN_HOME):
-            # Refuse rather than create `instances/<typo>/last-served` and
-            # report success. A stamp nothing ever reads means the board the
-            # operator meant is still never served, and the order still starves
-            # it -- silently, which is the failure this whole mode removes.
-            print(f"reconcile: no board named {board} in "
-                  f"{os.path.join(FOREMAN_HOME, 'boards.toml')}", file=sys.stderr)
+        # Refuse an undeclared board rather than create
+        # `instances/<typo>/last-served` and report success. A stamp nothing
+        # ever reads means the board the operator meant is still never served,
+        # and the order still starves it -- silently, which is the failure this
+        # whole mode removes.
+        if not _is_declared(argv[1], "--served"):
             return 2
-        mark_board_served(FOREMAN_HOME, board)
+        mark_board_served(FOREMAN_HOME, argv[1])
         return 0
+    if argv[0] in ("--cleanup-due", "--cleanup-since", "--cleanup-started"):
+        # Three questions about one stamp, `instances/<board>/last-cleanup`.
+        # They name their board for the same reason `--served` does -- a stale
+        # FOREMAN_INSTANCE is this skill's oldest bug shape -- but everything
+        # ELSE they read is the contract config.sh resolved for
+        # $FOREMAN_INSTANCE: `CLEANUP_EVERY_DAYS`, `MAX_CONCURRENT` and this
+        # board's agents. The tick exports `FOREMAN_INSTANCE=<board>` for the
+        # whole slice, so the two are the same board; a slice that asks about
+        # its neighbour would be weighing its own cadence against another
+        # board's stamp.
+        mode = argv[0]
+        if len(argv) < 2:
+            print(f"usage: reconcile.py {mode} <board>", file=sys.stderr)
+            return 2
+        board = argv[1]
+        if not _is_declared(board, mode):
+            return 2
+        # Declared is not enough: it has to be the board THIS process resolved.
+        # Answering about a neighbour weighs one board's stamp against another
+        # board's cadence, ceiling and agents, and `--cleanup-started` stamps
+        # the neighbour -- skipping the cleanup it was owed, silently, for a
+        # whole `every_days`. A stale FOREMAN_INSTANCE is this skill's oldest
+        # bug shape, so both names go in the refusal.
+        if board != INSTANCE:
+            print(f"reconcile: {mode}: this process resolved the contract for "
+                  f"board {INSTANCE}, so it cannot answer for {board}; run it "
+                  f"with FOREMAN_INSTANCE={board}", file=sys.stderr)
+            return 2
+        if mode == "--cleanup-started":
+            # Written BEFORE the dispatch, never after -- cleanup_verdict()
+            # says why. Prints nothing: the tick has nothing to decide on it.
+            write_stamp(FOREMAN_HOME, board, CLEANUP_STAMP)
+            return 0
+        if mode == "--cleanup-since":
+            # What `brief.py cleanup --since` hands the agent as the start of
+            # the window it reads. `never` for a board that has never run one,
+            # which is every board until its first pass: the agent then reads
+            # everything, which is the right answer for a first run.
+            stamp = read_stamp(FOREMAN_HOME, board, CLEANUP_STAMP)
+            print(stamp.strftime(CARD_LOG_STAMP) if stamp else "never")
+            return 0
+        agents = load_agents()
+        if agents is None:
+            # The same refusal the card path makes below, for the same reason:
+            # an unreadable registry reported as "no agents" dispatches a
+            # cleanup pass on top of the one already running.
+            print("reconcile: could not read the agent registry; refusing to "
+                  "report a cleanup as due", file=sys.stderr)
+            return 3
+        verdict = cleanup_verdict(FOREMAN_HOME, board, CLEANUP_EVERY_DAYS,
+                                  agents, _host_max())
+        print(verdict or "due")
+        return 1 if verdict else 0
     if argv[0] == "--board-order":
         # The pass order, not the roster: `boards.py --list` prints boards in
         # name order and the tick used to loop over that, which left the same

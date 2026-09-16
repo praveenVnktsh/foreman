@@ -57,14 +57,17 @@ flowchart TD
         pln["plan<br/><small>draw the graph · post it</small><br/><i>a comment on the card is what moves it out of Plan; no push, no PR</i>"]
         bld["build<br/><small>implement · test · PR</small><br/><i>dispatched fresh from origin/main, plan text embedded in the brief · a fix is this same session resumed with findings, not a separate role</i>"]
         rev["review<br/><small>read the diff</small>"]
+        cln["cleanup<br/><small>read main, file one planned card</small><br/><i>never pushes</i>"]
     end
     dis --> pln
     dis --> bld
     dis --> rev
+    dis --> cln
 
     ev["<b>evidence.sh</b><br/><small>362 lines</small><br/>read what GitHub holds <i>now</i><br/><i>never the working tree</i>"]
     rev -.-> ev
     bld -.-> ev
+    cln -.-> ev
 
     subgraph CONFIG[" READ BY EVERYTHING "]
         direction LR
@@ -91,7 +94,7 @@ flowchart TD
     class sup,tick,cron edge
     class stop stop
     class toml,con,ids,cfg cfgn
-    class pln,bld,rev agent
+    class pln,bld,rev,cln agent
 
     linkStyle default stroke:#94a3b8,stroke-width:1.5px
 ```
@@ -107,6 +110,8 @@ flowchart TD
   Nothing is carried between ticks. The next tick rebuilds the picture from
   Linear, `gh` and `claude agents`. That is why there is no state file, and why
   the sidecar is a cache and never truth.
+- **`rev` runs once.** A blocking finding buys one fix and no re-review; quality
+  work that used to wait for a second round now runs in `cln` instead.
 
 ## Where the weight is
 

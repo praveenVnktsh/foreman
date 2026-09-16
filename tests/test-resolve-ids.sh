@@ -148,7 +148,11 @@ JSON
 # hand, and the typo shows up as a card that silently never parks. Adding it to
 # the fixture to hold the create count at one would delete the only coverage.
 #
-# `foreman:claude` is absent too, and is the THIRD create. It is the label that
+# `cleanup` is absent too, and is the THIRD create. It is the label the
+# cleanup agent writes onto the card it files, and a fixture that pre-declared
+# it would stop proving that a board resolving for the first time gets one.
+#
+# `foreman:claude` is absent too, and is the FOURTH create. It is the label that
 # says which installation owns a card, and its name is only known at run time
 # from --installation -- so a fixture that pre-declared it would stop proving
 # that an installation resolving for the first time gets a label at all.
@@ -183,10 +187,22 @@ if run_resolve "$STUB_URL"; then
   if [[ "$created_id" == created-* && "$needs_plan_id" == created-* ]] \
        && grep -q "^mutation CreateLabel .*\"board-failed\"" "$happy_log" \
        && grep -q "^mutation CreateLabel .*\"needs-plan\"" "$happy_log" \
-       && [[ "$create_calls" -eq 3 ]]; then
+       && grep -q "^mutation CreateLabel .*\"cleanup\"" "$happy_log" \
+       && [[ "$create_calls" -eq 4 ]]; then
     ok "creates both absent labels, the board's and the operator's, and records their ids"
   else
     not_ok "creates absent labels: board-failed=[$created_id] needs-plan=[$needs_plan_id] creates=[$create_calls] log=$(cat "$happy_log")"
+  fi
+
+  # cleanup is the label the cleanup agent writes onto the one card it files
+  # per run (docs/specs/2026-09-15-cleanup-and-light-review-design.md). The
+  # fixture never declares it, so this is a create, not a reuse.
+  cleanup_id="$(read_id "$ids_env" LABEL_CLEANUP)"
+  if [[ "$cleanup_id" == created-* ]] \
+       && grep -q "^mutation CreateLabel .*\"cleanup\"" "$happy_log"; then
+    ok "creates the absent cleanup label and records it as LABEL_CLEANUP"
+  else
+    not_ok "creates the absent cleanup label: LABEL_CLEANUP=[$cleanup_id] log=$(cat "$happy_log")"
   fi
 
   # The installation's own label, named from --installation and written where
@@ -203,7 +219,7 @@ if run_resolve "$STUB_URL"; then
   if [[ "$(read_id "$ids_env" LABEL_FOLLOW_UP)" == "label-followup" && \
         "$(read_id "$ids_env" LABEL_FOLLOW_UPS_WRITTEN)" == "label-followupswritten" && \
         "$(read_id "$ids_env" LABEL_NEEDS_MERGE)" == "label-needsmerge" && \
-        "$create_calls" -eq 3 ]]; then
+        "$create_calls" -eq 4 ]]; then
     ok "reuses a label that does exist rather than creating a second"
   else
     not_ok "reuses a label that does exist: $(cat "$ids_env")"

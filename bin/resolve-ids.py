@@ -97,20 +97,27 @@ TO_PICK_UP_TYPE = "unstarted"
 # to create them by hand, and the board cannot function without somewhere to
 # put a follow-up or a needs-merge flag.
 #
-# `needs-plan` is the one that runs the other way. The first four are written
-# by the board and read by a human; `needs-plan` is written by the OPERATOR --
-# it is how they say "park this card in Plan and let me answer the plan before
-# you build it" -- and only ever read by the board. That direction is an
+# `follow-up` and `follow-ups-written` are kept only so cards already carrying
+# them keep resolving -- the scheduled cleanup replaced step 7, and nothing
+# writes either one anymore.
+#
+# `needs-plan` is the one that runs the other way. It is written by the
+# OPERATOR -- it is how they say "park this card in Plan and let me answer the
+# plan before you build it" -- and read by the board. That direction is an
 # argument for creating it here, not against: a label the operator is expected
 # to apply has to exist before they can apply it, and a board that created only
 # the labels it writes would leave them typing the name by hand into a fresh
 # team, where the typo shows up as a card that silently never parked.
+#
+# `cleanup` is written by the cleanup agent, onto the one card it files per
+# run (docs/specs/2026-09-15-cleanup-and-light-review-design.md).
 LABEL_ROLES = [
     ("LABEL_FOLLOW_UP", "follow-up"),
     ("LABEL_FOLLOW_UPS_WRITTEN", "follow-ups-written"),
     ("LABEL_NEEDS_MERGE", "needs-merge"),
     ("LABEL_BOARD_FAILED", "board-failed"),
     ("LABEL_NEEDS_PLAN", "needs-plan"),
+    ("LABEL_CLEANUP", "cleanup"),
 ]
 
 # The installation's own label (docs/specs/2026-09-14-installations-per-
