@@ -659,6 +659,17 @@ never dispatches a card — only the loop does. That separation is load-bearing:
 watchdog that could also dispatch would double-dispatch the first time it
 misjudged liveness, and misjudging liveness is what watchdogs do under load.
 
+**It also asks whether any board is starved.** For every board `boards.toml`
+declares, `supervise.sh` runs `skills/board/starved.py <board> --older-than
+$TICK_STARVED_MINUTES`. When the tick has been alive longer than that and
+`starved.py` answers `starved: true` — a routed, unblocked `Todo` card has
+waited longer than `TICK_STARVED_MINUTES` with a free slot open —
+`supervise.sh` replaces the tick exactly as it replaces a wedged one, logging
+the board, the card's identifier and how many minutes it waited. It is the
+outside check on the rule in [6. Dispatch](#6-dispatch) that every slice reads
+`Todo`, because prose is not a gate. `STARVED_API_URL`, when set, becomes
+`starved.py`'s `--api-url`, which is how a test points it at a stub Linear.
+
 Inspect or control it by hand:
 
 ```bash
@@ -761,6 +772,13 @@ The knobs are in `config.sh`: `TICK_INTERVAL_MINUTES`, `TICK_STALL_MINUTES`,
 `TICK_DEAD_MINUTES`, `TICK_MAX_AGE_HOURS`. `TICK_DEAD_MINUTES` must exceed the
 interval or the watchdog kills healthy agents that are merely waiting for their
 next turn; `supervise.sh` refuses to start rather than let that happen.
+
+`TICK_STARVED_MINUTES` (default 60) is not among them — it lives in
+`supervise.sh` itself, not `config.sh`, because it bounds the watchdog's own
+patience with a tick that has stopped reading a board rather than anything a
+board's own slice reads. It is guarded the same way: `supervise.sh` refuses to
+start unless it exceeds `TICK_INTERVAL_MINUTES`, or a tick that is merely
+between passes would read as starved.
 
 **A self-looping agent accumulates context on every iteration**, which is the
 one real cost of this shape. `TICK_MAX_AGE_HOURS` bounds it by restarting the
@@ -1989,6 +2007,16 @@ merged but failed to deploy is building on something that is not there.
   at least one card is blocked by another card in `Todo`, say so plainly rather
   than reporting a quiet tick — a quiet tick and a deadlocked one look identical
   from the outside, and only one of them needs the operator.
+- **A slice that ends on a pending check, review or deploy still reaches this
+  step.** Waiting on a reviewer stops `waitfor.py`, not this step: reading this
+  board's `Todo` and weighing it against a free slot happens every slice,
+  whatever an earlier phase found pending. On 2026-09-16 a tick that had been
+  waiting on reviewers for two hours never read one board's `Todo` again; a
+  card sat there unadopted with 8 of that board's 10 slots free, and the
+  tick's own report read exactly like a board with nothing to do.
+  `supervise.sh` now backstops this from outside the tick — see
+  [Restarting after the session dies](#restarting-after-the-session-dies) —
+  but that backstop is a last resort, not a licence to let this rule slide.
 
 `blocks` needs no handling: the gating always happens on the dependent's side.
 
@@ -2126,6 +2154,22 @@ one unavailable. That dispatch is this board's card moved forward, so the slice
 ends and the next board takes its turn. A board with six free slots fills them
 over six passes rather than six spawns in a row, and every other board is served
 in between.
+
+**Every `Todo` card this installation owns gets a verdict, not silence.** One
+of:
+
+- dispatched;
+- "a card already dispatched this slice" — this step takes one card and ends
+  the slice, and that sentence is the whole reason;
+- "blocked by `<T>`", from the dependency gate above;
+- `queue.py`'s own stderr line, for a card it skipped or dropped;
+- `dispatch.sh`'s refusal (`board <board> holds N of M slots: …`), for this
+  board's own ceiling;
+- `reconcile.py --may-dispatch`'s line, for the machine's ceiling;
+- the board is halted, in which case its `Todo` is not read at all.
+
+[9. Report](#9-report) carries these, so a board that read the column and found
+nothing to do never reads like a board that never read it.
 
 **Label the card, then move it to `Plan`, then spawn.** In that order, and the
 label comes first for its own reason.
@@ -2418,6 +2462,12 @@ the tick never reached it before the budget ran out. A board left out of the
 report reads exactly like a board with no work — which is the failure
 round-robin exists to make visible, so do not drop the quiet ones to keep the
 report short.
+
+**Within a board's own line, every `Todo` card this installation owns carries
+its verdict from [6. Dispatch](#6-dispatch)**, not only the one dispatched. **A
+board whose slice never reached `Todo` says "Todo not read", never "quiet."**
+"Quiet" is a verdict about the cards; "Todo not read" is a verdict about the
+tick, and spelling both the same way is how a starved board looks idle.
 
 **A refused label copy is reported too**, though the card did not move. When
 `merge.py` exits 1, name the card, the label and the `gh` error in the tick's

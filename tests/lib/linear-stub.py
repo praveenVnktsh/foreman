@@ -1,7 +1,10 @@
 #!/usr/bin/env python3
-"""A local stand-in for Linear's GraphQL endpoint, for test-resolve-ids.sh.
+"""A local stand-in for Linear's GraphQL endpoint.
 
     linear-stub.py <scenario.json>
+
+Serves test-resolve-ids.sh (bin/resolve-ids.py) and any test that runs
+skills/board/starved.py against a fixture board.
 
 Binds a loopback TCP port chosen by the OS, prints that port number (and
 nothing else) to stdout, then serves forever until killed. This is the only
@@ -15,15 +18,24 @@ handshake the test needs: read one line, and the stub is ready.
       "states":   [{"id": "...", "name": "...", "type": "..."}, ...],
       "labels":   [{"id": "...", "name": "..."}, ...],
       "label_id_lies": {"<id>": "<name the round-trip query lies and returns>"},
+      "issues":   [{"projectId": "...", "stateId": "...", "identifier": "...", ...}, ...],
       "fail_after": <int, optional>,
       "log": "<path, optional>"
     }
 
+`issues`: fixture Todo-column cards for starved.py's `query TodoIssues`. Each
+entry carries `projectId` and `stateId` alongside the node fields starved.py
+reads (`identifier`, `priority`, `createdAt`, `labels`, `history`,
+`inverseRelations`) -- the stub matches those two routing keys against the
+query's variables and strips them before returning the node, the same way
+Linear's own filter never echoes back what it filtered on.
+
 Every request is routed by matching a fixed substring of its GraphQL document
-against the operation names resolve-ids.py's own query documents carry
-(`query Team`, `query Project`, `query States`, `query Labels`,
-`mutation CreateLabel`, `query LabelById`) -- this stub does not implement
-Linear's schema, only the shapes resolve-ids.py actually sends.
+against the operation names resolve-ids.py's and starved.py's own query
+documents carry (`query Team`, `query Project`, `query States`,
+`query Labels`, `mutation CreateLabel`, `query LabelById`,
+`query TodoIssues`) -- this stub does not implement Linear's schema, only the
+shapes those two callers actually send.
 
 `fail_after`: the Nth request onward gets HTTP 500. Requests are counted from
 1 across the whole run, in the order resolve-ids.py issues them (team,
@@ -57,6 +69,7 @@ def _operation_name(document: str) -> str:
         "query Labels",
         "mutation CreateLabel",
         "query LabelById",
+        "query TodoIssues",
     ):
         if name in document:
             return name
@@ -118,6 +131,16 @@ def main() -> int:
                 if label["id"] == label_id:
                     return {"issueLabel": {"id": label_id, "name": label["name"]}}
             return {"issueLabel": None}
+
+        if op == "query TodoIssues":
+            project_id = variables.get("projectId")
+            state_id = variables.get("stateId")
+            nodes = [
+                {k: v for k, v in issue.items() if k not in ("projectId", "stateId")}
+                for issue in scenario.get("issues", [])
+                if issue.get("projectId") == project_id and issue.get("stateId") == state_id
+            ]
+            return {"issues": {"nodes": nodes}}
 
         raise ValueError(f"stub: unrecognised GraphQL document: {document[:120]!r}")
 

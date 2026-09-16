@@ -292,7 +292,13 @@ CLEANUP_MODEL="${CLEANUP_MODEL:-$PLAN_MODEL}"
 # and built unattended. Every consumer reads them in the sourcing shell
 # instead: dispatch.sh sources this file, and reconcile.py and brief.py each
 # use a same-shell `bash -c ". config.sh; printf ..."`.
-export REPO KEY_FILE INSTANCE INSTANCE_HOME BOARD_HOME BOARD_NAME_PREFIX BOARD_WORKTREE_PREFIX
+# The list is named so a script that loops over boards -- supervise.sh asking
+# starved.py about each one -- can strip exactly these from a child's
+# environment. A hand-kept copy there leaks the first board's values into the
+# next the day a name is added here.
+FOREMAN_BOARD_EXPORTS="REPO KEY_FILE INSTANCE INSTANCE_HOME BOARD_HOME BOARD_NAME_PREFIX BOARD_WORKTREE_PREFIX"
+# shellcheck disable=SC2086 # split on purpose: one name per word
+export $FOREMAN_BOARD_EXPORTS
 
 MAX_BUDGET_USD="${MAX_BUDGET_USD:-}"
 
