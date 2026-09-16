@@ -103,10 +103,24 @@ BRANCH="$(git_ro symbolic-ref --short -q HEAD || true)"
 [[ -n "$BRANCH" ]] || die "the clone has a detached HEAD; expected it on main"
 [[ "$BRANCH" == "main" ]] || die "the clone is on '$BRANCH'; expected main. Nothing was changed."
 
-# Local modifications are never discarded here. --ff-only would refuse a
-# conflicting pull anyway, but it would refuse AFTER the fetch and with git's
-# wording, which does not say whose edits are at stake.
-DIRTY="$(git_ro status --porcelain)"
+# Local modifications to TRACKED files are never discarded here. --ff-only
+# would refuse a conflicting pull anyway, but it would refuse AFTER the fetch
+# and with git's wording, which does not say whose edits are at stake.
+#
+# UNTRACKED FILES DO NOT BLOCK AN UPDATE, and --untracked-files=no is what says
+# so. Measured on 2026-09-16, deploying this to its first real machine: one of
+# three installations there had a stray 25KB API-response dump sitting in its
+# install root, written by nothing in this repository. Under a bare
+# `status --porcelain` that clone was permanently dirty, so it would have
+# refused every fire for ever -- an installation that silently stops updating
+# because of a file nobody remembers leaving there.
+#
+# It is safe because a fast-forward cannot quietly eat an untracked file: if an
+# incoming commit adds a path that exists untracked in the tree, git aborts the
+# merge itself with "untracked working tree file would be overwritten", before
+# moving HEAD. The refusal below is about an operator's EDITS, and an untracked
+# file is not an edit to anything this repository ships.
+DIRTY="$(git_ro status --porcelain --untracked-files=no)"
 if [[ -n "$DIRTY" ]]; then
   printf 'self-update: the clone at %s has local modifications; expected a clean tree.\n' "$INSTALL_ROOT" >&2
   printf 'self-update: nothing was changed. What is dirty:\n%s\n' "$DIRTY" >&2

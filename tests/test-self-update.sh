@@ -122,6 +122,21 @@ else
   bad "skill-adding update -> relinks=$(relinks) restarts=$(restarts): $out"
 fi
 
+# --- AN UNTRACKED FILE DOES NOT BLOCK. Found on 2026-09-16 on the first real
+#     machine: one installation had a stray API-response dump in its install
+#     root, which a bare `status --porcelain` calls dirty. Refusing on that
+#     stops an installation updating for ever, over a file nobody shipped.
+printf '{"stray":true}\n' > "$install/leftover-dump.json"
+printf 'z\n' > "$upstream/another.txt"
+git_q "$upstream" add -A; git_q "$upstream" commit -q -m "fourth"
+want="$(git -C "$upstream" rev-parse HEAD)"
+out="$(run_update)" || bad "an untracked file blocked the update: $out"
+if [[ "$(head_of)" == "$want" && "$(restarts)" == 3 ]] && [[ -f "$install/leftover-dump.json" ]]; then
+  ok "an untracked file neither blocks the update nor is deleted by it"
+else
+  bad "untracked file -> head=$(head_of) want=$want restarts=$(restarts): $out"
+fi
+
 # --- a dirty clone is refused, and nothing is discarded
 printf 'operator edit\n' > "$install/README.md"
 printf 'y\n' > "$upstream/other.txt"
