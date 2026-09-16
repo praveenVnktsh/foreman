@@ -1,164 +1,177 @@
-# foreman
+<h1 align="center">foreman</h1>
 
-An autonomous build loop that lives outside the project it builds.
+<p align="center">
+  <b>Move a card to Todo. Come back to a merged pull request.</b>
+</p>
 
-A card moved into `Todo` on a Linear board is the only dispatch authorisation.
-Everything after that — building it in a worktree, reviewing the diff
-adversarially by sessions that did not write it, gating the merge on evidence,
-watching the deploy, filing one planned cleanup card every few days — happens
-without anyone present.
+<p align="center">
+  <a href="https://github.com/praveenVnktsh/foreman/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/praveenVnktsh/foreman/ci.yml?branch=main&style=for-the-badge&label=tests" alt="Tests" /></a>
+  <img src="https://img.shields.io/badge/board-Linear-5e6ad2?style=for-the-badge" alt="Linear" />
+  <img src="https://img.shields.io/badge/harness-Claude%20Code%20%C2%B7%20Codex%20%C2%B7%20OpenCode-000000?style=for-the-badge" alt="Harnesses" />
+  <img src="https://img.shields.io/badge/runs-on%20your%20machine-2ea043?style=for-the-badge" alt="Runs locally" />
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-3b82f6?style=for-the-badge" alt="MIT" /></a>
+  <img src="https://img.shields.io/github/stars/praveenVnktsh/foreman?style=for-the-badge" alt="Stars" />
+</p>
 
-A repository becomes buildable by adding one `board.toml`. Forking this
-repository gives you a project that already has a builder.
+<p align="center">
+  <b>foreman</b> is an autonomous build loop for your Linear board.<br/>
+  It plans, builds, reviews and merges the cards you pick up, on your own machine, while nobody is watching.
+</p>
 
-Extracted from a board orchestrator that grew up inside one private project,
-and generalised until nothing about that project remained. See `docs/specs/`.
+---
 
-## Installing
+## How it works
 
-`~/.foreman` is the machine root. Each installation is one directory under it,
-named by the operator, holding its own clone and its own tick. A first install
-on Claude Code, with no name chosen, lands at `~/.foreman/claude`:
+A card you move into `Todo` is the only dispatch authorisation. Everything after
+that happens without you.
 
-    git clone <url> ~/.foreman/claude/install
-    ~/.foreman/claude/install/bin/install.sh --harness claude
-    ~/.foreman/claude/install/bin/install-skills.sh
-    install -m 600 ~/.config/linear.key ~/.foreman/linear.key
-    cp <your linear mcp config> ~/.foreman/mcp.json
-    ~/.foreman/claude/install/bin/boardctl add myproject --repo ~/Developer/myproject
+```mermaid
+flowchart LR
+  You(["You move a card<br/>Backlog → Todo"]) --> Plan["Plan<br/><small>draw the change, post it on the card</small>"]
+  Plan --> Build["Build<br/><small>fresh worktree · implement · test · open PR</small>"]
+  Build --> Review["Review<br/><small>a session that did not write it reads the diff</small>"]
+  Review -->|blocking finding| Fix["Fix<br/><small>one round</small>"] --> Gate
+  Review -->|clean| Gate{"Evidence gate<br/><small>CI green · no risky paths</small>"}
+  Gate -->|pass| Merge(["Merged · deploy watched · Done"])
+  Gate -->|risky path| Human(["Parked for a human"])
+```
 
-`bin/install.sh` writes `installation.toml`: the harness, this installation's
-models, and whether it is the machine's default. `--harness` is required; on
-Claude Code the four models default to what foreman has always spent. It
-refuses to overwrite one that exists, so re-running it is safe and changing an
-installation's settings means editing `installation.toml` by hand.
+Every few days a cleanup agent reads `main` and files one planned card for
+the quality work that review no longer blocks on.
 
-The first installation needs no `--default`: an installation with no sibling
-owns every card on its boards, labelled or not, and `install.sh` prints which
-cards this one owns.
+## Why foreman
 
-`install-skills.sh` is not optional and not cosmetic. A tick runs `/board`, and
-each harness resolves a skill by name from its own skills directory -- never
-from an install directory. Skip it and the loop looks installed and is not: the
-watchdog starts a tick, reports it healthy, and the tick cannot find its own
-skill. If another project has left a skill of the same name there, the tick
-runs that one instead. `install-skills.sh` refuses to replace a skill it did
-not put there.
+- **You stay in charge of what gets built.** No agent can put work into `Todo`
+  or take it out of `Backlog`. A failed card waits for you to re-triage it; it
+  never loops.
+- **Nobody reviews their own work.** The diff is reviewed by a session that did
+  not write it, and the merge is gated on what GitHub holds now, never on a
+  working tree.
+- **It holds no state.** Each tick re-derives every card's position from Linear,
+  `gh` and `git`. Kill it, restart it or upgrade it mid-build and nothing is lost.
+- **It lives outside the project it builds.** A repository becomes buildable by
+  adding one `board.toml`. Nothing a pull request runs ever executes on your host.
 
-The key and `mcp.json` are shared: one of each per Linear workspace, at
-`~/.foreman`, not one per installation.
+## Features
 
-`~/.foreman/mcp.json` is the tick's control plane, and it has to be foreman's own
-rather than inherited. Claude Code resolves MCP servers per project, keyed on the
-working directory; the tick runs from the install and serves every board, so it
-inherits none. Without it the tick reads a board correctly and then has no way to
-move a card. Inheriting the working directory's servers would be worse: which
-servers the board may use would depend on where it started, and a target
-repository could hand the tick a server of its choosing.
+### The loop
+- **Plan → Build → Review → Merge** as Linear columns, each stage a detached
+  agent in its own git worktree.
+- **Adversarial review** that gates on blocking findings, with one fix round.
+- **Evidence-based merges**: required checks, risky paths from the diff, and
+  deploy step conclusions, read from GitHub.
+- **Deploy watching**, including queued deploys and a `fast-track` label copied
+  from the card to the pull request.
+- **Scheduled cleanup** that files one well-planned card instead of blocking merges.
+- **Linear priority** orders the queue; boards take turns round-robin.
 
-**The running loop uses the installed clone, never a working tree** — including
-when the repository it is building is foreman itself. A board that reads its own
-uncommitted code cannot survive merging a broken change to itself: the tick that
-would notice is the tick that just replaced itself. `git -C
-~/.foreman/claude/install pull` moves the pin, deliberately by hand.
+### Operating it
+- **Several boards** from one tick, each with its own concurrency limit.
+- **Several installations** on one machine, each on its own harness — Claude
+  Code, Codex or OpenCode — routed by a `foreman:<name>` card label.
+- **A watchdog** (`supervise.sh`) that restarts a stuck tick and can never
+  dispatch a card itself.
+- **Preflight** refuses to dispatch when the machine cannot build, without
+  blaming the card.
+- **Self-update by pulling**: fast-forward to `origin/main` and restart, leaving
+  in-flight cards alone.
 
-Pulling is only half of it. A running tick keeps reading the skill it started
-with, so the new install takes effect at the next restart:
+## Quick start
 
-    ~/.foreman/claude/install/skills/board/supervise.sh --restart
+You need `git`, `gh`, Python 3, a Linear API key, a Linear MCP config, and one
+supported harness.
 
-That replaces this installation's tick and leaves every card that is mid-build
-alone. Each dispatched agent is parented to the harness's own daemon rather
-than to the tick, and the tick holds no state, so the replacement re-derives
-every card's position from Linear, `gh` and `git`. A sibling installation's
-tick is unaffected: each has its own lock and its own `supervise.sh`.
+```bash
+git clone https://github.com/praveenVnktsh/foreman.git ~/.foreman/claude/install
+~/.foreman/claude/install/bin/install.sh --harness claude
+~/.foreman/claude/install/bin/install-skills.sh
+install -m 600 ~/.config/linear.key ~/.foreman/linear.key
+cp path/to/linear-mcp.json ~/.foreman/mcp.json
+~/.foreman/claude/install/bin/boardctl add myproject --repo ~/Developer/myproject
+```
 
-### A second installation
+Then keep it running and up to date with systemd user timers (Linux; on macOS
+use launchd or cron):
 
-One machine can run several installations at once, each on its own harness --
-Claude Code, Codex or OpenCode -- so an operator with more than one
-subscription spends each of them. They serve the same Linear boards; a
-`foreman:<name>` label on a card says which installation owns it, and one
-installation is the default for cards carrying no such label.
+```bash
+~/.foreman/claude/install/bin/install-service.sh
+~/.foreman/claude/install/bin/install-self-update.sh
+```
 
-**Name the default before the second installation exists.** A machine with two
-installations and no default refuses every read, because an unlabelled card
-would then belong to nobody and every tick would report an empty board it was
-silently dropping cards from. So first say which installation owns the
-unlabelled cards -- usually the one already running -- by setting one line in
-its own file by hand:
+`install-skills.sh` is required: the tick runs `/board`, and the harness only
+finds skills in its own skills directory. Second installations, other
+harnesses and migrating an old home are covered in
+[docs/INSTALLING.md](docs/INSTALLING.md).
 
-    default = true            # in ~/.foreman/claude/installation.toml
+## Make a repository buildable
 
-`install.sh` never edits a declaration that exists, which is why this is an
-edit and not a command. Then a second installation, on Codex, follows the same
-four commands under a name of its own:
+Add a `board.toml` at its root. Only `[linear]`, `[checks]` and `[test]` are
+needed; everything else is optional.
 
-    git clone <url> ~/.foreman/codex/install
-    ~/.foreman/codex/install/bin/install.sh --harness codex --model-tick M --model-plan M --model-build M --model-review M
-    ~/.foreman/codex/install/bin/install-skills.sh
-    ~/.foreman/codex/install/bin/boardctl add myproject --repo ~/Developer/myproject
+```toml
+[linear]
+team = "My Team"                  # the team NAME, not its key
+project = "myproject"
 
-It takes no `--default`, because `claude` now claims that. Pass `--default`
-here instead if you want the new installation to own the unlabelled cards, and
-leave `default = false` in the old one: exactly one installation on the machine
-may say `true`.
+[checks]
+required = ["Tests"]              # job names that must pass
+ci_workflow = "CI"                # the workflow's `name:`
 
-Codex and OpenCode have no default model, unlike Claude, so `install.sh`
-refuses to write `installation.toml` for either without all four `--model-*`
-flags. `bin/boardctl add` on a repository the first installation already
-serves adds a second builder for it; nothing about routing needs the operator
-to say so, because the label does the routing.
+[test]
+command = "tests/run-all.sh"
 
-**A non-default installation's boards take only surplus.** `boardctl add`
-writes `priority = 0` there, so each board uses only the slots of
-`HOST_MAX_CONCURRENT` the default installation is not using. At the implicit
-priority 1, every new board reserves a slot while it holds no cards, and on a
-machine running four slots that stopped the default installation's boards from
-planning anything. To give a board a floor, add it with `--priority N`, for
-example `boardctl add myproject --repo ~/Developer/myproject --priority 1`.
+[risk]
+paths = ["migrations/"]           # a diff touching these waits for a human
 
-### Migrating an existing home
+[docs]
+required = ["STYLEGUIDE.md"]      # every agent reads these first
 
-A home installed before installations existed has `~/.foreman/install`
-directly, with no `installation.toml`. `boardctl migrate` moves it into
-`~/.foreman/claude/`, writes `harness = "claude"`, `default = true` and
-`names = "legacy"`, and
-prints the three steps it cannot do for you: re-run `install-skills.sh` from
-the moved clone, re-point `install-service.sh` or your cron line at the new
-path, and disable the old watchdog -- `systemctl --user disable --now
-foreman.timer`, or remove the old cron line. That last one is easy to miss and
-loud when missed: the new timer is `foreman-claude.timer`, so the old
-`foreman.timer` survives beside it and fails every ten minutes against a path
-that has moved. `install-service.sh` refuses to install the new timer while the
-old unit is still there.
+[limits]
+max_concurrent = 1
+```
 
-**Names are kept.** The migrated installation keeps every agent, worktree and
-branch name it had: `foreman/<board>/<ticket>`, not
-`foreman/claude/<board>/<ticket>`. Your open pull requests stay on the branches
-the board looks them up by, so no in-flight card is built a second time. Only
-installations created from now on put their installation name into their
-names. `migrate` still refuses if any `foreman/` agent is live, because it
-moves the home, and with it the card history and scratch, under a running
-agent.
+foreman builds itself: this repository's own [board.toml](board.toml) is a
+working example. The full contract is in the
+[design spec](docs/specs/2026-08-27-autonomous-board-runner-design.md).
 
-## Self-updating
+## Architecture
 
-foreman updates itself by pulling, not by anything inbound. Nothing a pull
-request runs ever executes on the host: CI runs on GitHub-hosted runners, and
-the only way a merged commit reaches an installation is the installation
-fetching it. That is deliberate now that this repository is public — a
-self-hosted runner would let a stranger's fork send code straight to an
-operator's machine.
+```mermaid
+flowchart LR
+  Cron(["cron / systemd"]) --> Sup["supervise.sh<br/><small>watchdog</small>"]
+  Sup --> Tick["tick agent<br/><small>/board skill</small>"]
+  Tick --> Rec["reconcile<br/><small>Linear · gh · agents</small>"]
+  Rec --> Dis["dispatch<br/><small>worktree · brief · spawn</small>"]
+  Dis --> Agents["plan · build · review · cleanup<br/><small>detached agents</small>"]
+  Agents --> GH[("GitHub<br/>PRs · checks · deploys")]
+  Rec -.->|next tick re-derives| Rec
+```
 
-`bin/self-update.sh` is the automated form of the `git pull` and
-`supervise.sh --restart` described above. It fast-forwards this
-installation's clone to `origin/main` and restarts the tick, leaving any
-in-flight card alone. It refuses rather than guess: a dirty clone, a clone
-that is not on `main`, or an `origin/main` that was force-pushed all stop it
-instead of producing a clone nobody asked for.
+One tick end to end, with every file it touches, is drawn in
+[docs/board-flow.md](docs/board-flow.md).
 
-`bin/install-self-update.sh` schedules it as a systemd user timer, beside the
-watchdog `install-service.sh` installs:
+## Documentation
 
-    ~/.foreman/claude/install/bin/install-self-update.sh
+| Read | For |
+| --- | --- |
+| [docs/INSTALLING.md](docs/INSTALLING.md) | Installations, harnesses, migration, self-update |
+| [docs/board-flow.md](docs/board-flow.md) | What one tick does, file by file |
+| [docs/specs/](docs/specs/) | Why the loop is shaped the way it is |
+| [AGENTS.md](AGENTS.md) | The map for anyone, or any agent, changing this code |
+| [STYLEGUIDE.md](STYLEGUIDE.md) | How code and prose are written here |
+
+## Security
+
+foreman is public, so CI runs only on GitHub-hosted runners and a merged commit
+reaches your machine only when your installation pulls it. foreman never merges
+a pull request from outside the repository it builds.
+
+## Contributing
+
+Issues and pull requests are welcome. Start with [AGENTS.md](AGENTS.md) and
+run `tests/run-all.sh` before opening one.
+
+## License
+
+[MIT](LICENSE). Extracted from a board orchestrator that grew up inside one
+private project, and generalised until nothing about that project remained.
