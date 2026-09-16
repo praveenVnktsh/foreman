@@ -56,6 +56,12 @@ if [[ -n "${GH_FAIL_ON:-}" && "$1 $2" == "$GH_FAIL_ON" ]]; then
   echo "could not add label: 'fast-track' not found" >&2
   exit 1
 fi
+# merge.py asks where the head branch lives before it touches the PR. Real gh
+# answers `false` for a pull request from this repository, so that is the
+# default; GH_CROSS_REPO lets a case answer `true`, or something that is neither.
+if [[ "$1 $2" == "pr view" ]]; then
+  printf '%s\n' "${GH_CROSS_REPO-false}"
+fi
 exit 0
 SH
 chmod +x "$stub_bin/gh"
@@ -141,6 +147,40 @@ if [[ "$status" -eq 0 && "$(line_of "pr merge 42 --squash")" -gt 0 ]] \
   ok "$name"
 else
   bad "$name (exit $status, out: $out, log: $(cat "$log"))"
+fi
+
+# --- 5 ------------------------------------------------------------------------
+# THE CASE THAT MATTERS ONCE THE REPOSITORY IS PUBLIC. A fork's pull request can
+# carry a board branch's exact name, and a PR number carries no record of where
+# it came from. So merge.py establishes the origin itself, and a fork is refused
+# before ANY call that changes the PR -- the label included: copying the
+# operator's fast-track label onto a stranger's pull request is a change too.
+name="a pull request from a fork is refused before it is labelled or merged"
+GH_CROSS_REPO=true run_merge fast "" '{"identifier":"PRA-5","labels":{"nodes":[{"name":"fast-track"}]}}'
+reason="$(json_field reason 2>/dev/null || true)"
+if [[ "$status" -eq 4 ]] \
+   && ! grep -q '|pr edit' "$log" && ! grep -q '|pr merge' "$log" \
+   && [[ "$(json_field merged)" == false && "$(json_field fast_tracked)" == false \
+         && "$reason" == *"another repository"* ]]; then
+  ok "$name"
+else
+  bad "$name (exit $status, out: $out, log: $(cat "$log"))"
+fi
+
+# --- 6 ------------------------------------------------------------------------
+# An origin nobody established is not "this repository". A failed `gh pr view`
+# and an answer that is neither true nor false both refuse: the cost of guessing
+# wrong is a stranger's code on main.
+name="an origin that cannot be established is refused, not assumed"
+run_merge fast "pr view" '{"identifier":"PRA-6","labels":{"nodes":[]}}'
+view_failed_status="$status"; view_failed_log="$(cat "$log")"
+GH_CROSS_REPO="" run_merge fast "" '{"identifier":"PRA-6","labels":{"nodes":[]}}'
+if [[ "$view_failed_status" -eq 4 && "$status" -eq 4 ]] \
+   && ! grep -q '|pr merge' <<<"$view_failed_log" && ! grep -q '|pr merge' "$log" \
+   && [[ "$(json_field merged)" == false ]]; then
+  ok "$name"
+else
+  bad "$name (failed view: exit $view_failed_status; empty answer: exit $status, out: $out)"
 fi
 
 if [[ "$failures" -gt 0 ]]; then

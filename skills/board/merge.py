@@ -21,6 +21,9 @@ Settings come from config.sh: REPO and FAST_TRACK_LABEL.
             route.py refuses, or config.sh failing to load. No JSON on stdout.
     exit 3  NOT merged: `gh pr merge` itself failed. The label may or may not
             be on the PR; fast_tracked says. reason quotes gh's stderr.
+    exit 4  NOT merged, and nothing was done to the PR: its head branch is not
+            in this repository -- it comes from a fork -- or where it comes
+            from could not be established. The label is never copied first.
 
 Why this exists. A target may queue deploys: a merge deploys on a schedule,
 unless the merged pull request carries the GitHub label that
@@ -55,6 +58,7 @@ EXIT_MERGED = 0
 EXIT_LABEL_FAILED = 1
 EXIT_USAGE = 2
 EXIT_MERGE_FAILED = 3
+EXIT_NOT_THIS_REPOSITORY = 4
 
 # gh talks to the network. A hung call must end as a failed call the tick can
 # report, not as a tick that never finishes.
@@ -139,6 +143,43 @@ def _gh(args: list[str], repo: str) -> tuple[bool, str]:
     return out.returncode == 0, out.stderr.strip()
 
 
+def head_origin(pr: int, repo: str) -> tuple[str, str]:
+    """Where PR #pr's head branch lives: ("this", ""), ("fork", ""), or ("unknown", why).
+
+    THE MERGE CHECKS THIS ITSELF, and does not trust its caller to have. Found on
+    2026-09-16, auditing the repository before making it public: reconcile.py
+    found a card's pull request by branch NAME, and a fork's pull request whose
+    branch has the same name matched exactly like the board's own. The board
+    would then have reviewed and merged a stranger's diff -- and every
+    installation fast-forwards to `main` on a timer, so that diff would run on
+    the operator's machine minutes later. reconcile.py now drops those rows. This
+    is the second lock, on the step that cannot be undone: a merge is reached
+    with a PR number, and a number carries no record of where it came from.
+
+    Only an explicit `false` from GitHub is "this". Anything else -- `true`, a
+    failed call, an answer that is neither -- refuses, because the cost of
+    guessing wrong is a stranger's code on `main`.
+    """
+    try:
+        out = subprocess.run(
+            ["gh", "pr", "view", str(pr), "--json", "isCrossRepository",
+             "--jq", ".isCrossRepository"],
+            cwd=repo, capture_output=True, text=True, timeout=GH_TIMEOUT_SECONDS,
+        )
+    except subprocess.TimeoutExpired:
+        return "unknown", f"gh pr view timed out after {GH_TIMEOUT_SECONDS}s"
+    except OSError as exc:
+        return "unknown", f"could not run gh pr view: {exc}"
+    if out.returncode != 0:
+        return "unknown", f"gh pr view failed: {out.stderr.strip()}"
+    answer = out.stdout.strip()
+    if answer == "false":
+        return "this", ""
+    if answer == "true":
+        return "fork", ""
+    return "unknown", f"gh pr view answered {answer!r} for isCrossRepository, not true or false"
+
+
 def _report(pr: int, merged: bool, fast_tracked: bool, label: str, reason: str, code: int) -> NoReturn:
     print(json.dumps({
         "pr": pr, "merged": merged, "fast_tracked": fast_tracked,
@@ -152,6 +193,20 @@ def main(argv: list[str]) -> NoReturn:
     card_labels = _read_card_labels(sys.stdin.read())
     config = _load_config()
     repo, label = config["REPO"], config["FAST_TRACK_LABEL"]
+
+    # Before the label, not only before the merge: copying the operator's
+    # fast-track label onto a stranger's pull request is a change to it too.
+    origin, why = head_origin(pr, repo)
+    if origin == "fork":
+        _report(pr, False, False, label,
+                f"Did not merge PR #{pr}: its head branch is in another repository, "
+                f"not this one. Only a pull request from this repository is ever a card's.",
+                EXIT_NOT_THIS_REPOSITORY)
+    if origin != "this":
+        _report(pr, False, False, label,
+                f"Did not merge PR #{pr}: could not establish that its head branch is in "
+                f"this repository, and merging on a guess could put a fork's code on main: {why}",
+                EXIT_NOT_THIS_REPOSITORY)
 
     fast_tracked = False
     if should_copy_label(label, card_labels):

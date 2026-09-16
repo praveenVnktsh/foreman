@@ -1767,7 +1767,7 @@ skipped: the pull request merges without it, and the target queues a deploy the
 operator asked to hurry.
 
 `merge.py` prints one JSON object (`pr`, `merged`, `fast_tracked`, `label`,
-`reason`) and exits one of four ways:
+`reason`) and exits one of five ways:
 
 - **exit 0** — merged. `fast_tracked` says whether the label went on first.
 - **exit 1** — **not merged**, because the card carries the label and copying it
@@ -1779,6 +1779,16 @@ operator asked to hurry.
   the operator asked to hurry.
 - **exit 3** — `gh pr merge` itself failed. Quote `reason` on the card.
   `fast_tracked` says whether the label is already on the pull request.
+- **exit 4** — **not merged, and the pull request was not touched**: its head
+  branch is in another repository (a fork), or where it lives could not be
+  established. **Never merge it any other way**, and never look for a way around
+  this. A card's pull request is only ever one this board opened from its own
+  repository; a fork's pull request can carry the very same branch name, and
+  merging one would put a stranger's code on `main`, which every installation
+  then pulls. Leave the card in `In Review`, charge no attempt, add
+  `board-failed`, and put `reason` on the card and in the tick's report so the
+  operator looks. If `reason` says the origin could not be established, that
+  can be a transient `gh` failure; the operator decides, not the tick.
 - **exit 2** — called wrong or the card JSON was unreadable, and no JSON was
   printed. Merge nothing. Fix the call and run it again.
 

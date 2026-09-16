@@ -94,6 +94,7 @@ status, _, conclusion = check.partition(":")
 open(path, "w").write(json.dumps([{
     "number": 7,
     "state": "OPEN",
+    "isCrossRepository": False,
     "headRefOid": head,
     "mergeStateStatus": "CLEAN",
     "url": "https://example.invalid/pr/7",

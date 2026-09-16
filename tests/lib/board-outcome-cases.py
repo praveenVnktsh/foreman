@@ -488,7 +488,7 @@ check(ci("success")["rerunnable"] is False, "a green `main` is never re-run")
 
 print("==> an unreadable diff still reports everything that is not about the diff")
 World(
-    prs=[{"number": 5, "state": "OPEN", "isDraft": True,
+    prs=[{"number": 5, "state": "OPEN", "isDraft": True, "isCrossRepository": False,
           "mergeStateStatus": "BEHIND", "statusCheckRollup": []}],
     diff=(1, ""),
 ).install()
@@ -496,6 +496,44 @@ pr = reconcile.pr_for("PRA-1")
 check(pr["risk"] == "unknown", "the diff is unknown", json.dumps(pr.get("risk")))
 check(pr["needs_update"] is True and pr["is_draft"] is True,
       "needs_update and is_draft survive the unreadable path", json.dumps(pr))
+
+print("==> a fork's pull request is never the card's, even on the card's exact branch name")
+# `--head` matches a branch by NAME -- gh: '"<owner>:<branch>" syntax not
+# supported' -- so a fork's pull request on the same name comes back from the
+# same call as the board's own. Found on 2026-09-16 before making the
+# repository public: `newest()` picked the fork's, because it was opened later,
+# and the board would have reviewed and merged a stranger's diff onto the `main`
+# every installation pulls. The fork's row is the NEWER number here on purpose:
+# that is the ordering an attacker chooses, and the one `newest()` rewards.
+World(prs=[
+    {"number": 5, "state": "OPEN", "isCrossRepository": False, "statusCheckRollup": []},
+    {"number": 9, "state": "OPEN", "isCrossRepository": True, "statusCheckRollup": []},
+]).install()
+pr = reconcile.pr_for("PRA-1")
+check(pr is not None and pr.get("number") == 5,
+      "the board's own #5 is the card's, not the newer fork #9",
+      json.dumps(pr and pr.get("number")))
+
+World(prs=[
+    {"number": 9, "state": "OPEN", "isCrossRepository": True, "statusCheckRollup": []},
+]).install()
+check(reconcile.pr_for("PRA-1") is None,
+      "a card whose only matching pull request is a fork's has no pull request")
+
+# A row that does not say where it came from is dropped, not trusted: pr_for
+# returns the pull request step 4 may merge autonomously.
+World(prs=[
+    {"number": 5, "state": "OPEN", "statusCheckRollup": []},
+]).install()
+check(reconcile.pr_for("PRA-1") is None,
+      "a row with no isCrossRepository is not assumed to be this repository's")
+
+w = World(prs=[]).install()
+reconcile.pr_for("PRA-1")
+asked = [c for c in w.calls if c[:3] == ["gh", "pr", "list"]]
+fields = asked[0][asked[0].index("--json") + 1] if asked and "--json" in asked[0] else ""
+check("isCrossRepository" in fields.split(","),
+      "pr_for asks gh for isCrossRepository, so the filter has something to read", fields)
 
 print("==> pr_for's --head branch carries this instance's namespace, not just the ticket")
 # Reverting `return f"{BOARD_NAME_PREFIX}/{ticket}"` back to
