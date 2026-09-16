@@ -18,6 +18,10 @@
   It plans, builds, reviews and merges the cards you pick up, on your own machine, while nobody is watching.
 </p>
 
+<p align="center">
+  <img src="docs/assets/board.png" alt="A Linear board run by foreman: cards in In Progress, In Review, Needs Human and Done, each labelled with its project, installation and pull request" width="100%" />
+</p>
+
 ---
 
 ## How it works
