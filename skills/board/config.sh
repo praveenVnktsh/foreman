@@ -170,21 +170,50 @@ else
 fi
 export FOREMAN_HOME FOREMAN_ROOT INSTALLATION HARNESS IS_DEFAULT LEGACY_NAMES NAME_SCOPE WORKTREE_SCOPE
 
-# The adapter for this installation's harness: Claude Code, Codex or OpenCode.
-# Every script that ran `claude` itself runs this instead, so one file knows
-# how a CLI spells its flags. The five verbs are in
-# docs/specs/2026-09-14-installations-per-harness-design.md.
-#
-# Refused HERE, where the installation is read, and not at the spawn. An
-# adapter that is missing or not executable otherwise surfaces inside
-# dispatch.sh, after the worktree is cut and the branch pushed, once for every
-# card the board takes.
-HARNESS_SH="$_foreman_install_root/skills/board/harness/$HARNESS.sh"
-if [[ ! -x "$HARNESS_SH" ]]; then
-  printf 'foreman: harness %s has no executable adapter at %s\n' "$HARNESS" "$HARNESS_SH" >&2
+# WHICH HARNESSES THIS INSTALLATION MAY SPAWN ON. Its own harness, plus any
+# named as a prefix in a stage candidate (`opencode:foundry/gpt-5.6-sol`), so a
+# fallback across CLIs is what puts a second harness in the set. Computed here
+# and exported, because registry.sh -- the reader every script uses -- merges
+# exactly this set.
+_foreman_harnesses="$HARNESS"
+for _stage in TICK PLAN BUILD REVIEW; do
+  eval "_cands=\"\${${_stage}_MODELS-}\""
+  while IFS= read -r _cand; do
+    case "$_cand" in
+      claude:*|codex:*|opencode:*) _h="${_cand%%:*}" ;;
+      *) continue ;;
+    esac
+    case " $_foreman_harnesses " in
+      *" $_h "*) ;;
+      *) _foreman_harnesses="$_foreman_harnesses $_h" ;;
+    esac
+  done <<< "$_cands"
+done
+unset _stage _cands _cand _h
+
+# The installation's own adapter, refused HERE and not at the spawn: one that
+# is missing or not executable otherwise surfaces inside dispatch.sh, after the
+# worktree is cut and the branch pushed, once for every card the board takes.
+_foreman_default_adapter="$_foreman_install_root/skills/board/harness/$HARNESS.sh"
+if [[ ! -x "$_foreman_default_adapter" ]]; then
+  printf 'foreman: harness %s has no executable adapter at %s\n' "$HARNESS" "$_foreman_default_adapter" >&2
   if [[ $- == *i* ]]; then return 1; else exit 1; fi
 fi
-export HARNESS_SH
+
+# THE READER EVERY SCRIPT USES. registry.sh merges `list` and routes `stop`
+# and `transcript` to the harness that owns an agent, so a script that used to
+# see one harness now sees every harness this installation can spawn on. The
+# harness-shaped verbs -- spawn, resume, check, skills-dir, skill-prompt --
+# fall through to the default adapter. See its header.
+HARNESS_SH="$_foreman_install_root/skills/board/harness/registry.sh"
+if [[ ! -x "$HARNESS_SH" ]]; then
+  printf 'foreman: no executable agent registry at %s\n' "$HARNESS_SH" >&2
+  if [[ $- == *i* ]]; then return 1; else exit 1; fi
+fi
+FOREMAN_DEFAULT_HARNESS="$HARNESS"
+FOREMAN_HARNESSES="$_foreman_harnesses"
+export HARNESS_SH FOREMAN_DEFAULT_HARNESS FOREMAN_HARNESSES
+unset _foreman_harnesses _foreman_default_adapter
 
 # Which board this is, where its repository is, and where its runtime lives.
 #

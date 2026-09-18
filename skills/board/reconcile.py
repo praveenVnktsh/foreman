@@ -46,6 +46,7 @@ def _load_config() -> dict[str, str]:
         "DEPLOY_WORKFLOW", "DEPLOY_STEP", "DEPLOY_SELECTION_STEP", "CI_WORKFLOW",
         "INSTANCE",
         "FOREMAN_HOME", "HOST_SLOT_STALE_MINUTES", "INSTALLATION", "HARNESS_SH",
+        "FOREMAN_DEFAULT_HARNESS", "FOREMAN_HARNESSES",
         "BOARD_NAME_PREFIX", "BOARD_WORKTREE_PREFIX",
         "CLEANUP_EVERY_DAYS", "MAX_CONCURRENT", "REVIEWERS_PER_ROUND",
     )
@@ -66,6 +67,14 @@ def _load_config() -> dict[str, str]:
 
 
 _CFG = _load_config()
+# registry.sh, which HARNESS_SH points at, reads the harness set from the
+# environment. This process was handed only config.sh's keys, so put the two it
+# needs into the environment its own subprocesses inherit. Without this a
+# `"$HARNESS_SH" list` here fails as "no agent registry", which reads as an
+# unreadable registry rather than a missing variable.
+for _key in ("FOREMAN_DEFAULT_HARNESS", "FOREMAN_HARNESSES"):
+    if _CFG.get(_key):
+        os.environ.setdefault(_key, _CFG[_key])
 REPO = _CFG["REPO"]
 INSTANCE = _CFG["INSTANCE"]
 BOARD_HOME = _CFG["BOARD_HOME"]
