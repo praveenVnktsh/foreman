@@ -1,5 +1,12 @@
 # Several installations on one machine, each on its own harness
 
+> **Superseded, in part.** The loop is now designed around **one** installation
+> serving every board, dispatching each stage to a `harness:model` from its
+> fallback tiers. Several installations are still supported, and everything
+> below about the adapter contract, names and the host ceiling still holds, but
+> routing by `foreman:<name>` label is no longer the shape the loop assumes. See
+> [2026-09-18-single-tick-dispatch-design.md](2026-09-18-single-tick-dispatch-design.md).
+
 ## Goal
 
 One machine runs several foreman installations at once. Each installation runs
