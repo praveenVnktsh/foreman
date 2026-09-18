@@ -1,0 +1,35 @@
+name: Release
+
+# Cut a GitHub Release of main's head on every push to main, so a merge deploys
+# unless its commit opts out. Installations follow the latest release
+# (bin/self-update.sh polls it), so this job is the only thing that deploys.
+#
+# RUNS ON GITHUB-HOSTED RUNNERS, NEVER ON AN OPERATOR'S MACHINE. The trigger is
+# `push`, not `pull_request`, so no contributor's branch is ever in scope -- the
+# same reason CI does not run a self-hosted runner on this public repository.
+#
+# A COMMIT OPTS OUT with `[skip release]` or a `Release: skip` trailer in its
+# message (a squash merge takes the PR body). bin/release.sh checks the head
+# commit and exits 0 without cutting, which this job reads as a no-op.
+
+on:
+  push:
+    branches: [main]
+
+# contents: write is what lets the job create the tag and the release object.
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # generate-notes diffs against the previous release, so every tag must
+          # be present in the clone.
+          fetch-depth: 0
+      - name: Cut a release of main's head
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: bin/release.sh

@@ -80,8 +80,8 @@ the quality work that review no longer blocks on.
   dispatch a card itself.
 - **Preflight** refuses to dispatch when the machine cannot build, without
   blaming the card.
-- **Release-gated updates.** An installation tracks `origin/release`, so a merge
-  to `main` is staging; `bin/release.sh` promotes what deploys.
+- **Release-gated updates.** A merge to `main` cuts a GitHub Release — unless
+  the commit says `Release: skip` — and installations follow the latest one.
 
 ## Quick start
 

@@ -207,23 +207,41 @@ watchdog `install-service.sh` installs:
 
 ## Releasing
 
-By default an installation tracks `origin/main`, so a merge to main reaches it
-on the next fire: merge and deploy are the same act. An installation can track
-a release branch instead:
+An installation follows the **latest GitHub Release**. `.github/workflows/release.yml`
+cuts one on every push to `main`, and `bin/self-update.sh` polls the latest and
+fast-forwards the clone to its tag. So a merge deploys — unless the commit opts
+out. This needs `gh` installed and authenticated for the user the timer runs as;
+a gh that cannot answer is a refusal, not a silent no-op.
 
-    ~/.foreman/claude/install/bin/install-self-update.sh --ref origin/release
+The workflow runs on GitHub-hosted runners, never on your machine, and only on a
+push to `main` — never on a pull request — so no contributor's branch is in scope.
 
-That rewrites the unit with `FOREMAN_UPDATE_REF=origin/release`. The clone
-stays on its own branch and fast-forwards to the release tip, so a merge to
-main deploys nothing to a pinned installation. Do this on every installation
-you want staged.
+### Opting a commit out
 
-A release is promoted from any clone with push access:
+A commit is not released when its message carries `[skip release]` or a
+`Release: skip` trailer. A squash merge takes the pull request body as the commit
+body, so `Release: skip` in the PR description is enough. `bin/release.sh` checks
+the head commit and exits 0 without cutting, and the Action is a no-op for it.
 
-    bin/release.sh --dry-run      # say what it would promote, change nothing
-    bin/release.sh                # fast-forward release to origin/main, push
+### Cutting one by hand
 
-The push is a fast-forward. A release branch that has diverged from main is
-refused, never rewritten. The first run creates the branch; after that it
-advances. `bin/install-self-update.sh` writes `origin/main` when given no
-`--ref`, so an installation left alone keeps deploying on every merge.
+Any clone with push access can cut a release, and `--force` overrides a skip:
+
+    bin/release.sh --dry-run         # say what it would cut, change nothing
+    bin/release.sh                   # tag origin/main and publish a release
+    bin/release.sh --version v1.4.0  # name the tag (default vYYYY.MM.DD)
+    bin/release.sh --force           # ignore a [skip release] marker
+
+`gh release create <tag> --target <main sha> --generate-notes` makes the tag and
+the release in one act. A tag that already exists is refused — a release is never
+rewritten.
+
+### Following a git ref instead
+
+A development machine can track a ref rather than releases:
+
+    ~/.foreman/claude/install/bin/install-self-update.sh --ref origin/main
+
+That writes `FOREMAN_UPDATE_REF=origin/main` into the unit. Running
+`install-self-update.sh` with no `--ref` leaves the installation following
+releases.

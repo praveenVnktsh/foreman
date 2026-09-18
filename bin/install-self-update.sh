@@ -20,7 +20,7 @@ set -euo pipefail
 die() { printf 'install-self-update: %s\n' "$*" >&2; exit 1; }
 
 DRY=""
-UPDATE_REF="origin/main"
+UPDATE_REF=""
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --dry-run) DRY=1; shift ;;
@@ -29,16 +29,29 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-# The same shape and validation bin/self-update.sh applies at fire time, so a
-# typo is refused here as well as there.
-case "$UPDATE_REF" in
-  origin/*) ;;
-  *) die "--ref must look like origin/<branch>, got '$UPDATE_REF'" ;;
-esac
-case "${UPDATE_REF#origin/}" in
-  ""|*" "*|*".."*|*"~"*|*"^"*|*":"*|*"?"*|*"*"*|*"["*|*"\\"*|*"@"*)
-    die "--ref names an invalid branch: '$UPDATE_REF'" ;;
-esac
+# By default the timer follows GitHub Releases: bin/self-update.sh polls the
+# latest. --ref pins it to a git ref instead, and the same validation
+# bin/self-update.sh applies at fire time runs here, so a typo is refused now.
+if [[ -n "$UPDATE_REF" ]]; then
+  case "$UPDATE_REF" in
+    origin/*) ;;
+    *) die "--ref must look like origin/<branch>, got '$UPDATE_REF'" ;;
+  esac
+  case "${UPDATE_REF#origin/}" in
+    ""|*" "*|*".."*|*"~"*|*"^"*|*":"*|*"?"*|*"*"*|*"["*|*"\\"*|*"@"*)
+      die "--ref names an invalid branch: '$UPDATE_REF'" ;;
+  esac
+fi
+
+# The unit carries FOREMAN_UPDATE_REF only when the operator pinned one; with
+# none, the timer follows releases. Shown in the closing line.
+if [[ -n "$UPDATE_REF" ]]; then
+  REF_ENV="Environment=FOREMAN_UPDATE_REF=$UPDATE_REF"
+  TRACKS="$UPDATE_REF"
+else
+  REF_ENV=""
+  TRACKS="releases"
+fi
 
 [[ "$(uname -s)" == "Linux" ]] || die "systemd units are Linux-only; expected a Linux host. On macOS use launchd or cron to run bin/self-update.sh"
 command -v systemctl >/dev/null || die "systemctl not found; expected a systemd host"
@@ -117,7 +130,7 @@ KillMode=process
 TimeoutStartSec=10min
 WorkingDirectory=$INSTALL_ROOT
 Environment=FOREMAN_HOME=$FOREMAN_HOME
-Environment=FOREMAN_UPDATE_REF=$UPDATE_REF
+$REF_ENV
 # systemd gives a user unit a minimal PATH. supervise.sh runs the harness CLI,
 # which usually lives under ~/.local/bin; without it the restart finds nothing
 # to run and the board stops, with a log full of "command not found".
@@ -179,5 +192,5 @@ if ! loginctl show-user "$(whoami)" 2>/dev/null | grep -q 'Linger=yes'; then
   printf 'install-self-update: enable it with: sudo loginctl enable-linger %s\n' "$(whoami)"
 fi
 
-printf 'install-self-update: installed %s tracking %s. Next fire: %s\n' "$UNIT_NAME" "$UPDATE_REF" \
+printf 'install-self-update: installed %s tracking %s. Next fire: %s\n' "$UNIT_NAME" "$TRACKS" \
   "$(systemctl --user list-timers "$UNIT_NAME.timer" --no-pager --no-legend 2>/dev/null | head -1 || echo unknown)"
