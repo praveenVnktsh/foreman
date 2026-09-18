@@ -43,6 +43,7 @@ ln -s "$board_dir/withlock.py" "$shim/withlock.py"
 # dispatch.sh refuses when it cannot count the machine's slots; the counter is
 # reconcile.py's, so the shim links it.
 ln -s "$board_dir/reconcile.py" "$shim/reconcile.py"
+ln -s "$board_dir/fallback.py" "$shim/fallback.py"
 # The permission flag this file is about is now spelled by the harness adapter,
 # not by dispatch.sh, so the adapter has to exist under this root. Linked as a
 # whole directory, so a fourth harness needs no second edit here.

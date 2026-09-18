@@ -108,6 +108,7 @@ ln -s "$board_dir/withlock.py" "$shim_root/skills/board/withlock.py"
 # dispatch.sh refuses when it cannot count the machine's slots, so the shim
 # needs the counter; a shim without it dies at the gate before the DRY RUN line.
 ln -s "$board_dir/reconcile.py" "$shim_root/skills/board/reconcile.py"
+ln -s "$board_dir/fallback.py" "$shim_root/skills/board/fallback.py"
 ln -s "$board_dir/harness" "$shim_root/skills/board/harness"
 cat > "$shim_root/skills/board/preflight.py" <<'PY'
 #!/usr/bin/env python3

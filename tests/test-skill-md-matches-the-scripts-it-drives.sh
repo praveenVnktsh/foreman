@@ -58,7 +58,7 @@ git_q() {
 shim_root="$work/install"
 mkdir -p "$shim_root/bin" "$shim_root/skills/board"
 shim="$shim_root/skills/board"
-for f in config.sh dispatch.sh withlock.py brief.py plancomments.py reconcile.py; do
+for f in config.sh dispatch.sh withlock.py brief.py plancomments.py reconcile.py fallback.py; do
   ln -s "$board_dir/$f" "$shim/$f"
 done
 # installation.py is read by config.sh before anything else, and load-pairs.sh

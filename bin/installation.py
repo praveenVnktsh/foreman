@@ -8,7 +8,9 @@
 
 Emits NUL-separated KEY, VALUE pairs on stdout: INSTALLATION, HARNESS,
 IS_DEFAULT, LEGACY_NAMES, FOREMAN_HOME, FOREMAN_ROOT, TICK_MODEL, PLAN_MODEL,
-BUILD_MODEL, REVIEW_MODEL. Consumers count fields to detect a failed load, so
+BUILD_MODEL, REVIEW_MODEL, FALLBACK_TIERS, FALLBACK_COOLDOWN_MINUTES,
+PLAN_FLOOR, BUILD_FLOOR, REVIEW_FLOOR. Consumers count fields to detect a
+failed load, so
 EVERY key is always emitted -- this file follows bin/boards.py in structure,
 wire format and refusal style, and boards.py's docstring gives the reasoning
 behind all three.
@@ -48,7 +50,8 @@ CLAUDE = "claude"
 
 MODELS_TABLE = "models"
 NAMES_KEY = "names"
-TOP_KEYS = {"harness", "default", NAMES_KEY, MODELS_TABLE}
+FALLBACK_TABLE = "fallback"
+TOP_KEYS = {"harness", "default", NAMES_KEY, MODELS_TABLE, FALLBACK_TABLE}
 
 # The two shapes an installation's names may take. skills/board/config.sh
 # composes both from LEGACY_NAMES and spells each one out.
@@ -72,6 +75,29 @@ MODEL_FLAGS = {f"--model-{stage}": stage for stage in STAGES}
 # What config.sh defaulted to before an installation could say. Claude keeps
 # them so an un-migrated home spends exactly what it spent yesterday.
 CLAUDE_MODELS = {"tick": "fable", "plan": "fable", "build": "opus", "review": "opus"}
+
+# RATE-LIMIT FALLBACK. On 2026-09-16 PLAN_MODEL=fable was rate-limited for 11
+# hours, every card needing a plan voided on every pass, and nothing moved.
+# skills/board/fallback.py walks a stage DOWN this list, strongest first, while
+# a model is rate-limited, and never past the floor the installation declares
+# for that stage. This file only declares the list; fallback.py owns the walk.
+TIERS_KEY = "tiers"
+COOLDOWN_KEY = "cooldown_minutes"
+FLOOR_TABLE = "floor"
+FALLBACK_KEYS = {TIERS_KEY, COOLDOWN_KEY, FLOOR_TABLE}
+
+# The stages that fall back. Not the tick: skills/board/supervise.sh starts it
+# on TICK_MODEL directly and no dispatch ever resolves it, so a tick floor
+# would be a declared protection that nothing reads.
+FALLBACK_STAGES = ("plan", "build", "review")
+
+# Claude's own models, strongest first. Codex and OpenCode get no list: their
+# model names are the operator's to type, and a guessed order would downgrade
+# a stage onto a model that installation may not be able to run at all.
+CLAUDE_TIERS = ("fable", "opus", "sonnet", "haiku")
+
+# How long a rate-limited model is skipped before a stage tries it again.
+DEFAULT_COOLDOWN_MINUTES = 60
 
 # The board-name rule, and it is here for the board-name failure: an
 # installation name is pasted into worktree globs, agent names and a Linear
@@ -235,8 +261,102 @@ def resolve_models(where: str, harness: str, given: dict) -> dict:
     return out
 
 
-def parse(path: str) -> tuple[str, bool, bool, dict]:
-    """One installation.toml as (harness, is_default, legacy_names, models)."""
+def resolve_tiers(where: str, harness: str, given: object) -> list[str]:
+    """The fallback tiers, defaulted per harness. An empty list turns fallback
+    off, and declaring `tiers = []` is how a Claude installation says so."""
+    if given is None:
+        return list(CLAUDE_TIERS) if harness == CLAUDE else []
+    key = f"{FALLBACK_TABLE}.{TIERS_KEY}"
+    if not isinstance(given, list):
+        die(f"{where}: {key} must be a list of model names, strongest first")
+    for tier in given:
+        if not isinstance(tier, str) or not tier.strip():
+            die(f"{where}: {key} must hold non-empty model names; got {tier!r}")
+        # The list reaches bash as ONE space-separated value, so a name holding
+        # whitespace would read back as two tiers. A NUL would desynchronize
+        # the KEY, VALUE stream.
+        if any(ch.isspace() or ch == "\0" for ch in tier):
+            die(f"{where}: {key} entry {tier!r} may not contain whitespace or a NUL byte")
+        # fallback.py names its rate-limit stamp after the model and refuses a
+        # name that could leave its directory. A tier it refuses to mark is a
+        # tier that never falls back, and that would surface only mid-outage.
+        if "/" in tier or tier.startswith("."):
+            die(f"{where}: {key} entry {tier!r} may not contain '/' or start with '.'")
+    duplicated = sorted({tier for tier in given if given.count(tier) > 1})
+    if duplicated:
+        die(f"{where}: {key} names {', '.join(duplicated)} more than once; "
+            "the list is an order, and a repeat makes the order ambiguous")
+    return list(given)
+
+
+def resolve_cooldown(where: str, given: object) -> int:
+    if given is None:
+        return DEFAULT_COOLDOWN_MINUTES
+    # `cooldown_minutes = true` loads as an int in Python's eyes. It is a typo.
+    if isinstance(given, bool) or not isinstance(given, int) or given <= 0:
+        die(f"{where}: {FALLBACK_TABLE}.{COOLDOWN_KEY} must be a positive "
+            f"integer number of minutes; got {given!r}")
+    return given
+
+
+def resolve_floors(where: str, tiers: list[str], models: dict, given: object) -> dict:
+    """Each stage's floor, or "" where the stage may fall to the list's end.
+
+    A floor outside the tiers is refused: fallback.py stops at the floor, so a
+    floor it can never reach is a floor that does not exist, and the operator
+    who wrote it believes the stage is protected. A floor ABOVE the stage's own
+    model is refused for the same reason -- the walk only goes down, so it
+    would never meet it.
+    """
+    key = f"{FALLBACK_TABLE}.{FLOOR_TABLE}"
+    if given is None:
+        given = {}
+    if not isinstance(given, dict):
+        die(f"{where}: {key} must be a table")
+    unknown = sorted(set(given) - set(FALLBACK_STAGES))
+    if unknown:
+        die(f"{where}: unknown key(s) in {key}: {', '.join(unknown)}; "
+            f"expected any of {', '.join(FALLBACK_STAGES)}")
+    out = {}
+    for stage in FALLBACK_STAGES:
+        floor = given.get(stage)
+        if floor is None:
+            out[stage] = ""
+            continue
+        if not isinstance(floor, str):
+            die(f"{where}: {key}.{stage} must be a string")
+        if floor not in tiers:
+            listed = ", ".join(tiers) if tiers else "none, so fallback is off"
+            die(f"{where}: {key}.{stage} is {floor!r}, which is not one of "
+                f"{FALLBACK_TABLE}.{TIERS_KEY} ({listed})")
+        first = models[stage]
+        if first in tiers and tiers.index(floor) < tiers.index(first):
+            die(f"{where}: {key}.{stage} is {floor!r}, above the {stage} model "
+                f"{first!r}; a stage only falls back down, so it would never reach it")
+        out[stage] = floor
+    return out
+
+
+def resolve_fallback(where: str, harness: str, models: dict, table: object) -> dict:
+    """The [fallback] table, defaulted: {"tiers", "cooldown", "floors"}."""
+    if table is None:
+        table = {}
+    if not isinstance(table, dict):
+        die(f"{where}: {FALLBACK_TABLE} must be a table")
+    unknown = sorted(set(table) - FALLBACK_KEYS)
+    if unknown:
+        die(f"{where}: unknown key(s) in {FALLBACK_TABLE}: {', '.join(unknown)}")
+    tiers = resolve_tiers(where, harness, table.get(TIERS_KEY))
+    return {
+        "tiers": tiers,
+        "cooldown": resolve_cooldown(where, table.get(COOLDOWN_KEY)),
+        "floors": resolve_floors(where, tiers, models, table.get(FLOOR_TABLE)),
+    }
+
+
+def parse(path: str) -> tuple[str, bool, bool, dict, dict]:
+    """One installation.toml as (harness, is_default, legacy_names, models,
+    fallback)."""
     doc = load_toml(path)
     unknown = sorted(set(doc) - TOP_KEYS)
     if unknown:
@@ -257,8 +377,9 @@ def parse(path: str) -> tuple[str, bool, bool, dict]:
     if unknown:
         die(f"{path}: unknown key(s) in {MODELS_TABLE}: {', '.join(unknown)}")
 
+    models = resolve_models(path, harness, table)
     return (harness, default_flag(path, doc), legacy_names_flag(path, doc),
-            resolve_models(path, harness, table))
+            models, resolve_fallback(path, harness, models, doc.get(FALLBACK_TABLE)))
 
 
 def installations(root: str) -> list[tuple[str, str, bool, bool]]:
@@ -460,13 +581,14 @@ def record(home: str) -> list[str]:
     # card reads "no PR" and is built again on top of its open pull request.
     if not declared(home):
         refuse_undeclared_beside_siblings(home)
-        return fields(CLAUDE, CLAUDE, True, True, home, home, CLAUDE_MODELS)
+        return fields(CLAUDE, CLAUDE, True, True, home, home, CLAUDE_MODELS,
+                      resolve_fallback(home, CLAUDE, CLAUDE_MODELS, None))
 
     path = os.path.join(home, INSTALLATION_FILE)
     name = os.path.basename(home)
     validate_name(home, name)
     root = foreman_root(home)
-    harness, declares_default, legacy_names, models = parse(path)
+    harness, declares_default, legacy_names, models, fallback = parse(path)
     entries = siblings_checked(root)
     # AN INSTALLATION WITH NO SIBLING IS THE DEFAULT, whatever its file says.
     # One installation on the machine is the common case, and it must own
@@ -477,14 +599,16 @@ def record(home: str) -> list[str]:
     # unlabelled card as FOREIGN and exited 0, and a board installed exactly
     # as the README says never dispatched anything and never said why.
     is_default = declares_default or len(entries) == 1
-    return fields(name, harness, is_default, legacy_names, home, root, models)
+    return fields(name, harness, is_default, legacy_names, home, root, models, fallback)
 
 
 def fields(name: str, harness: str, is_default: bool, legacy_names: bool,
-           home: str, root: str, models: dict) -> list[str]:
-    # IS_DEFAULT and LEGACY_NAMES are the two keys whose empty value is
+           home: str, root: str, models: dict, fallback: dict) -> list[str]:
+    # IS_DEFAULT and LEGACY_NAMES are two keys whose empty value is
     # meaningful: config.sh tests them with `-n`, so "" is false and "1" is
-    # true. Every other key here refuses to be empty.
+    # true. FALLBACK_TIERS "" means fallback is off, and a *_FLOOR "" means
+    # the stage may fall to the bottom of the tiers. Every other key here
+    # refuses to be empty.
     return [
         "INSTALLATION", name,
         "HARNESS", harness,
@@ -496,6 +620,11 @@ def fields(name: str, harness: str, is_default: bool, legacy_names: bool,
         "PLAN_MODEL", models["plan"],
         "BUILD_MODEL", models["build"],
         "REVIEW_MODEL", models["review"],
+        "FALLBACK_TIERS", " ".join(fallback["tiers"]),
+        "FALLBACK_COOLDOWN_MINUTES", str(fallback["cooldown"]),
+        "PLAN_FLOOR", fallback["floors"]["plan"],
+        "BUILD_FLOOR", fallback["floors"]["build"],
+        "REVIEW_FLOOR", fallback["floors"]["review"],
     ]
 
 

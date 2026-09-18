@@ -394,6 +394,7 @@ ln -s "$board_dir/withlock.py" "$shim/withlock.py"
 # dispatch.sh refuses when it cannot count the machine's slots, so the shim
 # needs the counter; without it every dispatch here died at the gate.
 ln -s "$board_dir/reconcile.py" "$shim/reconcile.py"
+ln -s "$board_dir/fallback.py" "$shim/fallback.py"
 # config.sh checks that the adapter for this installation's harness is
 # executable under THIS root and refuses there rather than at the spawn. Linked
 # as a whole directory, so a fourth harness needs no second edit here.
