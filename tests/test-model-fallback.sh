@@ -23,8 +23,9 @@ recorded() { # <model>
     "$health" "$1"
 }
 
-# The build stage names two candidates, and the first looks rate-limited.
-export BUILD_MODELS=$'opus\nsonnet'
+# The build stage names two candidates, each with an explicit harness, and the
+# first looks rate-limited.
+export BUILD_MODELS=$'claude:opus\nclaude:sonnet'
 export DISPATCH_FAIL_MODELS="opus"
 
 dispatch_fixture_run --ticket PRA-1 --role build --attempt 1
@@ -36,13 +37,13 @@ else
   dispatch_fixture_show_run_log
 fi
 
-if recorded opus; then
+if recorded claude:opus; then
   ok "the failed candidate is recorded unavailable"
 else
-  bad "opus is not recorded in $health"
+  bad "claude:opus is not recorded in $health"
 fi
-if recorded sonnet; then
-  bad "sonnet was recorded unavailable though it spawned"
+if recorded claude:sonnet; then
+  bad "claude:sonnet was recorded unavailable though it spawned"
 else
   ok "the succeeding candidate is not recorded"
 fi

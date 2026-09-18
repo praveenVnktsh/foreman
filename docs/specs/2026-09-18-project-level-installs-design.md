@@ -60,15 +60,45 @@ Within today's installation model, only the model side moves:
 - The classifier lives in one place, `skills/board/dispatch.sh`, so every
   adapter is judged by the same rule.
 
-## Deferred, deliberately
+## The runner: a candidate names its harness
 
-- Project-scoped installs: removing `route.py`/`queue.py` routing and the
-  default-installation rule.
-- The multi-harness runner and a unified agent registry. Codex and OpenCode
-  share `harness/detached.sh`'s registry; Claude uses its own daemon, and that
-  difference is the whole of the runner's cost.
+A candidate is `<harness>:<model>`, for example `claude:opus` or
+`opencode:foundry/gpt-5.6-sol`. The harness is optional; without it the
+candidate uses the installation's declared `harness`. So an installation can
+fall back across CLIs, not only across models, and the existing single-harness
+config keeps working.
+
+Dispatch resolves harness and model per candidate, resolves that harness's
+adapter at `skills/board/harness/<harness>.sh`, and spawns through it. The
+harness is written into the card's spawn history, so a later reader knows which
+adapter owns an agent.
+
+## The unified registry
+
+Each harness adapter keeps its own registry. Codex and OpenCode share
+`harness/detached.sh`'s `$FOREMAN_HOME/agents`; Claude uses its daemon. For the
+runner, every agent an installation spawns must be visible to one `list`, and
+`stop`/`transcript` must reach the adapter that owns it.
+
+The rule: an agent's record carries its harness, and the readers
+(`reconcile.py`, `sweep.sh`, `supervise.sh`, `watch-agents.py`) ask every
+adapter and merge, keyed by harness. Claude is the cost: its daemon registry is
+not a directory of records, so its adapter also writes a detached-style record
+at spawn. That record is a pointer, not the truth — the daemon still owns
+liveness — and `list` for claude reads it to answer in the common shape.
+
+## Project-scoped installs
+
+One board per installation, named for the project. The card's project decides
+its owner, so `route.py`, `queue.py`'s routing, the `foreman:<name>` label and
+the default-installation rule all stop meaning anything. A tick claims the Todo
+cards of its board's project and no others. The host ceiling keeps counting
+every board of every installation, unchanged.
+
+## Still deferred
+
 - A run-time failure after spawn — the agent dies mid-session. Recording that
   needs the tick's reconcile to read the agent log, not dispatch. It is the
-  harder half of PRA-451 and belongs with the runner.
-- Cross-harness candidates, and review deliberately on a different model than
-  the build.
+  harder half of PRA-451.
+- Review deliberately on a different harness than the build. The candidate
+  syntax already permits it; the policy that chooses it does not exist yet.

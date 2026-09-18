@@ -348,6 +348,21 @@ SESSION=""
 SPAWN_ERROR="$(mktemp "${TMPDIR:-/tmp}/foreman-spawn-error.XXXXXX")" \
   || die "cannot create a temp file for a spawn's error output"
 while IFS= read -r CANDIDATE; do
+  # A candidate is `<harness>:<model>` or a bare `<model>`. The harness prefix
+  # is recognised only for a name that is one of the three harnesses, so a
+  # model that itself carries a colon -- `llama3:8b` -- is a model, not a
+  # harness. Without a prefix the candidate uses this installation's harness.
+  _candidate_harness="$HARNESS"
+  _candidate_model="$CANDIDATE"
+  case "$CANDIDATE" in
+    claude:*|codex:*|opencode:*)
+      _candidate_harness="${CANDIDATE%%:*}"
+      _candidate_model="${CANDIDATE#*:}"
+      ;;
+  esac
+  _candidate_adapter="$SKILL_DIR/harness/$_candidate_harness.sh"
+  [[ -x "$_candidate_adapter" ]] \
+    || die "candidate $CANDIDATE names harness $_candidate_harness, which has no adapter at $_candidate_adapter"
   # An empty candidate is the operator's `PLAN_MODEL=` -- "inherit this
   # session's model" -- and must reach the adapter, not be skipped.
   #
@@ -360,11 +375,12 @@ while IFS= read -r CANDIDATE; do
     "$MODEL_HEALTH" healthy "$CANDIDATE" 2>/dev/null || _health=$?
   fi
   if [[ "$_health" -eq 1 ]]; then continue; fi
-  if SESSION="$("$HARNESS_SH" spawn --name "$NAME" --cwd "$WORKTREE" --model "$CANDIDATE" \
+  if SESSION="$("$_candidate_adapter" spawn --name "$NAME" --cwd "$WORKTREE" --model "$_candidate_model" \
        --prompt-file "$PROMPT_FILE" --add-dir "$BOARD_HOME" \
        --settings "$CARD_AGENT_SETTINGS" "${BUDGET[@]+"${BUDGET[@]}"}" \
        "${SKIP_PERMISSIONS[@]+"${SKIP_PERMISSIONS[@]}"}" 2>"$SPAWN_ERROR")"; then
-    MODEL="$CANDIDATE"
+    MODEL="$_candidate_model"
+    DISPATCH_HARNESS="$_candidate_harness"
     break
   fi
   if _provider_unavailable "$(cat "$SPAWN_ERROR")"; then
@@ -387,6 +403,6 @@ mkdir -p "$(card_dir "$TICKET")"
 # and cleanup among them). reconcile.py's review_verdict reads "the fix was
 # pushed" as the pull request head having moved past the sha the reviewer
 # read, and until this the spawn record kept no memory of what that was.
-card_log "$TICKET" "$(printf '{"action":"spawn","name":"%s","session":"%s","worktree":"%s","role":"%s","attempt":"%s","ref":"%s"}' \
-  "$NAME" "$SESSION" "$WORKTREE" "$ROLE" "${ATTEMPT}${SLOT}" "$REF")"
+card_log "$TICKET" "$(printf '{"action":"spawn","name":"%s","session":"%s","worktree":"%s","role":"%s","attempt":"%s","ref":"%s","harness":"%s"}' \
+  "$NAME" "$SESSION" "$WORKTREE" "$ROLE" "${ATTEMPT}${SLOT}" "$REF" "$DISPATCH_HARNESS")"
 printf '%s\n' "$SESSION"

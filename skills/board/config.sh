@@ -78,6 +78,17 @@ export FOREMAN_HOME
 # FOREMAN_HOME above is deliberately NOT in this list. An explicit home is how
 # every test in tests/ points a whole installation at a temporary directory,
 # and it selects a home rather than contradicting what that home declares.
+# WHICH STAGE MODELS THE OPERATOR PINNED, recorded BEFORE the loader fills the
+# rest in. A pinned <STAGE>_MODEL means "this one model, no fallback"; a
+# <STAGE>_MODELS alone is the candidate list. The two cannot be told apart
+# afterwards -- the loader sets <STAGE>_MODEL to the list's first element --
+# so the question is asked here, where the operator's environment is still the
+# only thing that has answered. See docs/specs/2026-09-18-project-level-installs-design.md.
+for _stage in TICK PLAN BUILD REVIEW; do
+  eval "_operator_${_stage}_MODEL=\"\${${_stage}_MODEL+set}\""
+done
+unset _stage
+
 unset INSTALLATION IS_DEFAULT HARNESS FOREMAN_ROOT LEGACY_NAMES
 if ! _foreman_load_pairs "this installation's declaration" "$_foreman_install_root/bin/installation.py"; then
   if [[ $- == *i* ]]; then return 1; else exit 1; fi
@@ -91,21 +102,18 @@ if [[ -z "${FOREMAN_HOME:-}" ]]; then
   if [[ $- == *i* ]]; then return 1; else exit 1; fi
 fi
 
-# ONE MODEL PER STAGE, AND A STAGE MAY NAME CANDIDATES. installation.py emits
-# <STAGE>_MODEL (the first candidate) beside <STAGE>_MODELS (the whole list,
-# newline-separated). _foreman_load_pairs is environment-wins, so an operator's
-# `PLAN_MODEL=sonnet` -- or an explicit `PLAN_MODEL=` meaning "inherit" -- makes
-# the two disagree. That override says "this one model, no fallback", so the
-# list collapses to it. Everything downstream reads <STAGE>_MODELS.
-# See docs/specs/2026-09-18-project-level-installs-design.md.
+# A PINNED <STAGE>_MODEL COLLAPSES THE CANDIDATE LIST. `PLAN_MODEL=sonnet` and
+# an explicit `PLAN_MODEL=` (which reaches the CLI as an empty `--model`,
+# meaning "inherit") both say "this one model, no fallback", so <STAGE>_MODELS
+# becomes that single value. Everything downstream reads <STAGE>_MODELS; a
+# <STAGE>_MODELS the operator set directly is left as the list.
 for _stage in TICK PLAN BUILD REVIEW; do
-  eval "_model_val=\"\${${_stage}_MODEL-}\""
-  eval "_models_val=\"\${${_stage}_MODELS-}\""
-  if [[ "$_model_val" != "${_models_val%%$'\n'*}" ]]; then
-    eval "${_stage}_MODELS=\"\$_model_val\""
+  eval "_pinned=\"\${_operator_${_stage}_MODEL-}\""
+  if [[ -n "$_pinned" ]]; then
+    eval "${_stage}_MODELS=\"\${${_stage}_MODEL-}\""
   fi
 done
-unset _stage _model_val _models_val
+unset _stage _pinned _operator_TICK_MODEL _operator_PLAN_MODEL _operator_BUILD_MODEL _operator_REVIEW_MODEL
 # No hyphen, no slash, the same rule INSTANCE is held to below and for the same
 # glob: worktree_path and every sweep glob join the installation and the
 # instance with a HYPHEN, so INSTALLATION=a-b makes "foreman-a-b-demo-PRA-1"
