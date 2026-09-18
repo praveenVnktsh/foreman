@@ -115,5 +115,20 @@ else
 fi
 unset PLAN_FLOOR
 
+# A tier may name its harness. The spawn goes through that harness's adapter,
+# on the bare model, and the spawn entry records which harness ran.
+export PLAN_MODEL="claude:opus"
+export FALLBACK_TIERS="claude:opus claude:sonnet"
+mark_limited "claude:opus"
+dispatch_fixture_run --ticket PRA-4 --role plan --attempt 1
+check_model "a harness-prefixed tier spawns on the bare model" "'sonnet'"
+if spawn_has PRA-4 '"model":"claude:sonnet"' && spawn_has PRA-4 '"harness":"claude"'; then
+  ok "the spawn entry names the harnessed tier and its harness"
+else
+  bad "the spawn entry names the harnessed tier and its harness"
+  show_history PRA-4
+fi
+unset PLAN_MODEL FALLBACK_TIERS
+
 [[ "$fail" -eq 0 ]] && printf 'PASS: dispatch spawns on the fallback tier\n'
 exit "$fail"

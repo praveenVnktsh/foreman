@@ -221,6 +221,24 @@ if [[ -z "$RESUME" ]]; then
   fi
 fi
 
+# A TIER MAY NAME ITS HARNESS. fallback.py returns `model` or `harness:model`,
+# and the harness is what lets one tick fall back across CLIs and not only
+# across models. Split it here: the spawn goes through that harness's adapter,
+# and the harness is recorded so reconcile.py and the registry know which one
+# owns the agent. The prefix is recognised only for a known harness, so a model
+# that itself contains a colon (`llama3:8b`) stays a model.
+SPAWN_HARNESS="$HARNESS"
+SPAWN_MODEL="$MODEL"
+case "$MODEL" in
+  claude:*|codex:*|opencode:*)
+    SPAWN_HARNESS="${MODEL%%:*}"
+    SPAWN_MODEL="${MODEL#*:}"
+    ;;
+esac
+SPAWN_ADAPTER="$SKILL_DIR/harness/$SPAWN_HARNESS.sh"
+[[ -x "$SPAWN_ADAPTER" ]] \
+  || die "tier $MODEL names harness $SPAWN_HARNESS, which has no adapter at $SPAWN_ADAPTER"
+
 # Whether to pass --skip-permissions to the adapter.
 #
 # "0" is off too, not just empty: `-n` alone reads the STRING "0" as
@@ -347,7 +365,7 @@ mkdir -p "$(agent_tmp_for "$WORKTREE")"
 # error, not an empty expansion. The `+` form below is the portable way to say
 # "expand only if set", and BUDGET and SKIP_PERMISSIONS are both empty on an
 # ordinary dispatch.
-SESSION="$("$HARNESS_SH" spawn --name "$NAME" --cwd "$WORKTREE" --model "$MODEL" \
+SESSION="$("$SPAWN_ADAPTER" spawn --name "$NAME" --cwd "$WORKTREE" --model "$SPAWN_MODEL" \
   --prompt-file "$PROMPT_FILE" --add-dir "$BOARD_HOME" \
   --settings "$CARD_AGENT_SETTINGS" "${BUDGET[@]+"${BUDGET[@]}"}" \
   "${SKIP_PERMISSIONS[@]+"${SKIP_PERMISSIONS[@]}"}")" \
@@ -362,6 +380,6 @@ mkdir -p "$(card_dir "$TICKET")"
 # "model" is what this spawn ran on, and "first_choice" what the role would
 # have run on with no rate limit. reconcile.py reads "model" back so the tick
 # marks the model that was actually refused.
-card_log "$TICKET" "$(printf '{"action":"spawn","name":"%s","session":"%s","worktree":"%s","role":"%s","attempt":"%s","ref":"%s","model":"%s","first_choice":"%s"}' \
-  "$NAME" "$SESSION" "$WORKTREE" "$ROLE" "${ATTEMPT}${SLOT}" "$REF" "$MODEL" "$FIRST_CHOICE_MODEL")"
+card_log "$TICKET" "$(printf '{"action":"spawn","name":"%s","session":"%s","worktree":"%s","role":"%s","attempt":"%s","ref":"%s","model":"%s","first_choice":"%s","harness":"%s"}' \
+  "$NAME" "$SESSION" "$WORKTREE" "$ROLE" "${ATTEMPT}${SLOT}" "$REF" "$MODEL" "$FIRST_CHOICE_MODEL" "$SPAWN_HARNESS")"
 printf '%s\n' "$SESSION"

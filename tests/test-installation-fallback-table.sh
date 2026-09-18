@@ -174,10 +174,11 @@ refuses "a tier holding a space refuses, since the list reaches bash space-separ
 [fallback]
 tiers = ["fable", "big opus"]')"
 
-refuses "a tier fallback.py could not name a stamp after refuses" \
-  "may not contain '/'" --home "$(home_with slashed 'harness = "claude"
+harnessed="$(home_with harnessed 'harness = "claude"
 [fallback]
-tiers = ["fable", "../opus"]')"
+tiers = ["claude:opus", "opencode:foundry/gpt-5.6-sol"]')"
+check "a tier may name its harness and a model holding a slash" \
+  "claude:opus opencode:foundry/gpt-5.6-sol" "$(read_key FALLBACK_TIERS --home "$harnessed")"
 
 refuses "a repeated tier refuses" \
   "more than once" --home "$(home_with repeated 'harness = "claude"

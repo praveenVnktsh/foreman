@@ -263,7 +263,10 @@ def resolve_models(where: str, harness: str, given: dict) -> dict:
 
 def resolve_tiers(where: str, harness: str, given: object) -> list[str]:
     """The fallback tiers, defaulted per harness. An empty list turns fallback
-    off, and declaring `tiers = []` is how a Claude installation says so."""
+    off, and declaring `tiers = []` is how a Claude installation says so.
+
+    A tier is a model, or `<harness>:<model>` to name the harness as well, so
+    one tick can fall back across CLIs and not only across models."""
     if given is None:
         return list(CLAUDE_TIERS) if harness == CLAUDE else []
     key = f"{FALLBACK_TABLE}.{TIERS_KEY}"
@@ -277,11 +280,9 @@ def resolve_tiers(where: str, harness: str, given: object) -> list[str]:
         # the KEY, VALUE stream.
         if any(ch.isspace() or ch == "\0" for ch in tier):
             die(f"{where}: {key} entry {tier!r} may not contain whitespace or a NUL byte")
-        # fallback.py names its rate-limit stamp after the model and refuses a
-        # name that could leave its directory. A tier it refuses to mark is a
-        # tier that never falls back, and that would surface only mid-outage.
-        if "/" in tier or tier.startswith("."):
-            die(f"{where}: {key} entry {tier!r} may not contain '/' or start with '.'")
+        # A tier is `<model>` or `<harness>:<model>`, so it may carry '/' and
+        # ':' (a Foundry model is `foundry/gpt-5.6-sol`). fallback.py encodes
+        # the stamp's filename, so no character here can escape its directory.
     duplicated = sorted({tier for tier in given if given.count(tier) > 1})
     if duplicated:
         die(f"{where}: {key} names {', '.join(duplicated)} more than once; "

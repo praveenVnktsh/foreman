@@ -126,12 +126,14 @@ expect "mark writes that expiry as the stamp's one line" \
 expect "mark --minutes overrides the cooldown" \
   "$(fb -- mark fable --minutes 5)" '{"model":"fable","until":"2026-09-16T06:05:00Z"}'
 
-if fb -- mark ../x >/dev/null; then
-  bad "mark refuses a model that would write outside the stamp directory: it exited 0"
-elif [[ -e "$home/x" ]]; then
-  bad "mark refuses a model that would write outside the stamp directory: $home/x exists"
+if fb -- mark '../x' >/dev/null; then
+  if [[ -e "$home/x" ]]; then
+    bad "mark encoded a slashed model but wrote outside the stamp directory: $home/x exists"
+  else
+    ok "mark encodes a model holding a slash, so it cannot leave the stamp directory"
+  fi
 else
-  ok "mark refuses a model that would write outside the stamp directory"
+  bad "mark refused a slashed model, which it can encode safely"
 fi
 
 # Callers prefix every stage model. An unset one means the knobs never
