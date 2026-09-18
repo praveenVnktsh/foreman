@@ -150,3 +150,26 @@ instead of producing a clone nobody asked for.
 watchdog `install-service.sh` installs:
 
     ~/.foreman/claude/install/bin/install-self-update.sh
+
+## Releasing
+
+By default an installation tracks `origin/main`, so a merge to main reaches it
+on the next fire: merge and deploy are the same act. An installation can track
+a release branch instead:
+
+    ~/.foreman/claude/install/bin/install-self-update.sh --ref origin/release
+
+That rewrites the unit with `FOREMAN_UPDATE_REF=origin/release`. The clone
+stays on its own branch and fast-forwards to the release tip, so a merge to
+main deploys nothing to a pinned installation. Do this on every installation
+you want staged.
+
+A release is promoted from any clone with push access:
+
+    bin/release.sh --dry-run      # say what it would promote, change nothing
+    bin/release.sh                # fast-forward release to origin/main, push
+
+The push is a fast-forward. A release branch that has diverged from main is
+refused, never rewritten. The first run creates the branch; after that it
+advances. `bin/install-self-update.sh` writes `origin/main` when given no
+`--ref`, so an installation left alone keeps deploying on every merge.

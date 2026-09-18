@@ -1,8 +1,13 @@
 #!/usr/bin/env bash
 # Install this installation's self-updater as a systemd user timer.
 #
-#   install-self-update.sh --dry-run   print both units and change nothing
-#   install-self-update.sh             write, enable and start them
+#   install-self-update.sh --dry-run          print both units and change nothing
+#   install-self-update.sh                    write, enable and start them
+#   install-self-update.sh --ref <ref>        track <ref> instead of origin/main
+#
+# --ref writes FOREMAN_UPDATE_REF into the unit. An installation pinned to
+# origin/release (bin/release.sh promotes main onto it) does not deploy on a
+# merge to main; it deploys when a release is promoted. See docs/INSTALLING.md.
 #
 # This file is to bin/self-update.sh what bin/install-service.sh is to
 # skills/board/supervise.sh, and it is deliberately the same shape. The two
@@ -15,7 +20,25 @@ set -euo pipefail
 die() { printf 'install-self-update: %s\n' "$*" >&2; exit 1; }
 
 DRY=""
-[[ "${1:-}" == "--dry-run" ]] && DRY=1
+UPDATE_REF="origin/main"
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --dry-run) DRY=1; shift ;;
+    --ref) [[ $# -ge 2 ]] || die "--ref needs a value"; UPDATE_REF="$2"; shift 2 ;;
+    *) die "unknown argument: $1 (expected --dry-run or --ref <ref>)" ;;
+  esac
+done
+
+# The same shape and validation bin/self-update.sh applies at fire time, so a
+# typo is refused here as well as there.
+case "$UPDATE_REF" in
+  origin/*) ;;
+  *) die "--ref must look like origin/<branch>, got '$UPDATE_REF'" ;;
+esac
+case "${UPDATE_REF#origin/}" in
+  ""|*" "*|*".."*|*"~"*|*"^"*|*":"*|*"?"*|*"*"*|*"["*|*"\\"*|*"@"*)
+    die "--ref names an invalid branch: '$UPDATE_REF'" ;;
+esac
 
 [[ "$(uname -s)" == "Linux" ]] || die "systemd units are Linux-only; expected a Linux host. On macOS use launchd or cron to run bin/self-update.sh"
 command -v systemctl >/dev/null || die "systemctl not found; expected a systemd host"
@@ -94,6 +117,7 @@ KillMode=process
 TimeoutStartSec=10min
 WorkingDirectory=$INSTALL_ROOT
 Environment=FOREMAN_HOME=$FOREMAN_HOME
+Environment=FOREMAN_UPDATE_REF=$UPDATE_REF
 # systemd gives a user unit a minimal PATH. supervise.sh runs the harness CLI,
 # which usually lives under ~/.local/bin; without it the restart finds nothing
 # to run and the board stops, with a log full of "command not found".
@@ -155,5 +179,5 @@ if ! loginctl show-user "$(whoami)" 2>/dev/null | grep -q 'Linger=yes'; then
   printf 'install-self-update: enable it with: sudo loginctl enable-linger %s\n' "$(whoami)"
 fi
 
-printf 'install-self-update: installed %s. Next fire: %s\n' "$UNIT_NAME" \
+printf 'install-self-update: installed %s tracking %s. Next fire: %s\n' "$UNIT_NAME" "$UPDATE_REF" \
   "$(systemctl --user list-timers "$UNIT_NAME.timer" --no-pager --no-legend 2>/dev/null | head -1 || echo unknown)"
