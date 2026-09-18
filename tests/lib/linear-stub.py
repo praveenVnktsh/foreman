@@ -30,6 +30,14 @@ reads (`identifier`, `priority`, `createdAt`, `labels`, `history`,
 query's variables and strips them before returning the node, the same way
 Linear's own filter never echoes back what it filtered on.
 
+The issues connection is cursor-paginated at 100, matching starved.py's
+`first: 100`. `after` is the exclusive start index as a decimal string
+(Linear's cursor is opaque; the stub's is the offset so a test can name
+it). Each response carries `pageInfo.hasNextPage` and `pageInfo.endCursor`.
+A waiting card at index 100 is on page two, which is the PRA-461 fixture.
+starved.py's walk counts as one request per page, so `fail_after: 1` is a
+later-page failure.
+
 Every request is routed by matching a fixed substring of its GraphQL document
 against the operation names resolve-ids.py's and starved.py's own query
 documents carry (`query Team`, `query Project`, `query States`,
@@ -59,6 +67,38 @@ from __future__ import annotations
 import json
 import sys
 from http.server import BaseHTTPRequestHandler, HTTPServer
+
+# starved.py's TodoIssues query asks for first: 100. A stub that returned the
+# whole list in one page would hide the bug PRA-461 exists to catch: a waiting
+# card past that first page.
+TODO_PAGE_SIZE = 100
+
+
+def _todo_issues_page(scenario: dict, variables: dict) -> dict:
+    """One cursor page of fixture issues, in Linear's issues-connection shape."""
+    project_id = variables.get("projectId")
+    state_id = variables.get("stateId")
+    after = variables.get("after")
+    nodes = [
+        {k: v for k, v in issue.items() if k not in ("projectId", "stateId")}
+        for issue in scenario.get("issues", [])
+        if issue.get("projectId") == project_id and issue.get("stateId") == state_id
+    ]
+    if after in (None, ""):
+        start = 0
+    elif isinstance(after, str) and after.isdigit():
+        start = int(after)
+    else:
+        raise ValueError(f"stub: unreadable TodoIssues cursor {after!r}")
+    page = nodes[start:start + TODO_PAGE_SIZE]
+    end = start + len(page)
+    return {
+        "nodes": page,
+        "pageInfo": {
+            "hasNextPage": end < len(nodes),
+            "endCursor": str(end) if page else None,
+        },
+    }
 
 
 def _operation_name(document: str) -> str:
@@ -133,14 +173,7 @@ def main() -> int:
             return {"issueLabel": None}
 
         if op == "query TodoIssues":
-            project_id = variables.get("projectId")
-            state_id = variables.get("stateId")
-            nodes = [
-                {k: v for k, v in issue.items() if k not in ("projectId", "stateId")}
-                for issue in scenario.get("issues", [])
-                if issue.get("projectId") == project_id and issue.get("stateId") == state_id
-            ]
-            return {"issues": {"nodes": nodes}}
+            return {"issues": _todo_issues_page(scenario, variables)}
 
         raise ValueError(f"stub: unrecognised GraphQL document: {document[:120]!r}")
 

@@ -12,7 +12,9 @@
 # blocked card, a main that is not green and a machine preflight calls unfit
 # are the tick doing its job, and a restart there would only interrupt work. A
 # Linear read that failed has no verdict at all: reported as "not starved", it
-# is the incident's own silence.
+# is the incident's own silence. A waiting card past the first Todo page is
+# still waiting: a first: 100 with no cursor used to hide it. A later page
+# that fails is the same no-verdict rule, one page down.
 #
 # It drives the real script, and reconcile.py and queue.py under it, against a
 # temporary FOREMAN_HOME. Linear is stubbed with tests/lib/linear-stub.py, and
@@ -127,6 +129,34 @@ card = {
     "inverseRelations": {"nodes": relations},
 }
 world = {"issues": [card]}
+if fail_after:
+    world["fail_after"] = int(fail_after)
+with open(path, "w") as handle:
+    json.dump(world, handle)
+PY
+}
+
+# paged_scenario [fail_after]
+# 100 Todo cards entered 10m ago (page one) and ABC-101 entered 90m ago
+# (page two). Linear's first: 100 hid ABC-101 before PRA-461.
+paged_scenario() {
+  python3 - "$work/scenario.json" "$(minutes_before_now 600)" \
+    "$(minutes_before_now 10)" "$(minutes_before_now 90)" "${1:-}" <<'PY'
+import json, sys
+path, created, recent, waiting, fail_after = sys.argv[1:6]
+def card(ident, entered):
+    return {
+        "projectId": "project-1", "stateId": "state-todo",
+        "identifier": ident, "priority": 2, "createdAt": created,
+        "labels": {"nodes": []},
+        "history": {"nodes": [
+            {"createdAt": created, "toState": {"id": "state-backlog"}},
+            {"createdAt": entered, "toState": {"id": "state-todo"}},
+        ]},
+        "inverseRelations": {"nodes": []},
+    }
+world = {"issues": [card(f"ABC-{n}", recent) for n in range(1, 101)]
+                    + [card("ABC-101", waiting)]}
 if fail_after:
     world["fail_after"] = int(fail_after)
 with open(path, "w") as handle:
@@ -277,6 +307,28 @@ if [[ "$status" -eq 2 && -z "$out" ]]; then
   ok "an undeclared board is refused with exit 2"
 else
   bad "an undeclared board is refused: status=$status out=$out $(cat "$work/err")"
+fi
+
+# --- h: a waiting card after the first page of 100 -----------------------------
+paged_scenario
+start_stub
+out="$(ask demo demo)"; status=$?
+if [[ "$status" -eq 0 && "$(field 'v["starved"]' <<<"$out")" == True \
+      && "$(field '[w["identifier"] for w in v["waiting"]]' <<<"$out")" == "['ABC-101']" \
+      && "$(field 'v["waiting"][0]["waiting_minutes"]' <<<"$out")" == 90.0 ]]; then
+  ok "a waiting card after the first Todo page makes the board starved"
+else
+  bad "a waiting card after the first Todo page makes the board starved: status=$status out=$out $(cat "$work/err")"
+fi
+
+# --- i: a later Todo page that fails has no verdict -----------------------------
+paged_scenario 1
+start_stub
+out="$(ask demo demo)"; status=$?
+if [[ "$status" -eq 1 && -z "$out" && "$(cat "$work/err")" == starved:*page*2* ]]; then
+  ok "a failed later Todo page has no verdict: exit 1, empty stdout"
+else
+  bad "a failed later Todo page has no verdict: status=$status out=$out $(cat "$work/err")"
 fi
 
 exit "$fail"

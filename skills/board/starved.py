@@ -102,19 +102,28 @@ CONFIG_KEYS = (
 # quietly when it is absent, so an empty value here means "never resolved".
 IDS_ENV_KEYS = ("LINEAR_PROJECT_ID", "STATE_TO_PICK_UP")
 
-TODO_QUERY = """
-query TodoIssues($projectId: ID!, $stateId: ID!) {
-  issues(filter: { project: { id: { eq: $projectId } }, state: { id: { eq: $stateId } } }, first: 100) {
-    nodes {
+# first: 100 with no cursor (PRA-461) hid a waiting card past the first page.
+# starved.py then reported the board as not starved, and supervise.sh left
+# the stuck tick running. Walk every page; refuse when pageInfo or a later
+# page is unreadable. A partial walk as "not starved" is the same silence.
+TODO_PAGE_SIZE = 100
+TODO_QUERY = f"""
+query TodoIssues($projectId: ID!, $stateId: ID!, $after: String) {{
+  issues(filter: {{ project: {{ id: {{ eq: $projectId }} }}, state: {{ id: {{ eq: $stateId }} }} }}, first: {TODO_PAGE_SIZE}, after: $after) {{
+    nodes {{
       identifier
       priority
       createdAt
-      labels { nodes { name } }
-      history(first: 50) { nodes { createdAt toState { id } } }
-      inverseRelations { nodes { type issue { identifier state { type } } } }
-    }
-  }
-}
+      labels {{ nodes {{ name }} }}
+      history(first: 50) {{ nodes {{ createdAt toState {{ id }} }} }}
+      inverseRelations {{ nodes {{ type issue {{ identifier state {{ type }} }} }} }}
+    }}
+    pageInfo {{
+      hasNextPage
+      endCursor
+    }}
+  }}
+}}
 """
 
 
@@ -244,6 +253,35 @@ def _nodes(parent: object, key: str, where: str) -> list:
     if not isinstance(nodes, list):
         raise NoVerdict(f"{where}: {key}.nodes is not a list")
     return nodes
+
+
+def parse_todo_connection(data: object, where: str) -> tuple[list, bool, str | None]:
+    """One TodoIssues page: nodes, and the next cursor when another page follows.
+
+    Missing pageInfo, a non-boolean hasNextPage, or hasNextPage with no cursor
+    is an unreadable page, not an implicit last page.
+    """
+    connection = data.get("issues") if isinstance(data, dict) else None
+    if not isinstance(connection, dict):
+        raise NoVerdict(f"{where}: issues is not an object")
+    nodes = connection.get("nodes")
+    if not isinstance(nodes, list):
+        raise NoVerdict(f"{where}: issues.nodes is not a list")
+    page_info = connection.get("pageInfo")
+    if not isinstance(page_info, dict):
+        raise NoVerdict(f"{where}: issues.pageInfo is not an object")
+    has_next = page_info.get("hasNextPage")
+    if not isinstance(has_next, bool):
+        raise NoVerdict(f"{where}: issues.pageInfo.hasNextPage is not a boolean")
+    if not has_next:
+        return nodes, False, None
+    cursor = page_info.get("endCursor")
+    if not isinstance(cursor, str) or not cursor:
+        raise NoVerdict(f"{where}: issues.pageInfo.hasNextPage is true but "
+                        f"endCursor is {cursor!r}, not a cursor string")
+    if not nodes:
+        raise NoVerdict(f"{where}: issues.pageInfo.hasNextPage is true but nodes is empty")
+    return nodes, True, cursor
 
 
 def parse_card(node: object, state_id: str) -> TodoCard:
@@ -406,18 +444,33 @@ def read_key(key_file: str) -> str:
 
 
 def todo_nodes(api_url: str, key: str, config: dict[str, str]) -> list:
-    """The Todo column's issues, through bin/resolve-ids.py's fail-closed query()."""
-    variables = {"projectId": config["LINEAR_PROJECT_ID"],
-                 "stateId": config["STATE_TO_PICK_UP"]}
-    try:
-        data = resolve_ids.query(api_url, key, TODO_QUERY, variables)
-    except resolve_ids.ResolveError as exc:
-        raise NoVerdict(str(exc)) from exc
-    except OSError as exc:
-        # query() maps URLError; a read that times out mid-response raises
-        # TimeoutError, which is an OSError and not a URLError.
-        raise NoVerdict(f"could not read {api_url}: {exc}") from exc
-    return _nodes(data, "issues", "Linear API response")
+    """Every Todo issue, walking Linear's cursor until it reports no next page."""
+    nodes: list = []
+    after = None
+    seen_cursors: set[str] = set()
+    page = 0
+    while True:
+        page += 1
+        where = f"Linear TodoIssues page {page}"
+        variables = {"projectId": config["LINEAR_PROJECT_ID"],
+                     "stateId": config["STATE_TO_PICK_UP"],
+                     "after": after}
+        try:
+            data = resolve_ids.query(api_url, key, TODO_QUERY, variables)
+        except resolve_ids.ResolveError as exc:
+            raise NoVerdict(f"{where}: {exc}") from exc
+        except OSError as exc:
+            # query() maps URLError; a read that times out mid-response raises
+            # TimeoutError, which is an OSError and not a URLError.
+            raise NoVerdict(f"{where}: could not read {api_url}: {exc}") from exc
+        page_nodes, has_next, cursor = parse_todo_connection(data, where)
+        nodes.extend(page_nodes)
+        if not has_next:
+            return nodes
+        if cursor in seen_cursors:
+            raise NoVerdict(f"{where}: Linear repeated cursor {cursor!r}")
+        seen_cursors.add(cursor)
+        after = cursor
 
 
 def routed_identifiers(home: str, config: dict[str, str], nodes: list) -> list[str]:
