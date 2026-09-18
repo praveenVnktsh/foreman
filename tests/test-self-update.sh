@@ -191,7 +191,7 @@ before="$(head_of)"; r_before="$(restarts)"
 if out="$(run_update 2>&1)"; then
   bad "an unreachable origin was treated as success: $out"
 else
-  grep -q "fetch origin main failed" <<<"$out" \
+  grep -q "fetch origin/main failed" <<<"$out" \
     && [[ "$(head_of)" == "$before" && "$(restarts)" == "$r_before" ]] \
     && ! grep -q "already at" <<<"$out" \
     && ok "an unreachable origin is refused, not reported as up to date" \

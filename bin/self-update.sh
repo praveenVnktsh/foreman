@@ -1,5 +1,8 @@
 #!/usr/bin/env bash
-# Fast-forward this installation's clone to origin/main and restart its tick.
+# Fast-forward this installation's clone to its tracked ref and restart its tick.
+# The ref is FOREMAN_UPDATE_REF, default origin/main; a release pin sets it to
+# origin/release, so a merge to main reaches this installation only when the
+# release is promoted (bin/release.sh).
 #
 #   self-update.sh --dry-run   say what it would do, change nothing
 #   self-update.sh             do it
@@ -85,6 +88,27 @@ _foreman_load_pairs "this installation's declaration" "$INSTALL_ROOT/bin/install
 [[ -n "$INSTALLATION" ]] || die "installation.py did not report an installation name"
 [[ -n "$FOREMAN_HOME" ]] || die "installation.py did not report a home"
 
+# WHICH REF THIS INSTALLATION TRACKS. Default origin/main. An installation
+# pinned to a release sets FOREMAN_UPDATE_REF=origin/release (written into its
+# unit by bin/install-self-update.sh --ref), so a merge to main reaches it only
+# when the release is promoted with bin/release.sh. See docs/INSTALLING.md.
+#
+# The local clone stays on its own branch; a fast-forward to origin/release
+# advances that branch to the released commit. The ref is never interpolated
+# into a shell, but it is validated anyway: git would accept some of these as
+# revision syntax, and a typo should name itself rather than fetch something
+# else.
+UPDATE_REF="${FOREMAN_UPDATE_REF:-origin/main}"
+case "$UPDATE_REF" in
+  origin/*) ;;
+  *) die "FOREMAN_UPDATE_REF must look like origin/<branch>, got '$UPDATE_REF'" ;;
+esac
+UPDATE_BRANCH="${UPDATE_REF#origin/}"
+case "$UPDATE_BRANCH" in
+  ""|*" "*|*".."*|*"~"*|*"^"*|*":"*|*"?"*|*"*"*|*"["*|*"\\"*|*"@"*)
+    die "FOREMAN_UPDATE_REF names an invalid branch: '$UPDATE_BRANCH'" ;;
+esac
+
 SUPERVISE="$INSTALL_ROOT/skills/board/supervise.sh"
 [[ -x "$SUPERVISE" ]] || die "no supervise.sh at $SUPERVISE; this clone is not a foreman install root"
 
@@ -165,8 +189,8 @@ fi
 # TimeoutStartSec as a second, unconditional backstop for anything these miss.
 GIT_SSH_COMMAND="ssh -o BatchMode=yes -o ConnectTimeout=15 -o ServerAliveInterval=10 -o ServerAliveCountMax=3" \
 GIT_TERMINAL_PROMPT=0 \
-  git_ro fetch --quiet origin main \
-  || die "git fetch origin main failed or timed out; expected a reachable origin and a credential usable with no terminal. Nothing was changed."
+  git_ro fetch --quiet origin "$UPDATE_BRANCH" \
+  || die "git fetch $UPDATE_REF failed or timed out; expected a reachable origin and a credential usable with no terminal. Nothing was changed."
 
 OLD="$(git_ro rev-parse HEAD)"
 NEW="$(git_ro rev-parse FETCH_HEAD)"
@@ -185,7 +209,7 @@ fi
 # A force-push, or a clone that has diverged. Either way the update is not a
 # fast-forward, and this script has no business deciding what to keep.
 git_ro merge-base --is-ancestor "$OLD" "$NEW" \
-  || die "origin/main ($NEW_SHORT) is not a descendant of HEAD ($OLD_SHORT); expected a fast-forward. Nothing was changed."
+  || die "$UPDATE_REF ($NEW_SHORT) is not a descendant of HEAD ($OLD_SHORT); expected a fast-forward. Nothing was changed."
 
 # WHICH SKILLS EXIST, as a sorted list of directory names under skills/.
 #
