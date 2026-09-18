@@ -193,6 +193,34 @@ case "$ROLE" in
     ;;
 esac
 
+# The model a FRESH spawn runs on once a rate limit on the role's first choice
+# is accounted for. skills/board/fallback.py walks FALLBACK_TIERS down from
+# $MODEL while it stays limited, never past the role's floor, and says on
+# stderr when it fell back. Skipped on --resume: the adapter's resume verb takes
+# no --model, so a resumed agent keeps its session's model.
+#
+# config.sh assigns these knobs in this shell and does not export them -- that
+# file is a high-risk path, and exporting them parked a previous change. Prefix
+# every one fallback.py reads, including FOREMAN_HOME (already exported) so the
+# child is self-contained. A broken helper must not stop all work, so a refusal
+# spawns on the first choice, the model this role ran on before fallback.py
+# existed, and says why.
+FIRST_CHOICE_MODEL="$MODEL"
+if [[ -z "$RESUME" ]]; then
+  if ! MODEL="$(FOREMAN_HOME="$FOREMAN_HOME" \
+      FALLBACK_TIERS="$FALLBACK_TIERS" \
+      FALLBACK_COOLDOWN_MINUTES="$FALLBACK_COOLDOWN_MINUTES" \
+      PLAN_MODEL="$PLAN_MODEL" BUILD_MODEL="$BUILD_MODEL" \
+      REVIEW_MODEL="$REVIEW_MODEL" CLEANUP_MODEL="$CLEANUP_MODEL" \
+      PLAN_FLOOR="$PLAN_FLOOR" BUILD_FLOOR="$BUILD_FLOOR" \
+      REVIEW_FLOOR="$REVIEW_FLOOR" \
+      "$SKILL_DIR/fallback.py" model "$ROLE")"; then
+    printf 'foreman: fallback.py refused; dispatching %s on first-choice model %s\n' \
+      "$NAME" "$FIRST_CHOICE_MODEL" >&2
+    MODEL="$FIRST_CHOICE_MODEL"
+  fi
+fi
+
 # Whether to pass --skip-permissions to the adapter.
 #
 # "0" is off too, not just empty: `-n` alone reads the STRING "0" as
@@ -330,6 +358,10 @@ mkdir -p "$(card_dir "$TICKET")"
 # and cleanup among them). reconcile.py's review_verdict reads "the fix was
 # pushed" as the pull request head having moved past the sha the reviewer
 # read, and until this the spawn record kept no memory of what that was.
-card_log "$TICKET" "$(printf '{"action":"spawn","name":"%s","session":"%s","worktree":"%s","role":"%s","attempt":"%s","ref":"%s"}' \
-  "$NAME" "$SESSION" "$WORKTREE" "$ROLE" "${ATTEMPT}${SLOT}" "$REF")"
+#
+# "model" is what this spawn ran on, and "first_choice" what the role would
+# have run on with no rate limit. reconcile.py reads "model" back so the tick
+# marks the model that was actually refused.
+card_log "$TICKET" "$(printf '{"action":"spawn","name":"%s","session":"%s","worktree":"%s","role":"%s","attempt":"%s","ref":"%s","model":"%s","first_choice":"%s"}' \
+  "$NAME" "$SESSION" "$WORKTREE" "$ROLE" "${ATTEMPT}${SLOT}" "$REF" "$MODEL" "$FIRST_CHOICE_MODEL")"
 printf '%s\n' "$SESSION"

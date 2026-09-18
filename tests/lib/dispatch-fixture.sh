@@ -26,6 +26,14 @@ source "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/instance-fixture.sh"
 # value into every test.
 _DISPATCH_MODEL_KNOBS="PLAN_MODEL BUILD_MODEL REVIEW_MODEL"
 
+# The fallback knobs, same shape and cleared/passed through the same way, for
+# the same reason: config.sh's pair loader uses `-`, not `:-`, so an operator's
+# shell can answer any of them before installation.py emits this harness's
+# default the way PLAN_MODEL always could. test-dispatch-spawns-on-the-fallback-tier.sh
+# sets PLAN_FLOOR after dispatch_fixture_setup, the same hole the model knobs
+# leave open on purpose.
+_DISPATCH_FALLBACK_KNOBS="FALLBACK_TIERS FALLBACK_COOLDOWN_MINUTES PLAN_FLOOR BUILD_FLOOR REVIEW_FLOOR"
+
 # The programs dispatch.sh runs. Read dispatch.sh and check this list rather
 # than trusting it; each name says where it is run:
 #   bash    -- the `bash -c` block withlock.py wraps to cut the worktree, and a
@@ -72,7 +80,7 @@ dispatch_fixture_setup() {
   # them at random.
   local knob
   DISPATCH_CLEARED_KNOBS=""
-  for knob in $_DISPATCH_MODEL_KNOBS; do
+  for knob in $_DISPATCH_MODEL_KNOBS $_DISPATCH_FALLBACK_KNOBS; do
     if [[ -n "${!knob+set}" ]]; then
       DISPATCH_CLEARED_KNOBS="${DISPATCH_CLEARED_KNOBS:+$DISPATCH_CLEARED_KNOBS }$knob"
       unset "$knob"
@@ -107,6 +115,12 @@ dispatch_fixture_setup() {
   # off in silence; now it dies at the gate before any spawn, which every test
   # on this fixture reads as "never reached claude --bg".
   ln -s "$board_dir/reconcile.py" "$shim/reconcile.py"
+  # dispatch.sh asks this for the model a fresh spawn actually runs on. A shim
+  # without it does not disable fallback -- dispatch.sh's own "a broken helper
+  # must not stop all work" rule falls it back to the first-choice model and
+  # warns on stderr -- so a fixture missing this symlink would still look
+  # green while proving nothing about the fallback path at all.
+  ln -s "$board_dir/fallback.py" "$shim/fallback.py"
   # The WHOLE directory, as one symlink. config.sh checks that
   # skills/board/harness/$HARNESS.sh under this root is executable and refuses
   # there rather than at the spawn, so the adapter this installation selects has
@@ -255,11 +269,12 @@ dispatch_fixture_run() {
   # Truncated with the other two. A name left over from the previous dispatch
   # would let the stubbed registry answer for an agent this one never spawned.
   : >"$_DISPATCH_AGENT_NAME_LOG"
-  # The one hole: a model a test set deliberately after dispatch_fixture_setup
-  # cleared the operator's. `+` and not `:-`, because `PLAN_MODEL=` empty is
-  # itself a value under test and must reach the CLI as an empty `--model`.
+  # The one hole: a model or fallback knob a test set deliberately after
+  # dispatch_fixture_setup cleared the operator's. `+` and not `:-`, because
+  # `PLAN_MODEL=` empty is itself a value under test and must reach the CLI as
+  # an empty `--model`, and `PLAN_FLOOR=` empty means "no floor" the same way.
   local models=() knob
-  for knob in $_DISPATCH_MODEL_KNOBS; do
+  for knob in $_DISPATCH_MODEL_KNOBS $_DISPATCH_FALLBACK_KNOBS; do
     if [[ -n "${!knob+set}" ]]; then models+=("$knob=${!knob}"); fi
   done
   # What the toolchain needs, measured rather than listed here by hand, and
@@ -335,12 +350,12 @@ _dispatch_derive_toolchain() {
   local candidates="" name program kept head tail trial
 
   # Every exported name of the caller's shell, except the four this fixture
-  # sets itself and the model knobs. Excluding the knobs is what stops one
-  # entering the allowlist through the toolchain half; excluding the base
-  # four keeps the probe from proving that HOME needs HOME.
+  # sets itself and the model and fallback knobs. Excluding the knobs is what
+  # stops one entering the allowlist through the toolchain half; excluding the
+  # base four keeps the probe from proving that HOME needs HOME.
   for name in $(compgen -e || true); do
     [[ "$name" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || continue
-    case " HOME FOREMAN_INSTANCE FOREMAN_HOME PATH $_DISPATCH_MODEL_KNOBS " in
+    case " HOME FOREMAN_INSTANCE FOREMAN_HOME PATH $_DISPATCH_MODEL_KNOBS $_DISPATCH_FALLBACK_KNOBS " in
       *" $name "*) continue ;;
     esac
     candidates="${candidates:+$candidates }$name"

@@ -276,6 +276,8 @@ table says what each knob *means* and `config.sh` says what it *is*:
     HOST_SLOT_STALE_MINUTES "$HOST_SLOT_STALE_MINUTES" \
     PLAN_MODEL "$PLAN_MODEL" BUILD_MODEL "$BUILD_MODEL" REVIEW_MODEL "$REVIEW_MODEL" \
     CLEANUP_MODEL "$CLEANUP_MODEL" \
+    FALLBACK_TIERS "$FALLBACK_TIERS" FALLBACK_COOLDOWN_MINUTES "$FALLBACK_COOLDOWN_MINUTES" \
+    PLAN_FLOOR "$PLAN_FLOOR" BUILD_FLOOR "$BUILD_FLOOR" REVIEW_FLOOR "$REVIEW_FLOOR" \
     BOARD_DRY_RUN "${BOARD_DRY_RUN:-unset}" )
 ```
 
@@ -300,6 +302,8 @@ A number carried from one slice into the next is the previous board's answer.
 | `HOST_SLOT_STALE_MINUTES` | how long a card may go without a fresh `history.jsonl` entry before `--host-slots` stops counting it even with no `released` marker — a backstop, not the primary release mechanism |
 | `PLAN_MODEL`, `BUILD_MODEL`, `REVIEW_MODEL` | the model each dispatched role runs on — see *One model per stage* below |
 | `CLEANUP_MODEL` | the model the cleanup agent runs on, defaulting to `PLAN_MODEL` — same section |
+| `FALLBACK_TIERS`, `FALLBACK_COOLDOWN_MINUTES` | the models a rate-limited stage falls down through, strongest first, and how long a limit is believed — `installation.toml` `[fallback]`, see *A rate-limited model* in step 2. Empty tiers turn fallback off |
+| `PLAN_FLOOR`, `BUILD_FLOOR`, `REVIEW_FLOOR` | the weakest model each stage may fall back to, from `[fallback.floor]`; empty means the bottom of the tiers. Cleanup uses `PLAN_FLOOR` |
 | `BOARD_DRY_RUN` | print every mutation instead of performing it |
 
 `MAX_CONCURRENT` counts **cards, not processes** — a card in review adds up to
@@ -350,6 +354,12 @@ graph it was handed — a node whose label is wrong is wrong in every file that
 node owns. `skills/graphplan/SKILL.md` therefore caps a node's own tier at
 `opus` and forbids `fable` as a node tier: the strongest model is spent on the
 design, not on typing it out.
+
+**A first choice is not a guarantee.** When a stage's model is rate-limited,
+`dispatch.sh` spawns on the next tier down instead, never below that stage's
+floor, until the limit's cooldown passes — see
+[A rate-limited model](#a-rate-limited-model). The knobs above are the first
+choice; each agent's `model` in `reconcile.py` is what it actually ran on.
 
 **`--role plan` is a dispatch step 6 makes.** Planning and building are two
 agents: the plan agent draws the graph, posts it to the Linear card as a comment
@@ -1105,7 +1115,7 @@ slice's environment and answers about that board's repository, so a ticket from
 another board handed to it gets a confident answer built from the wrong `gh` and
 the wrong agents.
 
-Five fields carry more than their names suggest:
+Seven fields carry more than their names suggest:
 
 - **`build_attempts`** — attempts actually charged to this card, counted from
   `history.jsonl`. Use this, never the number in an agent's name. A spawn plus
@@ -1117,12 +1127,27 @@ Five fields carry more than their names suggest:
   transcript ends on a tool call that never returned an answer, with
   `unanswered_tool` naming it. An agent that stops of its own accord does not
   look like this, so the field is how you tell "the build failed" from "something
-  killed the build" — see step 2.
+  killed the build" — see step 2. `rate_limited` means the model refused the
+  spawn: the transcript holds a rate-limit or capacity API error, quoted in
+  `rate_limit_error`, **and the agent never ran a single tool**. An agent that did
+  any work, before or after a limit, is not flagged — see
+  [A rate-limited model](#a-rate-limited-model).
+- **`model`**, on each agent — the model that agent was actually spawned on,
+  read from its `spawn` entry in `history`. After a fallback it is not the
+  stage's first choice, so this is the model to mark, never `PLAN_MODEL`. It is
+  null for an agent spawned before `dispatch.sh` recorded it.
 - **`plan_attempts`** — failed plan attempts, counted from the same log and by
   the same rule as `build_attempts`, and kept apart from it deliberately: see
   step 2. Nothing here says whether a plan *exists*. That evidence is a comment
   on the card, and `plancomments.py` is what reads it.
 - **`pr.risk`** — computed from the diff, never the ticket text.
+- **`environmental_streak`** — the run of `void` entries at the tail of the
+  card's history for one role: `role`, `count`, `since` (the first void of the
+  run) and `last_reason`. Spawns, resumes and `fallback` entries between them do
+  not break it; anything else the card does for that role does. Null when the
+  card's last word is not a void. A void costs no attempt, so no budget ever
+  runs out on a card that voids forever — this is the only counter that sees it,
+  and step 9 reports it.
 
 ### 2. Reconcile `Plan` and `In Progress`
 
@@ -1266,7 +1291,10 @@ is the discriminator and not a timestamp.
   charged against `MAX_PLAN_ATTEMPTS` — read `plan_attempts` from
   `reconcile.py`, never the number in an agent's name. The environmental
   write-off rules below apply here unchanged: an attempt killed by a full disk
-  is evidence about the machine and none about the ticket. Re-dispatch
+  is evidence about the machine and none about the ticket, and so is a plan
+  agent whose model refused it at the first call (`death.rate_limited`) — that
+  one also falls back a tier before it is re-dispatched, see
+  [A rate-limited model](#a-rate-limited-model). Re-dispatch
   `--role plan` at the next attempt number when the ticket was at fault, at the
   same one when the machine was — and in that second case `void` the dead
   attempt, naming the role, so it is not charged at all:
@@ -1330,7 +1358,11 @@ A failure is **environmental** when the agent produced no pull request and eithe
 - its `death.killed_mid_tool` is true — the transcript ends on a command that
   never returned, which is not how an agent that gives up behaves; or
 - `preflight.py` fails now, or the transcript names a disk, quota, credential or
-  network error.
+  network error; or
+- its `death.rate_limited` is true — the model refused the spawn before the agent
+  did anything. That one has its own procedure,
+  [A rate-limited model](#a-rate-limited-model): void **and fall back a tier**,
+  or the next spawn lands on the same refusing model.
 
 For an environmental failure: repair the machine if you can, then **re-dispatch at
 the same attempt number** so `build_attempts` does not rise, and record the
@@ -1390,6 +1422,98 @@ is a **fresh dispatch**: drop `--resume`, and use the next attempt number if the
 failure was the ticket's or the same one if it was environmental. The agent loses
 its context and redoes the work, but the card keeps moving. Do not try to
 recreate the worktree by hand to save a resume.
+
+#### A rate-limited model
+
+This is the third kind of environmental failure above, and it is answered
+differently from the other two.
+
+**A void alone does not fix a limited model; it re-dispatches onto it.** On
+2026-09-16 the plan stage ran on `PLAN_MODEL=fable` while fable was rate-limited.
+Every plan agent died on its first API call, every tick read that correctly as
+environmental and voided it, and the next pass spawned the same card onto the
+same model. No attempt was ever charged and nothing moved for eleven hours, with
+opus answering the whole time. So a stage whose model is limited falls one tier
+down — along `FALLBACK_TIERS`, strongest first — and keeps working.
+
+**Only `death.rate_limited` starts this, never a failure that merely looks
+environmental.** It is true only when the transcript holds an API error the
+harness marked as one, of the rate-limit or capacity kind, and the agent ran no
+tool at all. An agent that worked for twenty minutes and then hit a limit did
+real work, and its failure may still be the ticket's; moving the stage to a
+weaker model would hide that behind a downgrade nobody asked for. An ordinary
+death that falls back retires a working model for the whole cooldown and plans every card
+behind it on a weaker one — the one mistake here that costs quality silently.
+
+For a terminal agent with no pull request (for a plan agent: no plan comment)
+whose `death.rate_limited` is true, in this order:
+
+```bash
+B=~/.foreman/<installation>/install/skills/board
+# Prefix every knob fallback.py reads. config.sh assigns them in this shell and
+# does not export them; a child would otherwise see them unset and refuse.
+# FOREMAN_HOME is already exported; repeating it keeps the child self-contained.
+fb() {
+  FOREMAN_HOME="$FOREMAN_HOME" \
+  FALLBACK_TIERS="$FALLBACK_TIERS" FALLBACK_COOLDOWN_MINUTES="$FALLBACK_COOLDOWN_MINUTES" \
+  PLAN_MODEL="$PLAN_MODEL" BUILD_MODEL="$BUILD_MODEL" REVIEW_MODEL="$REVIEW_MODEL" \
+  CLEANUP_MODEL="$CLEANUP_MODEL" \
+  PLAN_FLOOR="$PLAN_FLOOR" BUILD_FLOOR="$BUILD_FLOOR" REVIEW_FLOOR="$REVIEW_FLOOR" \
+  "$B/fallback.py" "$@"
+}
+# <model> is the dead agent's own `model` from reconcile.py. When it is null or
+# empty there is no model to blame: skip `mark` and the `fallback` entry, and
+# void and re-dispatch as for any other environmental failure.
+fb mark <model>
+fb resolve <role> > /tmp/fallback.json
+# ONE of the next two lines, never both. `until` is what `mark` printed.
+# `floor_reached` false in /tmp/fallback.json: `next` is its `model`.
+card_log <T> '{"action":"fallback","role":"<role>","model":"<model>","until":"<until>","next":"<next>"}'
+# `floor_reached` true: no tier is left to fall to.
+card_log <T> '{"action":"fallback","role":"<role>","model":"<model>","until":"<until>","next":null,"floor_reached":true}'
+card_log <T> '{"action":"void","role":"<role>","attempt":"<N>","reason":"<model> rate-limited until <until>"}'
+```
+
+`<role>` is the dead agent's role — `plan`, `build`, `review` or `cleanup`.
+The void's reason is written out rather than pasted from `rate_limit_error`:
+that text is the API's own JSON, and its quotes would break the entry. `mark` stamps
+the model as limited for `FALLBACK_COOLDOWN_MINUTES`; `resolve` walks down from
+the stage's first choice past every model with a live stamp and prints the model
+the next dispatch will use. The `fallback` entry and the `void` carry the same
+attempt: `reconcile.py` counts attempts from spawns and voids only, so the
+fallback costs the ticket nothing.
+
+Then **comment on the Linear card**: which model was limited, until when, and
+which model the stage now runs on. The card did not change state, and this
+comment is written anyway — it is the one place an operator reading the card
+learns that its plan or build is being done by a weaker model than the
+installation chose, and why. And **re-dispatch at the same attempt number
+within this pass**, exactly as the dispatch block for that role shows.
+`dispatch.sh` asks `fallback.py` for the model itself, so nothing at the call
+site names one — it logs the model it resolved on the `spawn` entry and says on
+stderr when that differs from the stage's first choice.
+
+**When `floor_reached` is true, do not re-dispatch.** Every tier the installation
+allows this stage is limited. `[fallback.floor]` in `installation.toml` is the
+weakest model it accepts for that stage — a plan drawn by a model too weak for it
+costs every build that follows — so the card waits instead of going lower. Void
+exactly as before this section existed, and say so on the card: the floor was
+reached, and the card waits for the limit to lift. A later pass dispatches it
+as usual; if the floor model is still limited, the agent dies at once and lands
+here again.
+
+**The downgrade expires by itself.** The stamp is a moment, not a switch: once
+it passes, `resolve` answers the first choice again and the next dispatch tries
+it. Limits lift, and a downgrade nobody remembers to undo is a stage quietly
+running on the wrong model for good. Nothing clears a stamp by hand; the worst an
+expiry that came too early costs is one spawn that dies at once and marks the
+model again.
+
+**An installation with `FALLBACK_TIERS` empty has no fallback** — the default for
+a harness whose models are not these tiers. `resolve` answers the first choice
+there, and `floor_reached` true once that model is marked: there is no tier to
+fall to, so the card voids and waits for a later pass exactly as it did before
+this section existed.
 
 #### The plan comment protocol
 
@@ -2474,7 +2598,8 @@ gesture that skips the cadence. Nothing else writes or removes that file.
 ### 9. Report
 
 One Linear comment per card whose state changed, in plain language, with links.
-Nothing else.
+Nothing else — apart from the fallback comment step 2 writes on a card whose
+model was rate-limited, which is already on the card by now.
 
 **The tick's own report names every board**, and says one of four things about
 each: what moved, that nothing on it was actionable, that it was halted, or that
@@ -2494,6 +2619,14 @@ tick, and spelling both the same way is how a starved board looks idle.
 or a failed removal — name the card, the label and the `gh` error in the tick's
 report. The card waits in `In Review` until the sync can succeed, and only the
 report tells the operator why.
+
+**A card that keeps voiding is reported, though it never fails.** For every card
+whose `environmental_streak.count` is 3 or more, one line in the tick's report:
+the ticket, the `role`, the `count`, `since`, and `last_reason`. A void costs no
+attempt, so a card voiding every pass never reaches `Needs Human` and nothing
+else ever tells the operator — on 2026-09-16 the plan stage voided for eleven
+hours and every tick's report read like a quiet board. Three is past a blip and
+well short of an afternoon.
 
 A tick where no board changed anything says so in one line and stops.
 
@@ -2602,7 +2735,9 @@ A tick where no board changed anything says so in one line and stops.
   satisfied. Exit 2 is a bad invocation and says nothing about production.
 - **Charge a failure to the card only when it was the card's fault.** An agent
   killed mid-command by a broken environment costs the ticket nothing: repair,
-  re-dispatch at the same attempt number, and `void` the dead one.
+  re-dispatch at the same attempt number, and `void` the dead one. A model that
+  refused the spawn is the environment too: mark it, fall back a tier, and
+  re-dispatch — never on an agent that ran a tool.
 - **A move unlocks its next job in the same tick, on the next pass.** Moving a
   card and then ending the tick buys a delay for nothing. Keep passing round the
   boards until a whole pass changes nothing.

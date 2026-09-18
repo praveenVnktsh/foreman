@@ -1807,6 +1807,49 @@ def plan_attempts(entries: list[dict]) -> int:
     return _attempts(entries, "plan")
 
 
+# What a rate-limited or over-capacity spawn leaves in its transcript. Claude
+# Code writes the refusal as an assistant row marked `isApiErrorMessage`, with
+# `error` naming its kind and text such as `API Error: 429 {... rate_limit_error
+# ...}` or `Claude AI usage limit reached|<epoch>`. On 2026-09-16 every plan
+# spawn on fable died this way for 11 hours, and each one was read as an
+# ordinary failure. One list, so the patterns cannot drift between callers.
+# Numbers carry word boundaries: a request id that happens to contain `429` is
+# not a rate limit.
+RATE_LIMIT_PATTERNS = tuple(
+    re.compile(p, re.IGNORECASE)
+    for p in (
+        r"rate[_ ]limit",
+        r"\b429\b",
+        r"overloaded",
+        r"\b529\b",
+        r"usage limit reached",
+    )
+)
+
+
+def _api_error_text(row: dict) -> str | None:
+    """The searchable text of an API error row, or None for any other row.
+
+    Only a row the harness marked as an API error is read. An agent that writes
+    "429" in its own reasoning, or runs a command that prints "rate limit", did
+    not hit a limit itself, and reading its prose would retire a working model.
+    """
+    if not (row.get("isApiErrorMessage") or row.get("error")):
+        return None
+    parts = [str(row.get("error") or "")]
+    content = (row.get("message") or {}).get("content")
+    if isinstance(content, str):
+        parts.append(content)
+    elif isinstance(content, list):
+        parts.extend(str(b.get("text") or "") for b in content
+                     if isinstance(b, dict) and b.get("type") == "text")
+    return " ".join(p for p in parts if p)
+
+
+def _is_rate_limit(text: str) -> bool:
+    return any(p.search(text) for p in RATE_LIMIT_PATTERNS)
+
+
 def death_report(path: str | None) -> dict | None:
     """Why did this agent's transcript stop? Read the tail and say.
 
@@ -1819,6 +1862,13 @@ def death_report(path: str | None) -> dict | None:
     The signal is a trailing tool_use with no matching tool_result: the agent
     asked for a command and no answer was ever recorded, so it did not stop of
     its own accord.
+
+    `rate_limited` says the model refused the spawn: an API error of the
+    rate-limit or capacity kind, and the agent never ran a single tool.
+    That is a fact about the model, not the ticket, and the tick answers it by
+    falling back a tier. An agent that ran any tool did real work, before a
+    limit or after one it waited out. Retrying it on a weaker model would hide
+    a failure that may be the ticket's own, so it is not flagged.
     """
     if not path or not os.path.exists(path):
         return None
@@ -1840,7 +1890,13 @@ def death_report(path: str | None) -> dict | None:
 
     pending: dict[str, str] = {}   # tool_use_id -> short description
     last_text = ""
+    ran_tool = False
+    rate_limit_error = None
     for r in rows:
+        error_text = _api_error_text(r)
+        if (error_text is not None and rate_limit_error is None
+                and _is_rate_limit(error_text)):
+            rate_limit_error = " ".join(error_text.split())[:400]
         msg = r.get("message") or {}
         content = msg.get("content")
         if isinstance(content, str):
@@ -1853,6 +1909,7 @@ def death_report(path: str | None) -> dict | None:
                 continue
             kind = b.get("type")
             if kind == "tool_use":
+                ran_tool = True
                 desc = (b.get("input") or {}).get("command") or json.dumps(b.get("input"))[:200]
                 pending[b.get("id") or ""] = f"{b.get('name')}: {' '.join(str(desc).split())[:200]}"
             elif kind == "tool_result":
@@ -1861,12 +1918,70 @@ def death_report(path: str | None) -> dict | None:
                 last_text = b.get("text") or last_text
 
     unanswered = list(pending.values())
+    if ran_tool:
+        rate_limit_error = None
     return {
         "killed_mid_tool": bool(unanswered),
         "unanswered_tool": unanswered[-1] if unanswered else None,
         "last_text": " ".join(last_text.split())[-400:] if last_text else None,
         "rows": len(rows),
+        "rate_limited": rate_limit_error is not None,
+        "rate_limit_error": rate_limit_error,
     }
+
+
+def spawned_model(entries: list[dict], name: str) -> str | None:
+    """The model the newest spawn of agent `name` ran on, from history.
+
+    The registry does not say which model an agent runs on, and after a
+    fallback it is no longer the stage's first choice. The tick marks the model
+    that was actually refused. Marking the first choice instead would stamp a
+    model that was never tried. None for history written before `dispatch.sh`
+    recorded the model.
+    """
+    for e in reversed(entries):
+        ev = e.get("event") or {}
+        if ev.get("action") == "spawn" and ev.get("name") == name:
+            return ev.get("model") or None
+    return None
+
+
+# History entries that sit between two voids of a stage without ending a run of
+# them: a void is followed by a fresh spawn or resume, and a rate-limit void is
+# preceded by its fallback entry.
+_STREAK_TRANSPARENT = {"spawn", "resume", "fallback"}
+
+
+def environmental_streak(entries: list[dict]) -> dict | None:
+    """The run of voids for one role at the tail of history, or None.
+
+    A board that voids once is working as designed. A card that voids pass
+    after pass is a machine or a model that needs an operator, and nothing else
+    reports it: a void costs no attempt, so no budget ever runs out. On
+    2026-09-16 plan voids ran for 11 hours before anyone looked.
+
+    Entries of another role are skipped, and so are spawn, resume and fallback
+    entries. Any other entry ends the run: a non-void action for the role, or a
+    role-less one such as `released`, means the card moved or was let go.
+    """
+    role, count, since, last_reason = None, 0, None, None
+    for e in reversed(entries):
+        ev = e.get("event") or {}
+        action = ev.get("action")
+        if action in _STREAK_TRANSPARENT:
+            continue
+        if role is not None and ev.get("role") and ev.get("role") != role:
+            continue
+        if action != "void":
+            break
+        if role is None:
+            role, last_reason = ev.get("role") or "", ev.get("reason")
+        count += 1
+        since = e.get("at")
+    if not count:
+        return None
+    return {"role": role, "count": count, "since": since,
+            "last_reason": last_reason}
 
 
 BLOCKING = "blocking"
@@ -2128,12 +2243,14 @@ def reconcile(ticket: str, agents: list[dict]) -> dict:
     # one would report every healthy build as killed.
     for a in mine:
         a["death"] = death_report(a["transcript"]) if a["phase"] == "terminal" else None
+        a["model"] = spawned_model(entries, a["name"])
     record = {
         "ticket": ticket,
         "history": entries,
         "build_attempts": build_attempts(entries),
         "plan_rounds": plan_rounds(entries),
         "plan_attempts": plan_attempts(entries),
+        "environmental_streak": environmental_streak(entries),
         "agents": mine,
         "worktree": worktree if os.path.isdir(worktree) else None,
         "review": review_verdict(ticket, entries, pr, mine),
