@@ -155,12 +155,43 @@ export FOREMAN_HOME FOREMAN_ROOT INSTALLATION HARNESS IS_DEFAULT LEGACY_NAMES NA
 # adapter that is missing or not executable otherwise surfaces inside
 # dispatch.sh, after the worktree is cut and the branch pushed, once for every
 # card the board takes.
-HARNESS_SH="$_foreman_install_root/skills/board/harness/$HARNESS.sh"
-if [[ ! -x "$HARNESS_SH" ]]; then
-  printf 'foreman: harness %s has no executable adapter at %s\n' "$HARNESS" "$HARNESS_SH" >&2
+# WHICH HARNESSES THIS INSTALLATION MAY SPAWN ON: its own, plus any named as a
+# prefix in a fallback tier or a stage model. One tick can then fall back
+# across CLIs and not only across models, and harness/registry.sh -- the reader
+# every script uses -- merges exactly this set. See its header.
+_foreman_harnesses="$HARNESS"
+for _cand in ${FALLBACK_TIERS:-} ${TICK_MODEL:-} ${PLAN_MODEL:-} ${BUILD_MODEL:-} \
+             ${REVIEW_MODEL:-} ${CLEANUP_MODEL:-}; do
+  case "$_cand" in
+    claude:*|codex:*|opencode:*) _h="${_cand%%:*}" ;;
+    *) continue ;;
+  esac
+  case " $_foreman_harnesses " in
+    *" $_h "*) ;;
+    *) _foreman_harnesses="$_foreman_harnesses $_h" ;;
+  esac
+done
+unset _cand _h
+
+# The installation's own adapter, refused HERE and not at the spawn.
+_foreman_default_adapter="$_foreman_install_root/skills/board/harness/$HARNESS.sh"
+if [[ ! -x "$_foreman_default_adapter" ]]; then
+  printf 'foreman: harness %s has no executable adapter at %s\n' "$HARNESS" "$_foreman_default_adapter" >&2
   if [[ $- == *i* ]]; then return 1; else exit 1; fi
 fi
-export HARNESS_SH
+
+# THE READER EVERY SCRIPT USES. registry.sh merges `list` across harnesses and
+# routes `stop`/`transcript` to the owner; the harness-shaped verbs fall through
+# to the default adapter.
+HARNESS_SH="$_foreman_install_root/skills/board/harness/registry.sh"
+if [[ ! -x "$HARNESS_SH" ]]; then
+  printf 'foreman: no executable agent registry at %s\n' "$HARNESS_SH" >&2
+  if [[ $- == *i* ]]; then return 1; else exit 1; fi
+fi
+FOREMAN_DEFAULT_HARNESS="$HARNESS"
+FOREMAN_HARNESSES="$_foreman_harnesses"
+export HARNESS_SH FOREMAN_DEFAULT_HARNESS FOREMAN_HARNESSES
+unset _foreman_harnesses _foreman_default_adapter
 
 # Which board this is, where its repository is, and where its runtime lives.
 #

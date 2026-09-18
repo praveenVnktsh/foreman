@@ -71,6 +71,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import NoReturn
+from urllib.parse import quote
 
 # The format of a stamp's one line. It is the format config.sh:card_log writes
 # `at` in, and reconcile.py's CARD_LOG_STAMP reads, so a stamp and a history
@@ -99,14 +100,18 @@ def die(message: str) -> NoReturn:
     raise SystemExit(1)
 
 
-def is_stamp_name(model: str) -> bool:
-    """Whether <model> can name a file directly inside the stamp directory.
+def stamp_name(model: str) -> str:
+    """The stamp's filename for <model>, safe to open directly.
 
-    A slash would write outside it (`../x`), and a leading dot would collide
-    with the temporary file write_stamp() renames into place. Such a model is
-    never limited: it cannot be marked, so no stamp for it can exist.
+    Encoded so a model may hold any character -- a tier is `model` or
+    `harness:model`, and a Foundry model is `foundry/gpt-5.6-sol` -- without a
+    `/` escaping the directory or a leading `.` colliding with the temporary
+    file write_stamp() renames into place. quote() with an empty safe set
+    leaves only `A-Za-z0-9_.-~`, so the result is always a plain filename. The
+    encoding is not reversed: a stamp is only ever looked up by the model that
+    names it, never listed.
     """
-    return bool(model) and "/" not in model and not model.startswith(".")
+    return quote(model, safe="")
 
 
 @dataclass(frozen=True)
@@ -250,10 +255,11 @@ def live_limit(directory: Path, moment: datetime) -> Callable[[str], Limit | Non
     """A reader of the live stamp for one model, as of <moment>."""
 
     def read(model: str) -> Limit | None:
-        if not is_stamp_name(model):
+        name = stamp_name(model)
+        if not name:
             return None
         try:
-            until = parse_stamp((directory / model).read_text().strip(), f"stamp {model}")
+            until = parse_stamp((directory / name).read_text().strip(), f"stamp {model}")
         except (OSError, UnicodeDecodeError, ValueError):
             # Missing is the usual case. Unreadable is ignored on purpose; see
             # A STAMP EXPIRES BY ITSELF.
@@ -272,11 +278,12 @@ def write_stamp(directory: Path, limit: Limit) -> None:
     which no model name may, so it can never be read as a stamp.
     """
     directory.mkdir(parents=True, exist_ok=True)
-    fd, temporary = tempfile.mkstemp(dir=directory, prefix=f".{limit.model}.")
+    name = stamp_name(limit.model)
+    fd, temporary = tempfile.mkstemp(dir=directory, prefix=f".{name}.")
     try:
         with os.fdopen(fd, "w") as handle:
             handle.write(limit.until.strftime(STAMP) + "\n")
-        os.replace(temporary, directory / limit.model)
+        os.replace(temporary, directory / name)
     except OSError:
         Path(temporary).unlink(missing_ok=True)
         raise
@@ -340,9 +347,8 @@ def main(argv: list[str]) -> int:
             print_json(resolution.as_record())
         return 0
 
-    if not is_stamp_name(args.model):
-        die(f"cannot mark model {args.model!r}; expected a model name that is "
-            "not empty, contains no '/' and does not start with '.'")
+    if not args.model:
+        die("cannot mark an empty model")
     limit = Limit(args.model, moment + timedelta(minutes=cooldown_minutes(args.minutes)))
     write_stamp(stamp_dir(), limit)
     print_json(limit.as_record())

@@ -86,7 +86,8 @@ def _load_config() -> dict[str, str]:
     """
     keys = ("REPO", "FOREMAN_HOME", "MIN_FREE_TMP_MB", "MIN_FREE_REPO_MB",
             "PROBE_TMP_MB", "PROBE_REPO_MB", "QUICK_PROBE_MB",
-            "MIN_FREE_MEMORY_MB", "HARNESS", "HARNESS_SH")
+            "MIN_FREE_MEMORY_MB", "HARNESS", "HARNESS_SH",
+            "FOREMAN_DEFAULT_HARNESS", "FOREMAN_HARNESSES")
     script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.sh")
     printf = 'printf "%s\\0" ' + " ".join(f'"${k}"' for k in keys)
     out = subprocess.run(
@@ -339,6 +340,12 @@ def main() -> int:
     args = ap.parse_args()
 
     cfg = _load_config()
+    # HARNESS_SH is registry.sh, which reads the harness set from the
+    # environment; this process was handed only config.sh's keys. Put the two
+    # into the environment the `check` subprocess inherits.
+    for _key in ("FOREMAN_DEFAULT_HARNESS", "FOREMAN_HARNESSES"):
+        if cfg.get(_key):
+            os.environ.setdefault(_key, cfg[_key])
     repo = cfg["REPO"]
     tmpdir = os.environ.get("TMPDIR") or "/tmp"
     lockfile = os.path.join(cfg["FOREMAN_HOME"], "preflight.lock")

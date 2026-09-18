@@ -302,7 +302,7 @@ A number carried from one slice into the next is the previous board's answer.
 | `HOST_SLOT_STALE_MINUTES` | how long a card may go without a fresh `history.jsonl` entry before `--host-slots` stops counting it even with no `released` marker — a backstop, not the primary release mechanism |
 | `PLAN_MODEL`, `BUILD_MODEL`, `REVIEW_MODEL` | the model each dispatched role runs on — see *One model per stage* below |
 | `CLEANUP_MODEL` | the model the cleanup agent runs on, defaulting to `PLAN_MODEL` — same section |
-| `FALLBACK_TIERS`, `FALLBACK_COOLDOWN_MINUTES` | the models a rate-limited stage falls down through, strongest first, and how long a limit is believed — `installation.toml` `[fallback]`, see *A rate-limited model* in step 2. Empty tiers turn fallback off |
+| `FALLBACK_TIERS`, `FALLBACK_COOLDOWN_MINUTES` | the models a rate-limited stage falls down through, strongest first, and how long a limit is believed — `installation.toml` `[fallback]`, see *A rate-limited model* in step 2. A tier may name its harness (`opencode:foundry/gpt-5.6-sol`), so one tick falls back across CLIs and not only across models. Empty tiers turn fallback off |
 | `PLAN_FLOOR`, `BUILD_FLOOR`, `REVIEW_FLOOR` | the weakest model each stage may fall back to, from `[fallback.floor]`; empty means the bottom of the tiers. Cleanup uses `PLAN_FLOOR` |
 | `BOARD_DRY_RUN` | print every mutation instead of performing it |
 
@@ -360,6 +360,14 @@ design, not on typing it out.
 floor, until the limit's cooldown passes — see
 [A rate-limited model](#a-rate-limited-model). The knobs above are the first
 choice; each agent's `model` in `reconcile.py` is what it actually ran on.
+
+**A tier may name a different harness.** Its model is `<harness>:<model>`, and
+`dispatch.sh` spawns through that harness's adapter, so one tick can fall back
+from, say, `opencode:foundry/gpt-5.6-sol` to `claude:opus` when a provider runs
+out. With that, more than one harness's agents can be live at once, so every
+`"$HARNESS_SH" list` is `harness/registry.sh`: it merges the harnesses named in
+the tiers and stage models, and routes `stop`/`transcript` to the adapter that
+owns the agent. A tier without a prefix runs on this installation's own harness.
 
 **`--role plan` is a dispatch step 6 makes.** Planning and building are two
 agents: the plan agent draws the graph, posts it to the Linear card as a comment
