@@ -90,6 +90,22 @@ if [[ -z "${FOREMAN_HOME:-}" ]]; then
   printf 'foreman: FOREMAN_HOME resolved empty; leave it unset to derive it from this installation\n' >&2
   if [[ $- == *i* ]]; then return 1; else exit 1; fi
 fi
+
+# ONE MODEL PER STAGE, AND A STAGE MAY NAME CANDIDATES. installation.py emits
+# <STAGE>_MODEL (the first candidate) beside <STAGE>_MODELS (the whole list,
+# newline-separated). _foreman_load_pairs is environment-wins, so an operator's
+# `PLAN_MODEL=sonnet` -- or an explicit `PLAN_MODEL=` meaning "inherit" -- makes
+# the two disagree. That override says "this one model, no fallback", so the
+# list collapses to it. Everything downstream reads <STAGE>_MODELS.
+# See docs/specs/2026-09-18-project-level-installs-design.md.
+for _stage in TICK PLAN BUILD REVIEW; do
+  eval "_model_val=\"\${${_stage}_MODEL-}\""
+  eval "_models_val=\"\${${_stage}_MODELS-}\""
+  if [[ "$_model_val" != "${_models_val%%$'\n'*}" ]]; then
+    eval "${_stage}_MODELS=\"\$_model_val\""
+  fi
+done
+unset _stage _model_val _models_val
 # No hyphen, no slash, the same rule INSTANCE is held to below and for the same
 # glob: worktree_path and every sweep glob join the installation and the
 # instance with a HYPHEN, so INSTALLATION=a-b makes "foreman-a-b-demo-PRA-1"

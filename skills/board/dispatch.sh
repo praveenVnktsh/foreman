@@ -174,22 +174,32 @@ fi
 # is a plan agent in every way that matters here -- it reads origin/main and
 # files a card, and pushes nothing -- so it gets the identical throwaway shape,
 # named from its own ticket ("cleanup") rather than a card's.
+# MODEL is the primary candidate, kept for the dry run's report. CANDIDATES is
+# the ordered list dispatch walks: the first candidate whose model is healthy
+# and whose spawn does not report the provider unavailable. A cleanup agent has
+# no candidate list -- its model comes from the target's contract, not this
+# installation -- so it is a one-element list. See the status note before the
+# spawn below.
 case "$ROLE" in
   plan)
     WORKTREE="$(worktree_path "${TICKET}-${ROLE}-${ATTEMPT}${SLOT}")"
     MODEL="$PLAN_MODEL"
+    CANDIDATES="${PLAN_MODELS-$PLAN_MODEL}"
     ;;
   build)
     WORKTREE="$(worktree_path "$TICKET")"
     MODEL="$BUILD_MODEL"
+    CANDIDATES="${BUILD_MODELS-$BUILD_MODEL}"
     ;;
   review)
     WORKTREE="$(worktree_path "${TICKET}-${ROLE}-${ATTEMPT}${SLOT}")"
     MODEL="$REVIEW_MODEL"
+    CANDIDATES="${REVIEW_MODELS-$REVIEW_MODEL}"
     ;;
   cleanup)
     WORKTREE="$(worktree_path "${TICKET}-${ROLE}-${ATTEMPT}${SLOT}")"
     MODEL="$CLEANUP_MODEL"
+    CANDIDATES="$CLEANUP_MODEL"
     ;;
 esac
 
@@ -319,11 +329,58 @@ mkdir -p "$(agent_tmp_for "$WORKTREE")"
 # error, not an empty expansion. The `+` form below is the portable way to say
 # "expand only if set", and BUDGET and SKIP_PERMISSIONS are both empty on an
 # ordinary dispatch.
-SESSION="$("$HARNESS_SH" spawn --name "$NAME" --cwd "$WORKTREE" --model "$MODEL" \
-  --prompt-file "$PROMPT_FILE" --add-dir "$BOARD_HOME" \
-  --settings "$CARD_AGENT_SETTINGS" "${BUDGET[@]+"${BUDGET[@]}"}" \
-  "${SKIP_PERMISSIONS[@]+"${SKIP_PERMISSIONS[@]}"}")" \
-  || die "spawned $NAME but the adapter never reported a session id"
+# MODELS ARE TRIED IN ORDER. A candidate whose model is marked unavailable is
+# skipped. A candidate whose spawn reports the provider unavailable is marked
+# and the next is tried. Neither is a failure of the card, so no attempt is
+# charged -- dispatch either returns a session id or dies, and the tick charges
+# an attempt only when it dies. See skills/board/model-health.py and
+# docs/specs/2026-09-18-project-level-installs-design.md.
+MODEL_HEALTH="$SKILL_DIR/model-health.py"
+_provider_unavailable() { # <spawn stderr>
+  case "$1" in
+    *429*|*[Rr]"ate limit"*|*[Qq]"uota"*|*[Uu]"sage limit"*|*[Ii]"nsufficient_quota"*|*[Uu]"navailable"*)
+      return 0 ;;
+  esac
+  return 1
+}
+
+SESSION=""
+SPAWN_ERROR="$(mktemp "${TMPDIR:-/tmp}/foreman-spawn-error.XXXXXX")" \
+  || die "cannot create a temp file for a spawn's error output"
+while IFS= read -r CANDIDATE; do
+  # An empty candidate is the operator's `PLAN_MODEL=` -- "inherit this
+  # session's model" -- and must reach the adapter, not be skipped.
+  #
+  # Health is an optimisation, so a model-health.py this installation does not
+  # have -- a test shim, or an install older than the file -- disables the gate
+  # rather than refusing every candidate. `-x` and not a bare call: a missing
+  # tool exits non-zero, which the gate below would read as "unavailable".
+  _health=0
+  if [[ -x "$MODEL_HEALTH" ]]; then
+    "$MODEL_HEALTH" healthy "$CANDIDATE" 2>/dev/null || _health=$?
+  fi
+  if [[ "$_health" -eq 1 ]]; then continue; fi
+  if SESSION="$("$HARNESS_SH" spawn --name "$NAME" --cwd "$WORKTREE" --model "$CANDIDATE" \
+       --prompt-file "$PROMPT_FILE" --add-dir "$BOARD_HOME" \
+       --settings "$CARD_AGENT_SETTINGS" "${BUDGET[@]+"${BUDGET[@]}"}" \
+       "${SKIP_PERMISSIONS[@]+"${SKIP_PERMISSIONS[@]}"}" 2>"$SPAWN_ERROR")"; then
+    MODEL="$CANDIDATE"
+    break
+  fi
+  if _provider_unavailable "$(cat "$SPAWN_ERROR")"; then
+    "$MODEL_HEALTH" fail "$CANDIDATE" "$(tail -c 300 "$SPAWN_ERROR" | tr '\n' ' ')" \
+      >/dev/null 2>&1 || true
+    continue
+  fi
+  cat "$SPAWN_ERROR" >&2
+  rm -f "$SPAWN_ERROR"
+  die "spawned $NAME but the adapter never reported a session id"
+done <<< "$CANDIDATES"
+rm -f "$SPAWN_ERROR"
+[[ -n "$SESSION" ]] \
+  || die "every model candidate for $NAME is unavailable; refusing to dispatch $NAME.
+This is NOT a failure of ticket $TICKET and must not consume its attempt budget.
+Clear a model with model-health.py clear <model>, or name another candidate."
 
 mkdir -p "$(card_dir "$TICKET")"
 # "ref" carries the sha a reviewer read (empty for a role that has none, plan

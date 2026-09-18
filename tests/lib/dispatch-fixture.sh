@@ -24,7 +24,7 @@ source "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/instance-fixture.sh"
 # arrives -- a knob cleared at setup and never passed through reaches no
 # dispatch, and a knob passed through but never cleared carries the operator's
 # value into every test.
-_DISPATCH_MODEL_KNOBS="PLAN_MODEL BUILD_MODEL REVIEW_MODEL"
+_DISPATCH_MODEL_KNOBS="PLAN_MODEL BUILD_MODEL REVIEW_MODEL PLAN_MODELS BUILD_MODELS REVIEW_MODELS DISPATCH_FAIL_MODELS"
 
 # The programs dispatch.sh runs. Read dispatch.sh and check this list rather
 # than trusting it; each name says where it is run:
@@ -107,6 +107,10 @@ dispatch_fixture_setup() {
   # off in silence; now it dies at the gate before any spawn, which every test
   # on this fixture reads as "never reached claude --bg".
   ln -s "$board_dir/reconcile.py" "$shim/reconcile.py"
+  # dispatch.sh consults model-health.py before every spawn, so a shim without
+  # it either refuses the candidate or, worse, silently treats a missing tool
+  # as "unavailable". Link it like the rest of the board's files.
+  ln -s "$board_dir/model-health.py" "$shim/model-health.py"
   # The WHOLE directory, as one symlink. config.sh checks that
   # skills/board/harness/$HARNESS.sh under this root is executable and refuses
   # there rather than at the spawn, so the adapter this installation selects has
@@ -166,6 +170,19 @@ PY
 #!/usr/bin/env bash
 if [[ "\$1" == "--bg" ]]; then
   printf '%s\n' "\$@" >"$DISPATCH_ARGV_LOG"
+  # A test names models that should look like an unavailable provider, so
+  # dispatch's candidate fallback is exercised end to end. The argv is logged
+  # first, so a failed candidate is still visible in it.
+  model=""; prev=""
+  for a in "\$@"; do
+    if [[ "\$prev" == "--model" ]]; then model="\$a"; fi
+    prev="\$a"
+  done
+  case " \${DISPATCH_FAIL_MODELS-} " in
+    *" \$model "*)
+      printf 'provider unavailable: model %s returned 429 (rate limit)\n' "\$model" >&2
+      exit 1 ;;
+  esac
   printf '%s\n' "\${CLAUDE_CODE_SUBAGENT_MODEL-<unset>}" >"$DISPATCH_SUBAGENT_MODEL_LOG"
   while [[ \$# -gt 0 ]]; do
     if [[ "\$1" == "--name" && \$# -ge 2 ]]; then printf '%s\n' "\$2" >"$_DISPATCH_AGENT_NAME_LOG"; fi

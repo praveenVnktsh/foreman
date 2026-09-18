@@ -7,11 +7,17 @@
     installation.py [--home <path>] ...   read <path> instead of this home
 
 Emits NUL-separated KEY, VALUE pairs on stdout: INSTALLATION, HARNESS,
-IS_DEFAULT, LEGACY_NAMES, FOREMAN_HOME, FOREMAN_ROOT, TICK_MODEL, PLAN_MODEL,
-BUILD_MODEL, REVIEW_MODEL. Consumers count fields to detect a failed load, so
-EVERY key is always emitted -- this file follows bin/boards.py in structure,
-wire format and refusal style, and boards.py's docstring gives the reasoning
-behind all three.
+IS_DEFAULT, LEGACY_NAMES, FOREMAN_HOME, FOREMAN_ROOT, TICK_MODEL, TICK_MODELS,
+PLAN_MODEL, PLAN_MODELS, BUILD_MODEL, BUILD_MODELS, REVIEW_MODEL, REVIEW_MODELS.
+Consumers count fields to detect a failed load, so EVERY key is always emitted --
+this file follows bin/boards.py in structure, wire format and refusal style, and
+boards.py's docstring gives the reasoning behind all three.
+
+A stage carries an ordered list of candidate models. `<STAGE>_MODEL` is the
+first candidate, so the operator override both keys already had keeps working;
+`<STAGE>_MODELS` is the whole list, newline-separated, which dispatch walks when
+the first candidate is unavailable. See
+docs/specs/2026-09-18-project-level-installs-design.md.
 
 One machine runs several installations at once, each on its own harness. The
 machine root holds one directory per installation, and this file is what says
@@ -205,12 +211,15 @@ def legacy_names_flag(where: str, doc: dict) -> bool:
 
 
 def resolve_models(where: str, harness: str, given: dict) -> dict:
-    """The four stage models, defaulted for Claude and required for the rest.
+    """The four stage models as ordered candidate lists.
 
     Codex and OpenCode have NO defaults, on purpose. A wrong model name on
     those harnesses is not refused when the agent is spawned: the harness runs
     detached, fails somewhere inside its own log, and the card just never
     moves. Refusing here puts the error in front of the operator who typed it.
+
+    A stage value is a string (one candidate) or a list (ordered candidates,
+    first tried first). Claude's defaults are single candidates.
     """
     out = {}
     for stage in STAGES:
@@ -220,19 +229,29 @@ def resolve_models(where: str, harness: str, given: dict) -> dict:
                 die(f"{where}: harness {harness} declares no {stage} model; "
                     f"{harness} has no default, so name all of "
                     f"{', '.join(STAGES)} explicitly")
-            out[stage] = CLAUDE_MODELS[stage]
+            out[stage] = [CLAUDE_MODELS[stage]]
             continue
-        if not isinstance(value, str):
-            die(f"{where}: {MODELS_TABLE}.{stage} must be a string")
-        if not value.strip():
-            die(f"{where}: {MODELS_TABLE}.{stage} may not be empty; "
-                "omit the key where the harness has a default")
-        # A NUL byte would desynchronize the KEY, VALUE stream below, so every
-        # later key a consumer read would be off by one field.
-        if "\0" in value:
-            die(f"{where}: {MODELS_TABLE}.{stage} may not contain a NUL byte")
-        out[stage] = value
+        candidates = value if isinstance(value, list) else [value]
+        out[stage] = [model_candidate(where, stage, item) for item in candidates]
     return out
+
+
+def model_candidate(where: str, stage: str, value: object) -> str:
+    """One candidate string, or a refusal naming why it cannot be a model."""
+    if not isinstance(value, str):
+        die(f"{where}: {MODELS_TABLE}.{stage} must be a string or a list of strings")
+    if not value.strip():
+        die(f"{where}: {MODELS_TABLE}.{stage} may not be empty; "
+            "omit the key where the harness has a default")
+    # A NUL byte would desynchronize the KEY, VALUE stream below, so every
+    # later key a consumer read would be off by one field.
+    if "\0" in value:
+        die(f"{where}: {MODELS_TABLE}.{stage} may not contain a NUL byte")
+    # A newline separates candidates in <STAGE>_MODELS. A candidate holding one
+    # would split into two candidates that both look fine downstream.
+    if "\n" in value:
+        die(f"{where}: {MODELS_TABLE}.{stage} candidate may not contain a newline")
+    return value
 
 
 def parse(path: str) -> tuple[str, bool, bool, dict]:
@@ -460,7 +479,8 @@ def record(home: str) -> list[str]:
     # card reads "no PR" and is built again on top of its open pull request.
     if not declared(home):
         refuse_undeclared_beside_siblings(home)
-        return fields(CLAUDE, CLAUDE, True, True, home, home, CLAUDE_MODELS)
+        defaults = {stage: [CLAUDE_MODELS[stage]] for stage in STAGES}
+        return fields(CLAUDE, CLAUDE, True, True, home, home, defaults)
 
     path = os.path.join(home, INSTALLATION_FILE)
     name = os.path.basename(home)
@@ -485,18 +505,20 @@ def fields(name: str, harness: str, is_default: bool, legacy_names: bool,
     # IS_DEFAULT and LEGACY_NAMES are the two keys whose empty value is
     # meaningful: config.sh tests them with `-n`, so "" is false and "1" is
     # true. Every other key here refuses to be empty.
-    return [
+    out = [
         "INSTALLATION", name,
         "HARNESS", harness,
         "IS_DEFAULT", "1" if is_default else "",
         "LEGACY_NAMES", "1" if legacy_names else "",
         "FOREMAN_HOME", home,
         "FOREMAN_ROOT", root,
-        "TICK_MODEL", models["tick"],
-        "PLAN_MODEL", models["plan"],
-        "BUILD_MODEL", models["build"],
-        "REVIEW_MODEL", models["review"],
     ]
+    for stage in STAGES:
+        out += [
+            f"{stage.upper()}_MODEL", models[stage][0],
+            f"{stage.upper()}_MODELS", "\n".join(models[stage]),
+        ]
+    return out
 
 
 def toml_string(value: str) -> str:
@@ -506,12 +528,24 @@ def toml_string(value: str) -> str:
     return f'"{escaped}"'
 
 
+def toml_models(candidates: list[str]) -> str:
+    """One candidate as a TOML string, several as an array of strings.
+
+    A single candidate stays a plain string so an installation written here is
+    byte-identical to one written before candidate lists existed.
+    """
+    if len(candidates) == 1:
+        return toml_string(candidates[0])
+    return "[" + ", ".join(toml_string(c) for c in candidates) + "]"
+
+
 def render(harness: str, is_default: bool, legacy_names: bool, models: dict) -> str:
     """installation.toml as text. tomllib reads TOML and cannot write it, and
     a writer is not worth a dependency for eight lines of two-token keys."""
     lines = [
         "# What this installation is: the harness that runs it, and the models",
-        "# it spends. Written by bin/install.sh; bin/installation.py reads it.",
+        "# it spends. A stage lists candidates in order; dispatch runs the first",
+        "# that is available. Written by bin/install.sh; bin/installation.py reads it.",
         "",
         f"harness = {toml_string(harness)}",
         f"default = {'true' if is_default else 'false'}",
@@ -519,7 +553,7 @@ def render(harness: str, is_default: bool, legacy_names: bool, models: dict) -> 
         "",
         f"[{MODELS_TABLE}]",
     ]
-    lines += [f"{stage} = {toml_string(models[stage])}" for stage in STAGES]
+    lines += [f"{stage} = {toml_models(models[stage])}" for stage in STAGES]
     return "\n".join(lines) + "\n"
 
 
@@ -620,7 +654,9 @@ def main(argv: list[str]) -> int:
         elif arg == "--harness":
             harness = value_for(arg)
         elif arg in MODEL_FLAGS:
-            models[MODEL_FLAGS[arg]] = value_for(arg)
+            # Repeated for one stage, the values are its ordered candidates:
+            # --model-plan A --model-plan B tries A first.
+            models.setdefault(MODEL_FLAGS[arg], []).append(value_for(arg))
         elif arg == "--siblings":
             want_siblings = True
         elif arg == "--write":

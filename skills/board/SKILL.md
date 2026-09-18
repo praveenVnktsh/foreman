@@ -339,6 +339,15 @@ Read the values from `config.sh`, the way you read every other knob above. What
 this section fixes is the *shape*: the plan gets the strongest model, and the
 build is capped below it.
 
+**A stage may name candidates, tried in order.** `installation.toml`'s
+`[models]` value is one model or an array of them. `config.sh` exposes the list
+as `<STAGE>_MODELS` and its first element as `<STAGE>_MODEL`; `dispatch.sh`
+walks the list. A candidate marked unavailable — `skills/board/model-health.py`
+— is skipped, and a candidate whose spawn reports the provider rate-limited is
+marked and the next is tried. Neither is a failure of the card, so it is
+charged no attempt. See
+`docs/specs/2026-09-18-project-level-installs-design.md`.
+
 **`CLEANUP_MODEL` defaults to `PLAN_MODEL`**, because a cleanup pass is the
 plan stage's own work in miniature: it reads the whole codebase, decides what is
 worth changing, and draws a graph for it. A target that wants a cheaper one says
