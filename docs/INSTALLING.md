@@ -207,24 +207,38 @@ watchdog `install-service.sh` installs:
 
 ## Releasing
 
-By default an installation follows the **latest GitHub Release**.
-`bin/self-update.sh` polls it (`gh release list --limit 1`) and fast-forwards the
-clone to its tag, so a merge to `main` deploys nothing until a release is cut.
-This needs `gh` installed and authenticated for the user the timer runs as; a gh
-that cannot answer is a refusal, not a silent no-op.
+An installation follows the **latest GitHub Release**. `.github/workflows/release.yml`
+cuts one on every push to `main`, and `bin/self-update.sh` polls the latest and
+fast-forwards the clone to its tag. So a merge deploys — unless the commit opts
+out. This needs `gh` installed and authenticated for the user the timer runs as;
+a gh that cannot answer is a refusal, not a silent no-op.
 
-Cut a release from any clone with push access:
+The workflow runs on GitHub-hosted runners, never on your machine, and only on a
+push to `main` — never on a pull request — so no contributor's branch is in scope.
+
+### Opting a commit out
+
+A commit is not released when its message carries `[skip release]` or a
+`Release: skip` trailer. A squash merge takes the pull request body as the commit
+body, so `Release: skip` in the PR description is enough. `bin/release.sh` checks
+the head commit and exits 0 without cutting, and the Action is a no-op for it.
+
+### Cutting one by hand
+
+Any clone with push access can cut a release, and `--force` overrides a skip:
 
     bin/release.sh --dry-run         # say what it would cut, change nothing
     bin/release.sh                   # tag origin/main and publish a release
     bin/release.sh --version v1.4.0  # name the tag (default vYYYY.MM.DD)
+    bin/release.sh --force           # ignore a [skip release] marker
 
 `gh release create <tag> --target <main sha> --generate-notes` makes the tag and
 the release in one act. A tag that already exists is refused — a release is never
 rewritten.
 
-An installation can instead follow a git ref, for a development machine that
-wants main:
+### Following a git ref instead
+
+A development machine can track a ref rather than releases:
 
     ~/.foreman/claude/install/bin/install-self-update.sh --ref origin/main
 

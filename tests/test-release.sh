@@ -82,4 +82,21 @@ out="$("$release" --dry-run 2>&1)"
   && ok "the default tag is today's date" \
   || bad "default tag said: $out"
 
+# A head commit marked do-not-release is not cut by the Action that runs this.
+git_q -C "$seed" commit -q --allow-empty -m "wip [skip release]"
+git_q -C "$seed" push -q origin main
+: >"$GH_LOG"
+if out="$("$release" 2>&1)"; then
+  grep -q "do-not-release" <<<"$out" && [[ ! -s "$GH_LOG" ]] \
+    && ok "a flagged head commit is skipped, and gh is never called" \
+    || bad "flagged head -> $out; gh log: $(cat "$GH_LOG")"
+else
+  bad "a flagged commit failed instead of skipping: $out"
+fi
+
+out="$("$release" --force 2>&1)" || bad "--force failed: $out"
+grep -q "release create v" "$GH_LOG" \
+  && ok "--force cuts a flagged commit anyway" \
+  || bad "--force did not call gh: $(cat "$GH_LOG")"
+
 exit "$fail"

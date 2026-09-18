@@ -23,11 +23,13 @@ ROOT="$(dirname -- "$HERE")"
 
 VERSION=""
 DRY=""
+FORCE=""
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --dry-run) DRY=1; shift ;;
+    --force) FORCE=1; shift ;;
     --version) [[ $# -ge 2 ]] || die "--version needs a value"; VERSION="$2"; shift 2 ;;
-    *) die "unknown argument: $1 (expected --dry-run or --version <tag>)" ;;
+    *) die "unknown argument: $1 (expected --dry-run, --force or --version <tag>)" ;;
   esac
 done
 
@@ -43,6 +45,23 @@ GIT_TERMINAL_PROMPT=0 \
 NEW="$(git -C "$ROOT" rev-parse FETCH_HEAD)"
 NEW_SHORT="$(git -C "$ROOT" rev-parse --short "$NEW")"
 SUBJECT="$(git -C "$ROOT" log -1 --format=%s "$NEW")"
+
+# A COMMIT CAN OPT OUT OF RELEASING ITSELF. `.github/workflows/release.yml`
+# runs this script on every push to main, so a merge releases unless its commit
+# says otherwise. A head commit whose message carries `[skip release]` or a
+# `Release: skip` trailer is not released: this exits 0 without cutting, which
+# the Action reads as a successful no-op. --force cuts it anyway, and a manual
+# `release.sh --version` on a DIFFERENT commit is unaffected -- the marker is on
+# the commit being released, not a blanket switch.
+if [[ -z "$FORCE" ]] \
+   && git -C "$ROOT" log -1 --format=%B "$NEW" | grep -qiE '\[skip release\]|(^|[[:space:]])release:[[:space:]]*skip'; then
+  if [[ -n "$DRY" ]]; then
+    printf 'release: %s is marked do-not-release; would cut nothing (--force overrides).\n' "$NEW_SHORT"
+    exit 0
+  fi
+  printf 'release: %s is marked do-not-release; nothing cut (--force overrides).\n' "$NEW_SHORT"
+  exit 0
+fi
 
 tag_exists() { git -C "$ROOT" ls-remote --exit-code --tags origin "refs/tags/$1" >/dev/null 2>&1; }
 
