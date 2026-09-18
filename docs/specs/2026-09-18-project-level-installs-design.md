@@ -89,11 +89,18 @@ liveness — and `list` for claude reads it to answer in the common shape.
 
 ## Project-scoped installs
 
-One board per installation, named for the project. The card's project decides
-its owner, so `route.py`, `queue.py`'s routing, the `foreman:<name>` label and
-the default-installation rule all stop meaning anything. A tick claims the Todo
-cards of its board's project and no others. The host ceiling keeps counting
-every board of every installation, unchanged.
+An installation may declare `routing = "project"`: one board per installation,
+named for the project. The tick hands `queue.py` its board's Todo cards, and
+`queue.py` claims every one of them — the `foreman:<name>` label and the
+default-installation rule stop mattering, because there is one installation per
+project. `routing = "label"` (the default) is unchanged, so an installation
+that already routes by label keeps working. The host ceiling keeps counting
+every board of every installation either way.
+
+Project routing requires the operator to keep one installation per project. Two
+installations serving one project in `project` mode would both claim every card
+and dispatch it twice; nothing validates that yet, which is why the mode is
+opt-in and not the default.
 
 ## Still deferred
 

@@ -298,6 +298,7 @@ A number carried from one slice into the next is the previous board's answer.
 | `MIN_FREE_*`, `PROBE_*`, `QUICK_PROBE_MB` | environment thresholds enforced by `preflight.py` — declared per-target in `board.toml`'s `[limits]`, not here. **foreman's own defaults are sized for foreman's own cheap suite**; a target with a heavy build (a real test suite, a large `node_modules`, …) that declares no `[limits]` silently inherits them and can pass this preflight while still dying mid-build the way two consecutive attempts on one card did on 2026-08-02 — see `bin/contract.py`. |
 | `HOST_MAX_CONCURRENT` | cards holding a slot, summed across **every** board on this machine |
 | `HOST_SLOT_STALE_MINUTES` | how long a card may go without a fresh `history.jsonl` entry before `--host-slots` stops counting it even with no `released` marker — a backstop, not the primary release mechanism |
+| `ROUTING` | `label` (default) routes a card by its `foreman:<name>` label; `project` means this installation's board is its only board, so every Todo card the tick hands `queue.py` is its own and labels are decoration — see *One project per installation* below |
 | `PLAN_MODEL`, `BUILD_MODEL`, `REVIEW_MODEL` | the model each dispatched role runs on — see *One model per stage* below |
 | `CLEANUP_MODEL` | the model the cleanup agent runs on, defaulting to `PLAN_MODEL` — same section |
 | `BOARD_DRY_RUN` | print every mutation instead of performing it |
@@ -352,6 +353,17 @@ charged no attempt. See
 plan stage's own work in miniature: it reads the whole codebase, decides what is
 worth changing, and draws a graph for it. A target that wants a cheaper one says
 so in its own `board.toml` `[cleanup] model`.
+
+### One project per installation
+
+By default a card routes to its installation by the `foreman:<name>` label, and
+the default installation owns unlabelled cards -- the model for several
+installations serving one board. An installation may instead declare
+`routing = "project"` in `installation.toml`: it then serves exactly one board,
+every Todo card in that board's project is its own, and the label and default
+rules do not apply. The operator must keep one installation per project; two in
+`project` mode over one project would each dispatch every card. See
+`docs/specs/2026-09-18-project-level-installs-design.md`.
 
 **The plan is where the strongest model earns its cost.** It is drawn once,
 before any code exists, and every build agent afterwards is only as good as the

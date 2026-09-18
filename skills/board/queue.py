@@ -158,6 +158,13 @@ PRIORITY_BANDS = {0: 5, 1: 1, 2: 2, 3: 3, 4: 4}
 # is.
 NOTHING_RANKED = 3
 
+# `project` routing: this board is the installation's only board, so every card
+# the tick hands over is this installation's and the label filter is skipped.
+# config.sh exports ROUTING; anything other than "project" (including unset) is
+# the label routing route.py implements.
+ROUTING = os.environ.get("ROUTING", "label")
+PROJECT_ROUTING = "project"
+
 # Exit status for a wrong argv, which is argparse's own default and the code
 # every other tool on this board uses for the same failure: a required flag
 # missing, or --installation not among --siblings.
@@ -324,19 +331,20 @@ def main(argv: list[str]) -> int:
             die(f"{identifier}: appears twice; every card must be listed once")
         seen.add(identifier)
 
-        try:
-            verdict = route.verdict(item, args.installation, args.default, args.siblings)
-        except route.LabelShape as exc:
-            # Not caught by route.verdict on purpose -- see its docstring. A
-            # card with unreadable labels is a shape nobody has taught this
-            # module, and ranking it anyway could rank a sibling's card.
-            die(f"{identifier}: {exc}")
+        if ROUTING != PROJECT_ROUTING:
+            try:
+                verdict = route.verdict(item, args.installation, args.default, args.siblings)
+            except route.LabelShape as exc:
+                # Not caught by route.verdict on purpose -- see its docstring. A
+                # card with unreadable labels is a shape nobody has taught this
+                # module, and ranking it anyway could rank a sibling's card.
+                die(f"{identifier}: {exc}")
 
-        if not verdict.owned:
-            report_drop(identifier, verdict.detail)
-            if verdict.reason is not route.Reason.FOREIGN:
-                unresolved = True
-            continue
+            if not verdict.owned:
+                report_drop(identifier, verdict.detail)
+                if verdict.reason is not route.Reason.FOREIGN:
+                    unresolved = True
+                continue
 
         try:
             rank = band(item.get("priority"))

@@ -6,7 +6,7 @@
     installation.py --write --harness codex [--default] [--legacy-names] [--model-tick M] ...
     installation.py [--home <path>] ...   read <path> instead of this home
 
-Emits NUL-separated KEY, VALUE pairs on stdout: INSTALLATION, HARNESS,
+Emits NUL-separated KEY, VALUE pairs on stdout: INSTALLATION, HARNESS, ROUTING,
 IS_DEFAULT, LEGACY_NAMES, FOREMAN_HOME, FOREMAN_ROOT, TICK_MODEL, TICK_MODELS,
 PLAN_MODEL, PLAN_MODELS, BUILD_MODEL, BUILD_MODELS, REVIEW_MODEL, REVIEW_MODELS.
 Consumers count fields to detect a failed load, so EVERY key is always emitted --
@@ -54,7 +54,18 @@ CLAUDE = "claude"
 
 MODELS_TABLE = "models"
 NAMES_KEY = "names"
-TOP_KEYS = {"harness", "default", NAMES_KEY, MODELS_TABLE}
+TOP_KEYS = {"harness", "default", NAMES_KEY, MODELS_TABLE, "routing"}
+
+# How a card reaches this installation. `label` (the default) routes by the
+# `foreman:<name>` card label, with the default installation owning unlabelled
+# cards -- the model for several installations serving one board.
+# `project` routes by the card's project: this installation serves exactly one
+# board, so every card in that board's project is its own and labels are
+# decoration. See docs/specs/2026-09-18-project-level-installs-design.md.
+ROUTING_KEY = "routing"
+LABEL_ROUTING = "label"
+PROJECT_ROUTING = "project"
+ROUTINGS = (LABEL_ROUTING, PROJECT_ROUTING)
 
 # The two shapes an installation's names may take. skills/board/config.sh
 # composes both from LEGACY_NAMES and spells each one out.
@@ -254,8 +265,8 @@ def model_candidate(where: str, stage: str, value: object) -> str:
     return value
 
 
-def parse(path: str) -> tuple[str, bool, bool, dict]:
-    """One installation.toml as (harness, is_default, legacy_names, models)."""
+def parse(path: str) -> tuple[str, str, bool, bool, dict]:
+    """One installation.toml as (harness, routing, is_default, legacy, models)."""
     doc = load_toml(path)
     unknown = sorted(set(doc) - TOP_KEYS)
     if unknown:
@@ -269,6 +280,16 @@ def parse(path: str) -> tuple[str, bool, bool, dict]:
     if harness not in HARNESSES:
         die(f"{path}: unknown harness {harness!r}; expected one of {', '.join(HARNESSES)}")
 
+    routing = doc.get(ROUTING_KEY, LABEL_ROUTING)
+    # `routing = 1` loads as an int and would read as deliberate. It is a typo,
+    # and a typo that decides which cards this installation takes is not one to
+    # guess at.
+    if not isinstance(routing, str):
+        die(f"{path}: {ROUTING_KEY} must be a string")
+    if routing not in ROUTINGS:
+        die(f"{path}: unknown {ROUTING_KEY} {routing!r}; "
+            f"expected one of {', '.join(ROUTINGS)}")
+
     table = doc.get(MODELS_TABLE, {})
     if not isinstance(table, dict):
         die(f"{path}: {MODELS_TABLE} must be a table")
@@ -276,7 +297,7 @@ def parse(path: str) -> tuple[str, bool, bool, dict]:
     if unknown:
         die(f"{path}: unknown key(s) in {MODELS_TABLE}: {', '.join(unknown)}")
 
-    return (harness, default_flag(path, doc), legacy_names_flag(path, doc),
+    return (harness, routing, default_flag(path, doc), legacy_names_flag(path, doc),
             resolve_models(path, harness, table))
 
 
@@ -480,13 +501,13 @@ def record(home: str) -> list[str]:
     if not declared(home):
         refuse_undeclared_beside_siblings(home)
         defaults = {stage: [CLAUDE_MODELS[stage]] for stage in STAGES}
-        return fields(CLAUDE, CLAUDE, True, True, home, home, defaults)
+        return fields(CLAUDE, CLAUDE, LABEL_ROUTING, True, True, home, home, defaults)
 
     path = os.path.join(home, INSTALLATION_FILE)
     name = os.path.basename(home)
     validate_name(home, name)
     root = foreman_root(home)
-    harness, declares_default, legacy_names, models = parse(path)
+    harness, routing, declares_default, legacy_names, models = parse(path)
     entries = siblings_checked(root)
     # AN INSTALLATION WITH NO SIBLING IS THE DEFAULT, whatever its file says.
     # One installation on the machine is the common case, and it must own
@@ -497,10 +518,10 @@ def record(home: str) -> list[str]:
     # unlabelled card as FOREIGN and exited 0, and a board installed exactly
     # as the README says never dispatched anything and never said why.
     is_default = declares_default or len(entries) == 1
-    return fields(name, harness, is_default, legacy_names, home, root, models)
+    return fields(name, harness, routing, is_default, legacy_names, home, root, models)
 
 
-def fields(name: str, harness: str, is_default: bool, legacy_names: bool,
+def fields(name: str, harness: str, routing: str, is_default: bool, legacy_names: bool,
            home: str, root: str, models: dict) -> list[str]:
     # IS_DEFAULT and LEGACY_NAMES are the two keys whose empty value is
     # meaningful: config.sh tests them with `-n`, so "" is false and "1" is
@@ -508,6 +529,7 @@ def fields(name: str, harness: str, is_default: bool, legacy_names: bool,
     out = [
         "INSTALLATION", name,
         "HARNESS", harness,
+        "ROUTING", routing,
         "IS_DEFAULT", "1" if is_default else "",
         "LEGACY_NAMES", "1" if legacy_names else "",
         "FOREMAN_HOME", home,
@@ -539,7 +561,7 @@ def toml_models(candidates: list[str]) -> str:
     return "[" + ", ".join(toml_string(c) for c in candidates) + "]"
 
 
-def render(harness: str, is_default: bool, legacy_names: bool, models: dict) -> str:
+def render(harness: str, routing: str, is_default: bool, legacy_names: bool, models: dict) -> str:
     """installation.toml as text. tomllib reads TOML and cannot write it, and
     a writer is not worth a dependency for eight lines of two-token keys."""
     lines = [
@@ -548,6 +570,7 @@ def render(harness: str, is_default: bool, legacy_names: bool, models: dict) -> 
         "# that is available. Written by bin/install.sh; bin/installation.py reads it.",
         "",
         f"harness = {toml_string(harness)}",
+        f"{ROUTING_KEY} = {toml_string(routing)}",
         f"default = {'true' if is_default else 'false'}",
         f"{NAMES_KEY} = {toml_string(LEGACY_NAMES if legacy_names else SCOPED_NAMES)}",
         "",
@@ -603,7 +626,7 @@ def write(home: str, harness: str | None, is_default: bool, legacy_names: bool,
         die(f"cannot write {path}: {exc}")
     try:
         with os.fdopen(fd, "w") as fh:
-            fh.write(render(harness, is_default, legacy_names, models))
+            fh.write(render(harness, LABEL_ROUTING, is_default, legacy_names, models))
         # Read back what was written, through the real loader. It proves the
         # text this file emitted parses, and it applies the sibling check --
         # so `--write --default` beside an existing default refuses, and so
