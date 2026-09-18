@@ -70,15 +70,18 @@ the quality work that review no longer blocks on.
 - **Linear priority** orders the queue; boards take turns round-robin.
 
 ### Operating it
-- **Several boards** from one tick, each with its own concurrency limit.
-- **Several installations** on one machine, each on its own harness — Claude
-  Code, Codex or OpenCode — routed by a `foreman:<name>` card label.
+- **One tick, every board** — a single installation serves all your projects,
+  each board with its own concurrency limit.
+- **Dispatch to whichever agent works.** A stage's model is an ordered list of
+  candidates — `opencode:foundry/gpt-5.6-sol`, `claude:opus` — and the tick
+  spawns the first not rate-limited, falling back across models *and* across
+  CLIs. See [Models and fallback](#models-and-fallback).
 - **A watchdog** (`supervise.sh`) that restarts a stuck tick and can never
   dispatch a card itself.
 - **Preflight** refuses to dispatch when the machine cannot build, without
   blaming the card.
-- **Self-update by pulling**: fast-forward to `origin/main` and restart, leaving
-  in-flight cards alone.
+- **Release-gated updates.** An installation tracks `origin/release`, so a merge
+  to `main` is staging; `bin/release.sh` promotes what deploys.
 
 ## Quick start
 
@@ -103,9 +106,35 @@ use launchd or cron):
 ```
 
 `install-skills.sh` is required: the tick runs `/board`, and the harness only
-finds skills in its own skills directory. Second installations, other
-harnesses and migrating an old home are covered in
+finds skills in its own skills directory. The release branch, migrating an old
+home and the other harnesses are covered in
 [docs/INSTALLING.md](docs/INSTALLING.md).
+
+## Models and fallback
+
+One installation serves every board. Each stage names its model in
+`installation.toml`, and `[fallback]` lists the models it may fall down through,
+strongest first. A tier is `model` or `harness:model`, so the tick falls back
+across providers *and* across CLIs:
+
+```toml
+[models]
+plan = "opencode:foundry/gpt-6-astra"
+build = "opencode:foundry/gpt-5.6-sol"
+
+[fallback]
+tiers = ["opencode:foundry/gpt-6-astra", "opencode:foundry/gpt-5.6-sol", "claude:opus"]
+
+[fallback.floor]
+plan = "claude:opus"          # the weakest model the plan stage may reach
+```
+
+`dispatch.sh` spawns the first tier whose model is not marked rate-limited,
+never below the stage's floor. A model is marked when a spawn refuses it, or
+when an agent dies mid-run on an API rate-limit error, and unmarked when the
+cooldown passes. Because one tick may spawn on more than one harness, the agent
+registry (`$HARNESS_SH list`) merges every harness it can use. The design is in
+[docs/specs](docs/specs/).
 
 ## Make a repository buildable
 
@@ -158,7 +187,7 @@ One tick end to end, with every file it touches, is drawn in
 
 | Read | For |
 | --- | --- |
-| [docs/INSTALLING.md](docs/INSTALLING.md) | Installations, harnesses, migration, self-update |
+| [docs/INSTALLING.md](docs/INSTALLING.md) | Install, models and fallback, releases, migration |
 | [docs/board-flow.md](docs/board-flow.md) | What one tick does, file by file |
 | [docs/specs/](docs/specs/) | Why the loop is shaped the way it is |
 | [AGENTS.md](AGENTS.md) | The map for anyone, or any agent, changing this code |

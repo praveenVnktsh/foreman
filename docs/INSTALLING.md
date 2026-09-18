@@ -71,20 +71,27 @@ is why it no longer does.
 `installation.toml` gains an optional `[fallback]` table:
 
     [fallback]
-    tiers = ["fable", "opus", "sonnet", "haiku"]   # strongest first
+    tiers = ["opencode:foundry/gpt-6-astra", "opencode:foundry/gpt-5.6-sol", "claude:opus"]
     cooldown_minutes = 60                          # positive integer
 
     [fallback.floor]                               # optional, per stage
-    plan = "opus"
+    plan = "claude:opus"
 
 - **`tiers`** lists this installation's models, strongest first. A stage's
   own model (`plan`, `build`, and so on) must be one of them to fall back at
   all; a stage whose model is not in the list runs on it unconditionally, rate
-  limit or not. Claude defaults `tiers` to `["fable", "opus", "sonnet",
-  "haiku"]`. Codex and OpenCode default it to `[]`, off, because their model
-  names are the operator's own and a guessed order could downgrade a stage
-  onto a model that installation cannot run at all. Write `tiers = []` on
-  Claude to turn fallback off the same way.
+  limit or not. **A tier is `model` or `harness:model`**, so one tick falls back
+  across providers *and* across CLIs: `"opencode:foundry/gpt-5.6-sol"` spawns
+  through the OpenCode adapter with model `foundry/gpt-5.6-sol`, and
+  `"claude:opus"` through Claude Code. A tier without a prefix runs on this
+  installation's own harness. Because a tick may then have agents in more than
+  one harness's registry, `$HARNESS_SH list` is
+  [`harness/registry.sh`](../skills/board/harness/registry.sh), which merges
+  every harness named in the tiers and stage models. Claude defaults `tiers` to
+  `["fable", "opus", "sonnet", "haiku"]`. Codex and OpenCode default it to `[]`,
+  off, because their model names are the operator's own and a guessed order
+  could downgrade a stage onto a model that installation cannot run at all.
+  Write `tiers = []` on Claude to turn fallback off the same way.
 - **`cooldown_minutes`** is how long a rate-limited model is skipped before a
   stage tries it again. It defaults to 60 minutes.
 - **`[fallback.floor]`** names, per stage (`plan`, `build`, `review`),
@@ -105,13 +112,16 @@ far as its floor and finds that model rate-limited too voids exactly as it did
 before this table existed, and says so on the card: the board waits rather
 than fall back past a model the installation declared safe.
 
-## A second installation
+## More than one installation (optional)
 
-One machine can run several installations at once, each on its own harness --
-Claude Code, Codex or OpenCode -- so an operator with more than one
-subscription spends each of them. They serve the same Linear boards; a
-`foreman:<name>` label on a card says which installation owns it, and one
-installation is the default for cards carrying no such label.
+One installation serving every board is the normal setup, and the fallback tiers
+are how it stays on a working model without a second tick. A machine *can* still
+run several installations, each on its own harness -- Claude Code, Codex or
+OpenCode -- for two subscriptions or a harness pinned to a different budget. They
+serve the same Linear boards; a `foreman:<name>` label on a card says which
+installation owns it, and one installation is the default for cards carrying no
+such label. Nothing in the fallback design needs this; it is here for an
+operator who wants it.
 
 **Name the default before the second installation exists.** A machine with two
 installations and no default refuses every read, because an unlabelled card
