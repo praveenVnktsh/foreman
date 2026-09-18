@@ -60,8 +60,13 @@ install="$install_home/install"
 git_q "$work_dir" clone -q "$upstream" "$install"
 
 record="$work_dir/record"; mkdir -p "$record"
+# FOREMAN_UPDATE_REF pins this to the ref path, which is the machinery this
+# file is about (fast-forward, refusals, skills, restart). The default path --
+# polling the latest GitHub Release -- is
+# tests/test-self-update-poll-releases.sh.
 run_update() {
   HOME="$py_home" FOREMAN_HOME="$install_home" RECORD_DIR="$record" \
+    FOREMAN_UPDATE_REF="origin/main" \
     "$install/bin/self-update.sh" "$@" 2>&1
 }
 head_of() { git -C "$install" rev-parse HEAD; }

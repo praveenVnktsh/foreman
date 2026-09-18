@@ -75,14 +75,20 @@ out="$(update origin/release)" || bad "promoted update exited non-zero: $out"
   && ok "a release-pinned clone advances when the release moves" \
   || bad "promote -> head=$(head_of) want=$main_tip: $out"
 
-# The default still tracks main.
+# WITH NO OVERRIDE the default is GitHub Releases, not main. This clone's
+# origin is a local path, so gh cannot answer and the run refuses -- which is
+# how we know it is not silently tracking main.
 printf 'n\n' >"$upstream/n.txt"
 git_q "$upstream" add -A
 git_q "$upstream" commit -q -m "on main again"
-main_tip="$(git -C "$upstream" rev-parse main)"
-out="$(update)" || bad "default update exited non-zero: $out"
-[[ "$(head_of)" == "$main_tip" ]] \
-  && ok "an unpinned installation still tracks main" \
-  || bad "default -> head=$(head_of) want=$main_tip: $out"
+before="$(head_of)"
+if out="$(update 2>&1)"; then
+  bad "an unpinned update succeeded with no release to follow: $out"
+else
+  grep -q "gh release list failed" <<<"$out" \
+    && [[ "$(head_of)" == "$before" ]] \
+    && ok "with no override it follows releases, not main" \
+    || bad "unpinned -> $out"
+fi
 
 exit "$fail"

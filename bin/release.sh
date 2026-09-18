@@ -1,23 +1,19 @@
 #!/usr/bin/env bash
-# Promote main to the release ref installations track.
+# Cut a GitHub Release of origin/main -- the thing installations follow.
 #
-#   release.sh --dry-run          say what it would promote, change nothing
-#   release.sh                    fast-forward release to origin/main and push
-#   release.sh --ref <branch>     promote a differently named release ref
+#   release.sh --dry-run          say what it would cut, change nothing
+#   release.sh                    tag origin/main and publish a release
+#   release.sh --version v1.2.3   name the tag (default vYYYY.MM.DD)
 #
-# A MERGE TO MAIN DOES NOT DEPLOY. An installation pinned with
-# FOREMAN_UPDATE_REF=origin/release (bin/install-self-update.sh --ref) fetches
-# the release branch, not main. This is the promote step, and it is what
-# deploys: within one self-update interval the pinned installations fast-forward
-# to the release tip and restart their ticks.
+# A MERGE TO MAIN DOES NOT DEPLOY. An installation's bin/self-update.sh polls
+# the LATEST RELEASE and fast-forwards to its tag, so a merge reaches it only
+# when a release is cut. This is that step.
 #
-# THE PUSH IS A FAST-FORWARD. `git push` refuses a non-fast-forward without an
-# explicit force, and this script never forces. A release branch that has
-# diverged from main is refused rather than rewritten -- the same "never rewrite
-# a clone under the operator" rule bin/self-update.sh follows.
+# THE TAG IS CREATED BY THE RELEASE. `gh release create <tag> --target <sha>`
+# makes the tag and the release in one act, so there is never a tag with no
+# release. A tag that already exists is refused rather than rewritten.
 #
-# Run it from any clone with push access: an operator's working copy, or an
-# installation's. It only fetches and pushes; it never touches a working tree.
+# Run it from any clone of this repository with push access.
 set -euo pipefail
 
 die() { printf 'release: %s\n' "$*" >&2; exit 1; }
@@ -25,75 +21,59 @@ die() { printf 'release: %s\n' "$*" >&2; exit 1; }
 HERE="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(dirname -- "$HERE")"
 
-REF="release"
+VERSION=""
 DRY=""
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --dry-run) DRY=1; shift ;;
-    --ref) [[ $# -ge 2 ]] || die "--ref needs a value"; REF="$2"; shift 2 ;;
-    *) die "unknown argument: $1 (expected --dry-run or --ref <branch>)" ;;
+    --version) [[ $# -ge 2 ]] || die "--version needs a value"; VERSION="$2"; shift 2 ;;
+    *) die "unknown argument: $1 (expected --dry-run or --version <tag>)" ;;
   esac
 done
 
-# A branch name git will accept and a release cannot mean. `main` is refused
-# outright: promoting main onto a ref installations fetch would make every merge
-# a deploy again, which is the thing this exists to stop.
-case "$REF" in
-  ""|*" "*|*".."*|*"~"*|*"^"*|*":"*|*"?"*|*"*"*|*"["*|*"\\"*|*"@"*)
-    die "refusing an invalid release branch name: '$REF'" ;;
-  main) die "the release ref may not be 'main'; that deploys on every merge" ;;
-esac
-
 git -C "$ROOT" rev-parse --git-dir >/dev/null 2>&1 \
   || die "$ROOT is not a git repository"
+command -v gh >/dev/null 2>&1 \
+  || die "gh is required to cut a release; install it and run 'gh auth login'"
 
-fetch() { # <ref>...
-  GIT_SSH_COMMAND="ssh -o BatchMode=yes -o ConnectTimeout=15 -o ServerAliveInterval=10 -o ServerAliveCountMax=3" \
-  GIT_TERMINAL_PROMPT=0 \
-    git -C "$ROOT" fetch --quiet origin "$@"
-}
-push() { # <refspec>
-  GIT_SSH_COMMAND="ssh -o BatchMode=yes -o ConnectTimeout=15 -o ServerAliveInterval=10 -o ServerAliveCountMax=3" \
-  GIT_TERMINAL_PROMPT=0 \
-    git -C "$ROOT" push "$@"
-}
-
-fetch main || die "git fetch origin main failed or timed out"
+GIT_SSH_COMMAND="ssh -o BatchMode=yes -o ConnectTimeout=15 -o ServerAliveInterval=10 -o ServerAliveCountMax=3" \
+GIT_TERMINAL_PROMPT=0 \
+  git -C "$ROOT" fetch --quiet origin main \
+  || die "git fetch origin main failed or timed out"
 NEW="$(git -C "$ROOT" rev-parse FETCH_HEAD)"
 NEW_SHORT="$(git -C "$ROOT" rev-parse --short "$NEW")"
 SUBJECT="$(git -C "$ROOT" log -1 --format=%s "$NEW")"
 
-# The release tip as origin has it, if it exists at all. A best-effort fetch:
-# a branch that has never been pushed fails here, and that is the create case.
-fetch "$REF" >/dev/null 2>&1 || true
-if OLD="$(git -C "$ROOT" rev-parse --verify --quiet "refs/remotes/origin/$REF")"; then
-  OLD_SHORT="$(git -C "$ROOT" rev-parse --short "$OLD")"
-  if [[ "$OLD" == "$NEW" ]]; then
-    printf 'release: %s is already at %s; nothing to promote.\n' "$REF" "$NEW_SHORT"
-    exit 0
-  fi
-  git -C "$ROOT" merge-base --is-ancestor "$OLD" "$NEW" \
-    || die "origin/$REF ($OLD_SHORT) is not an ancestor of origin/main ($NEW_SHORT); refusing to rewrite the release branch. Move it by hand if you mean to."
+tag_exists() { git -C "$ROOT" ls-remote --exit-code --tags origin "refs/tags/$1" >/dev/null 2>&1; }
+
+# The tag. `--version` names it; otherwise the date, with a counter when that
+# day already has a release. Both paths refuse a tag that exists: a release is
+# never rewritten, and gh would refuse the create anyway with a vaguer message.
+if [[ -n "$VERSION" ]]; then
+  TAG="$VERSION"
+  tag_exists "$TAG" && die "tag $TAG already exists on origin; a release is never rewritten"
 else
-  OLD_SHORT=""
+  base="v$(date -u +%Y.%m.%d)"
+  TAG="$base"
+  n=1
+  while tag_exists "$TAG"; do
+    n=$((n + 1)); TAG="$base-$n"
+  done
 fi
 
+case "$TAG" in
+  ""|*" "*|*".."*) die "refusing an invalid tag name: '$TAG'" ;;
+esac
+
 if [[ -n "$DRY" ]]; then
-  if [[ -n "$OLD_SHORT" ]]; then
-    printf 'release: would fast-forward %s from %s to %s (%s)\n' "$REF" "$OLD_SHORT" "$NEW_SHORT" "$SUBJECT"
-  else
-    printf 'release: would create %s at %s (%s)\n' "$REF" "$NEW_SHORT" "$SUBJECT"
-  fi
+  printf 'release: would cut %s at %s (%s)\n' "$TAG" "$NEW_SHORT" "$SUBJECT"
   exit 0
 fi
 
-push origin "$NEW:refs/heads/$REF" \
-  || die "pushing $NEW_SHORT to $REF failed; the release branch is unchanged"
-
-if [[ -n "$OLD_SHORT" ]]; then
-  printf 'release: %s %s -> %s; installations pinned to origin/%s update on their next fire.\n' \
-    "$REF" "$OLD_SHORT" "$NEW_SHORT" "$REF"
-else
-  printf 'release: created %s at %s; installations pinned to origin/%s update on their next fire.\n' \
-    "$REF" "$NEW_SHORT" "$REF"
+# gh infers the repository from the clone's own remote, so this must run in it.
+if ! ( cd "$ROOT" && gh release create "$TAG" --target "$NEW" --title "$TAG" --generate-notes ); then
+  die "gh release create $TAG failed; no release was published"
 fi
+
+printf 'release: cut %s at %s; installations following releases update on their next fire.\n' \
+  "$TAG" "$NEW_SHORT"

@@ -207,23 +207,27 @@ watchdog `install-service.sh` installs:
 
 ## Releasing
 
-By default an installation tracks `origin/main`, so a merge to main reaches it
-on the next fire: merge and deploy are the same act. An installation can track
-a release branch instead:
+By default an installation follows the **latest GitHub Release**.
+`bin/self-update.sh` polls it (`gh release list --limit 1`) and fast-forwards the
+clone to its tag, so a merge to `main` deploys nothing until a release is cut.
+This needs `gh` installed and authenticated for the user the timer runs as; a gh
+that cannot answer is a refusal, not a silent no-op.
 
-    ~/.foreman/claude/install/bin/install-self-update.sh --ref origin/release
+Cut a release from any clone with push access:
 
-That rewrites the unit with `FOREMAN_UPDATE_REF=origin/release`. The clone
-stays on its own branch and fast-forwards to the release tip, so a merge to
-main deploys nothing to a pinned installation. Do this on every installation
-you want staged.
+    bin/release.sh --dry-run         # say what it would cut, change nothing
+    bin/release.sh                   # tag origin/main and publish a release
+    bin/release.sh --version v1.4.0  # name the tag (default vYYYY.MM.DD)
 
-A release is promoted from any clone with push access:
+`gh release create <tag> --target <main sha> --generate-notes` makes the tag and
+the release in one act. A tag that already exists is refused — a release is never
+rewritten.
 
-    bin/release.sh --dry-run      # say what it would promote, change nothing
-    bin/release.sh                # fast-forward release to origin/main, push
+An installation can instead follow a git ref, for a development machine that
+wants main:
 
-The push is a fast-forward. A release branch that has diverged from main is
-refused, never rewritten. The first run creates the branch; after that it
-advances. `bin/install-self-update.sh` writes `origin/main` when given no
-`--ref`, so an installation left alone keeps deploying on every merge.
+    ~/.foreman/claude/install/bin/install-self-update.sh --ref origin/main
+
+That writes `FOREMAN_UPDATE_REF=origin/main` into the unit. Running
+`install-self-update.sh` with no `--ref` leaves the installation following
+releases.

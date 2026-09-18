@@ -1,8 +1,7 @@
 #!/usr/bin/env bash
-# Fast-forward this installation's clone to its tracked ref and restart its tick.
-# The ref is FOREMAN_UPDATE_REF, default origin/main; a release pin sets it to
-# origin/release, so a merge to main reaches this installation only when the
-# release is promoted (bin/release.sh).
+# Fast-forward this installation's clone to the latest GitHub Release and restart
+# its tick. A merge to main reaches a machine only when bin/release.sh cuts a
+# release. FOREMAN_UPDATE_REF=origin/<branch> overrides that to track a ref.
 #
 #   self-update.sh --dry-run   say what it would do, change nothing
 #   self-update.sh             do it
@@ -88,26 +87,27 @@ _foreman_load_pairs "this installation's declaration" "$INSTALL_ROOT/bin/install
 [[ -n "$INSTALLATION" ]] || die "installation.py did not report an installation name"
 [[ -n "$FOREMAN_HOME" ]] || die "installation.py did not report a home"
 
-# WHICH REF THIS INSTALLATION TRACKS. Default origin/main. An installation
-# pinned to a release sets FOREMAN_UPDATE_REF=origin/release (written into its
-# unit by bin/install-self-update.sh --ref), so a merge to main reaches it only
-# when the release is promoted with bin/release.sh. See docs/INSTALLING.md.
+# WHAT THIS INSTALLATION FOLLOWS. By default the LATEST GITHUB RELEASE: a merge
+# to main reaches a machine only when bin/release.sh cuts a release. An
+# installation overrides that to track a git ref instead by setting
+# FOREMAN_UPDATE_REF=origin/<branch> (bin/install-self-update.sh --ref), which a
+# development machine uses to follow main. See docs/INSTALLING.md.
 #
-# The local clone stays on its own branch; a fast-forward to origin/release
-# advances that branch to the released commit. The ref is never interpolated
-# into a shell, but it is validated anyway: git would accept some of these as
-# revision syntax, and a typo should name itself rather than fetch something
-# else.
-UPDATE_REF="${FOREMAN_UPDATE_REF:-origin/main}"
-case "$UPDATE_REF" in
-  origin/*) ;;
-  *) die "FOREMAN_UPDATE_REF must look like origin/<branch>, got '$UPDATE_REF'" ;;
-esac
-UPDATE_BRANCH="${UPDATE_REF#origin/}"
-case "$UPDATE_BRANCH" in
-  ""|*" "*|*".."*|*"~"*|*"^"*|*":"*|*"?"*|*"*"*|*"["*|*"\\"*|*"@"*)
-    die "FOREMAN_UPDATE_REF names an invalid branch: '$UPDATE_BRANCH'" ;;
-esac
+# The ref is never interpolated into a shell, but it is validated anyway: git
+# would accept some of these as revision syntax, and a typo should name itself
+# rather than fetch something else.
+UPDATE_REF="${FOREMAN_UPDATE_REF:-}"
+if [[ -n "$UPDATE_REF" ]]; then
+  case "$UPDATE_REF" in
+    origin/*) ;;
+    *) die "FOREMAN_UPDATE_REF must look like origin/<branch>, got '$UPDATE_REF'" ;;
+  esac
+  UPDATE_BRANCH="${UPDATE_REF#origin/}"
+  case "$UPDATE_BRANCH" in
+    ""|*" "*|*".."*|*"~"*|*"^"*|*":"*|*"?"*|*"*"*|*"["*|*"\\"*|*"@"*)
+      die "FOREMAN_UPDATE_REF names an invalid branch: '$UPDATE_BRANCH'" ;;
+  esac
+fi
 
 SUPERVISE="$INSTALL_ROOT/skills/board/supervise.sh"
 [[ -x "$SUPERVISE" ]] || die "no supervise.sh at $SUPERVISE; this clone is not a foreman install root"
@@ -187,13 +187,34 @@ fi
 # ssh's own options rather than timeout(1): macOS ships no timeout(1), and this
 # suite runs there as well as on Linux. bin/install-self-update.sh sets
 # TimeoutStartSec as a second, unconditional backstop for anything these miss.
+# WHAT TO FETCH: the tracked ref, or the latest release's tag. gh reads the
+# repository from this clone's own remote, so no slug is composed here. gh
+# failing -- not installed, not authenticated, no network -- is a REFUSAL: a
+# poll that cannot ask must not report "nothing to do".
+if [[ -n "$UPDATE_REF" ]]; then
+  FETCH_REF="$UPDATE_BRANCH"
+  SOURCE="$UPDATE_REF"
+else
+  command -v gh >/dev/null 2>&1 \
+    || die "gh is required to follow releases; set FOREMAN_UPDATE_REF=origin/<branch> to track a ref instead"
+  FETCH_REF="$(cd -- "$INSTALL_ROOT" && gh release list --limit 1 --json tagName --jq '.[0].tagName // ""' 2>/dev/null)" \
+    || die "gh release list failed; is gh installed and authenticated (run gh auth status)? Nothing was changed."
+  if [[ -z "$FETCH_REF" ]]; then
+    printf 'self-update: %s follows releases and none exists yet; nothing to do.\n' "$INSTALLATION"
+    exit 0
+  fi
+  SOURCE="release $FETCH_REF"
+fi
+
 GIT_SSH_COMMAND="ssh -o BatchMode=yes -o ConnectTimeout=15 -o ServerAliveInterval=10 -o ServerAliveCountMax=3" \
 GIT_TERMINAL_PROMPT=0 \
-  git_ro fetch --quiet origin "$UPDATE_BRANCH" \
-  || die "git fetch $UPDATE_REF failed or timed out; expected a reachable origin and a credential usable with no terminal. Nothing was changed."
+  git_ro fetch --quiet origin "$FETCH_REF" \
+  || die "git fetch $SOURCE failed or timed out; expected a reachable origin and a credential usable with no terminal. Nothing was changed."
 
 OLD="$(git_ro rev-parse HEAD)"
-NEW="$(git_ro rev-parse FETCH_HEAD)"
+# `^{commit}` peels the annotated tag a release points at, so OLD and NEW are
+# both commits and the ancestry test below is about code, not tag objects.
+NEW="$(git_ro rev-parse FETCH_HEAD^{commit})"
 OLD_SHORT="$(git_ro rev-parse --short "$OLD")"
 NEW_SHORT="$(git_ro rev-parse --short "$NEW")"
 
@@ -209,7 +230,7 @@ fi
 # A force-push, or a clone that has diverged. Either way the update is not a
 # fast-forward, and this script has no business deciding what to keep.
 git_ro merge-base --is-ancestor "$OLD" "$NEW" \
-  || die "$UPDATE_REF ($NEW_SHORT) is not a descendant of HEAD ($OLD_SHORT); expected a fast-forward. Nothing was changed."
+  || die "$SOURCE ($NEW_SHORT) is not a descendant of HEAD ($OLD_SHORT); expected a fast-forward. Nothing was changed."
 
 # WHICH SKILLS EXIST, as a sorted list of directory names under skills/.
 #
