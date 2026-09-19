@@ -370,6 +370,18 @@ start_agent() {
   # path was the polling design the event-driven board had already replaced
   # while SKILL.md described the new one.
   local prompt prompt_file rc=0
+  # THE TICK LOSES THIS SCRIPT'S BOARD, for the same reason find_starved_board's
+  # children do (see its header): this script sourced config.sh for the FIRST
+  # declared board, config.sh is environment-wins, and an exported REPO or
+  # BOARD_HOME survives into every child. The tick serves EVERY board, so an inherited
+  # first-board REPO makes each later slice run against the wrong repository --
+  # measured 2026-09-19: a pakka card's worktree, branch and card history were
+  # written inside the foreman repo, and board.toml of the wrong target was
+  # edited. The tick sources config.sh per board itself, so it must start with
+  # no board's values at all.
+  local unset_args=() name
+  for name in $FOREMAN_BOARD_EXPORTS; do unset_args+=(-u "$name"); done
+  unset_args+=(-u FOREMAN_INSTANCE)
   prompt="$("$HARNESS_SH" skill-prompt board --loop-minutes "$TICK_INTERVAL_MINUTES")"
   if [[ -n "$BOARD_DRY_RUN" ]]; then
     log "DRY RUN: would start $TICK_AGENT_NAME: $prompt (model=$TICK_MODEL cwd=$INSTALL_ROOT mcp=${MCP_ARGS[1]:-none})"
@@ -403,7 +415,7 @@ start_agent() {
   # one session: a tick switched on by hand with `/remote-control` drops out of
   # the operator's app the next time this script replaces it, silently.
   ( exec 9>&-
-    "$HARNESS_SH" spawn \
+    env "${unset_args[@]}" "$HARNESS_SH" spawn \
       --name "$TICK_AGENT_NAME" \
       --cwd "$INSTALL_ROOT" \
       --model "$TICK_MODEL" \
