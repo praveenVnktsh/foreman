@@ -1,11 +1,13 @@
 # Several installations on one machine, each on its own harness
 
-> **Superseded, in part.** The loop is now designed around **one** installation
-> serving every board, dispatching each stage to a `harness:model` from its
-> fallback tiers. Several installations are still supported, and everything
-> below about the adapter contract, names and the host ceiling still holds, but
-> routing by `foreman:<name>` label is no longer the shape the loop assumes. See
-> [2026-09-18-single-tick-dispatch-design.md](2026-09-18-single-tick-dispatch-design.md).
+> **Superseded.** There is one foreman: `~/.foreman` is the installation, one
+> tick serves every board, and each stage is dispatched to a `harness:model`
+> from its fallback tiers. There is no installation name, no `foreman:<name>`
+> routing label, no default and no siblings. What still holds from below is the
+> harness **adapter contract** (`skills/board/harness/`) and the host ceiling
+> across boards; the rest is history. See
+> [2026-09-18-single-tick-dispatch-design.md](2026-09-18-single-tick-dispatch-design.md)
+> and the plan [2026-09-19-single-foreman.md](../plans/2026-09-19-single-foreman.md).
 
 ## Goal
 

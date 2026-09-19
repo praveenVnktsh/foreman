@@ -19,7 +19,7 @@
 </p>
 
 <p align="center">
-  <img src="docs/assets/board.png" alt="A Linear board run by foreman: cards in In Progress, In Review, Needs Human and Done, each labelled with its project, installation and pull request" width="100%" />
+  <img src="docs/assets/board.png" alt="A Linear board run by foreman: cards in In Progress, In Review, Needs Human and Done, each labelled with its project and pull request" width="100%" />
 </p>
 
 ---
@@ -70,7 +70,7 @@ the quality work that review no longer blocks on.
 - **Linear priority** orders the queue; boards take turns round-robin.
 
 ### Operating it
-- **One tick, every board** — a single installation serves all your projects,
+- **One tick, every board** — a single foreman serves all your projects,
   each board with its own concurrency limit.
 - **Dispatch to whichever agent works.** A stage's model is an ordered list of
   candidates — `opencode:foundry/gpt-5.6-sol`, `claude:opus` — and the tick
@@ -81,7 +81,7 @@ the quality work that review no longer blocks on.
 - **Preflight** refuses to dispatch when the machine cannot build, without
   blaming the card.
 - **Release-gated updates.** A merge to `main` cuts a GitHub Release — unless
-  the commit says `Release: skip` — and installations follow the latest one.
+  the commit says `Release: skip` — and foreman follows the latest one.
 
 ## Quick start
 
@@ -112,8 +112,8 @@ home and the other harnesses are covered in
 
 ## Models and fallback
 
-One installation serves every board. Each stage names its model in
-`installation.toml`, and `[fallback]` lists the models it may fall down through,
+One foreman serves every board. Each stage names its model in
+`foreman.toml`, and `[fallback]` lists the models it may fall down through,
 strongest first. A tier is `model` or `harness:model`, so the tick falls back
 across providers *and* across CLIs:
 
@@ -196,7 +196,7 @@ One tick end to end, with every file it touches, is drawn in
 ## Security
 
 foreman is public, so CI runs only on GitHub-hosted runners and a merged commit
-reaches your machine only when your installation pulls it. foreman never merges
+reaches your machine only when foreman pulls it. foreman never merges
 a pull request from outside the repository it builds.
 
 ## Contributing
