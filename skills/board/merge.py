@@ -243,8 +243,12 @@ def main(argv: list[str]) -> NoReturn:
                     f"Did not merge PR #{pr}: could not read its labels, so whether "
                     f"{label!r} on it matches the card is unknown: {err}",
                     EXIT_LABEL_FAILED)
-        wanted = label in card_labels
-        if wanted != (label in on_pr):
+        # GitHub label names are case-insensitive. Exact membership misses a
+        # PR label stored as Fast-Track when FAST_TRACK_LABEL is fast-track,
+        # so the stale label stays on and the merge still fast-tracks. PRA-459.
+        folded = label.casefold()
+        wanted = folded in {name.casefold() for name in card_labels}
+        if wanted != (folded in {name.casefold() for name in on_pr}):
             flag = "--add-label" if wanted else "--remove-label"
             ok, _, err = _gh(["pr", "edit", str(pr), flag, label], repo)
             if not ok:
