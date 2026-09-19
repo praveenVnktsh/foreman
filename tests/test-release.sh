@@ -83,7 +83,8 @@ out="$("$release" --dry-run 2>&1)"
   || bad "default tag said: $out"
 
 # A head commit marked do-not-release is not cut by the Action that runs this.
-git_q -C "$seed" commit -q --allow-empty -m "wip [skip release]"
+# The marker is a line of its own -- a trailer -- not a phrase in a sentence.
+git_q -C "$seed" commit -q --allow-empty -m "wip" -m "[skip release]"
 git_q -C "$seed" push -q origin main
 : >"$GH_LOG"
 if out="$("$release" 2>&1)"; then
@@ -98,5 +99,16 @@ out="$("$release" --force 2>&1)" || bad "--force failed: $out"
 grep -q "release create v" "$GH_LOG" \
   && ok "--force cuts a flagged commit anyway" \
   || bad "--force did not call gh: $(cat "$GH_LOG")"
+
+# PROSE ABOUT THE MARKER IS NOT THE MARKER. A commit body that mentions
+# `Release: skip` in a sentence must still release -- this is the bug that
+# skipped this feature's own first release, whose PR body explained the marker.
+git_q -C "$seed" commit -q --allow-empty -m "docs" -m "Explains the Release: skip trailer."
+git_q -C "$seed" push -q origin main
+: >"$GH_LOG"
+out="$("$release" 2>&1)" || bad "a prose mention failed to release: $out"
+grep -q "release create v" "$GH_LOG" \
+  && ok "prose about the marker does not skip the release" \
+  || bad "prose mention skipped the release: $out"
 
 exit "$fail"

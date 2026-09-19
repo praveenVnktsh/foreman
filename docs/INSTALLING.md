@@ -218,10 +218,12 @@ push to `main` — never on a pull request — so no contributor's branch is in 
 
 ### Opting a commit out
 
-A commit is not released when its message carries `[skip release]` or a
-`Release: skip` trailer. A squash merge takes the pull request body as the commit
-body, so `Release: skip` in the PR description is enough. `bin/release.sh` checks
-the head commit and exits 0 without cutting, and the Action is a no-op for it.
+A commit is not released when its message has a line of its own reading
+`[skip release]` or `Release: skip`. It must be a whole line — a trailer — not a
+phrase in a sentence: a squash merge takes the pull request body as the commit
+body, so a looser match would fire on any prose that merely mentions the marker.
+`bin/release.sh` checks the head commit and exits 0 without cutting, and the
+Action is a no-op for it. `bin/release.sh --force` overrides.
 
 ### Cutting one by hand
 

@@ -8,9 +8,11 @@ name: Release
 # `push`, not `pull_request`, so no contributor's branch is ever in scope -- the
 # same reason CI does not run a self-hosted runner on this public repository.
 #
-# A COMMIT OPTS OUT with `[skip release]` or a `Release: skip` trailer in its
-# message (a squash merge takes the PR body). bin/release.sh checks the head
-# commit and exits 0 without cutting, which this job reads as a no-op.
+# A COMMIT OPTS OUT with a line of its own reading `[skip release]` or
+# `Release: skip` in its message (a squash merge takes the PR body). It must be
+# a whole line, so prose that mentions the marker does not fire it. bin/release.sh
+# checks the head commit and exits 0 without cutting, which this job reads as a
+# no-op.
 
 on:
   push:

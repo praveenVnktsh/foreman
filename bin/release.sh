@@ -48,13 +48,20 @@ SUBJECT="$(git -C "$ROOT" log -1 --format=%s "$NEW")"
 
 # A COMMIT CAN OPT OUT OF RELEASING ITSELF. `.github/workflows/release.yml`
 # runs this script on every push to main, so a merge releases unless its commit
-# says otherwise. A head commit whose message carries `[skip release]` or a
-# `Release: skip` trailer is not released: this exits 0 without cutting, which
-# the Action reads as a successful no-op. --force cuts it anyway, and a manual
+# says otherwise. A head commit with a line of its own reading `[skip release]`
+# or `Release: skip` is not released: this exits 0 without cutting, which the
+# Action reads as a successful no-op. --force cuts it anyway, and a manual
 # `release.sh --version` on a DIFFERENT commit is unaffected -- the marker is on
 # the commit being released, not a blanket switch.
+#
+# THE MARKER MUST BE A WHOLE LINE, and that is not a detail. A squash merge puts
+# the pull request BODY in the commit, so a looser match fires on any prose that
+# mentions the marker -- which is exactly what happened to this feature's own
+# first release, when its PR description explained `Release: skip`. A trailer on
+# its own line is deliberate; a sentence about it is not.
 if [[ -z "$FORCE" ]] \
-   && git -C "$ROOT" log -1 --format=%B "$NEW" | grep -qiE '\[skip release\]|(^|[[:space:]])release:[[:space:]]*skip'; then
+   && git -C "$ROOT" log -1 --format=%B "$NEW" \
+      | grep -qiE '^[[:space:]]*(\[skip release\]|release:[[:space:]]*skip)[[:space:]]*$'; then
   if [[ -n "$DRY" ]]; then
     printf 'release: %s is marked do-not-release; would cut nothing (--force overrides).\n' "$NEW_SHORT"
     exit 0
