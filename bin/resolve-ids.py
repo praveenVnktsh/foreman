@@ -22,12 +22,6 @@ the target repository's own board.toml plus Linear, so it can always be rebuilt
 by running this script again. It may be absent -- deleting it costs one
 re-resolve, never a broken board -- so nothing may treat its absence as fatal.
 
---installation names the installation this resolve is for. Its label,
-foreman:<name>, is created if missing exactly like the fixed labels below and
-written to ids.env as LABEL_INSTALLATION, so the operator can apply it and the
-tick can find it -- see "Routing" in
-docs/specs/2026-09-14-installations-per-harness-design.md.
-
 Everything it resolves, it verifies, and every mismatch fails closed:
 
   - A label id must belong to a label with the name that asked for it. A
@@ -120,22 +114,10 @@ LABEL_ROLES = [
     ("LABEL_CLEANUP", "cleanup"),
 ]
 
-# The installation's own label (docs/specs/2026-09-14-installations-per-
-# harness-design.md, "Routing"). A tick applies foreman:<installation> to a
-# card the moment it takes ownership, so the label an installation resolves
-# has to be the SAME one it later writes -- and that name is only known at
-# run time, from --installation, not at import time the way every name in
-# LABEL_ROLES above is. It cannot live in that fixed list for the same reason
-# a second installation in the same team must never collide with the first
-# one's label: the role is constant, the label name is not, so it is resolved
-# through the same ensure_labels() path with a name built in main() instead.
-LABEL_INSTALLATION_ROLE = "LABEL_INSTALLATION"
-
 IDS_ENV_ORDER = (
     ["LINEAR_TEAM_ID", "LINEAR_PROJECT_ID"]
     + [role for role, _ in STATE_ROLES]
     + [role for role, _ in LABEL_ROLES]
-    + [LABEL_INSTALLATION_ROLE]
 )
 
 
@@ -332,12 +314,6 @@ def resolve_states(api_url: str, key: str, team_id: str) -> dict:
 def ensure_labels(api_url: str, key: str, team_id: str, label_roles: list) -> dict:
     """Resolve every label in `label_roles`, creating any that are missing.
 
-    Takes the role/name pairs as an argument rather than reading LABEL_ROLES
-    directly, because LABEL_INSTALLATION's name is only known at run time
-    (see LABEL_INSTALLATION_ROLE above) and has to go through this exact
-    found-or-create-then-verify path too -- one function, not a copy of it
-    for the one label whose name main() has to build itself.
-
     Returns {role: id} for every role in `label_roles`. Whether a label was
     found or just created, its id is independently verified by querying it
     back by id and checking the name that comes back -- the found-existing
@@ -479,8 +455,8 @@ def main(argv: list) -> int:
     parser.add_argument("--instance", required=True, help="instance name (FOREMAN_INSTANCE)")
     parser.add_argument(
         "--installation",
-        required=True,
-        help="installation name; owns the label foreman:<name>, created on first resolve",
+        default=None,
+        help="accepted and ignored; kept so existing callers keep working",
     )
     parser.add_argument("--api-url", default=DEFAULT_API_URL, help="Linear GraphQL endpoint")
     parser.add_argument(
@@ -515,13 +491,7 @@ def main(argv: list) -> int:
         team_id = resolve_team(args.api_url, key, team_name)
         project_id = resolve_project(args.api_url, key, team_id, project_name)
         state_ids = resolve_states(args.api_url, key, team_id)
-        installation_label = f"foreman:{args.installation}"
-        label_ids = ensure_labels(
-            args.api_url,
-            key,
-            team_id,
-            LABEL_ROLES + [(LABEL_INSTALLATION_ROLE, installation_label)],
-        )
+        label_ids = ensure_labels(args.api_url, key, team_id, LABEL_ROLES)
 
         ids = {
             "LINEAR_TEAM_ID": team_id,
