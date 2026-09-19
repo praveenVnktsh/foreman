@@ -34,27 +34,20 @@ fail=0
 ok()  { printf 'ok   %s\n' "$1"; }
 bad() { printf 'FAIL %s\n' "$1" >&2; fail=1; }
 
-# Routing runs before ranking, and its three flags are REQUIRED -- a bare
-# `queue.py` refuses, because ranking every card on a board including a
-# sibling's is the double-dispatch that routing exists to prevent. This file is
-# about the RANKING, so every case below routes the same way: one installation,
-# owner of the unlabelled cards, and the only sibling on the machine. Nothing
-# here carries a `foreman:*` label, so nothing is ever dropped before ranking
-# and each case still measures the order alone. Routing itself is
-# tests/test-queue-routes-by-label.sh.
-QUEUE_ARGS=(--installation claude --default --siblings claude)
+# There is one foreman and no routing: the tick hands queue.py its own board's
+# cards, so every card is ranked. Each case below measures the order alone.
 
 # $1 name, $2 expected stdout (newline separated), $3 JSON on stdin
 orders() {
   local name="$1" want="$2" got
-  got="$(printf '%s' "$3" | "$queue" "${QUEUE_ARGS[@]}" 2>&1)"
+  got="$(printf '%s' "$3" | "$queue" 2>&1)"
   [[ "$got" == "$want" ]] && ok "$name" || bad "$name: wanted [$want], got [$got]"
 }
 
 # $1 name, $2 substring the refusal must contain, $3 JSON on stdin
 refuses() {
   local name="$1" want="$2" got status
-  got="$(printf '%s' "$3" | "$queue" "${QUEUE_ARGS[@]}" 2>&1)"; status=$?
+  got="$(printf '%s' "$3" | "$queue" 2>&1)"; status=$?
   if [[ $status -ne 1 ]]; then
     bad "$name: exited $status, wanted 1"
     return
@@ -79,8 +72,8 @@ refuses() {
 skips() {
   local name="$1" want_status="$2" want_out="$3" want_id="$4" want_word="$5" json="$6"
   local out out_status err
-  out="$(printf '%s' "$json" | "$queue" "${QUEUE_ARGS[@]}" 2>/dev/null)"; out_status=$?
-  err="$(printf '%s' "$json" | "$queue" "${QUEUE_ARGS[@]}" 2>&1 >/dev/null)"
+  out="$(printf '%s' "$json" | "$queue" 2>/dev/null)"; out_status=$?
+  err="$(printf '%s' "$json" | "$queue" 2>&1 >/dev/null)"
   if [[ $out_status -ne $want_status ]]; then
     bad "$name: exited $out_status, wanted $want_status"
     return
@@ -163,8 +156,8 @@ skips "one unrankable card is skipped and every other card is still ordered" \
 board='[{"identifier":"ABC-1","priority":null},
         {"identifier":"ABC-2","priority":true},
         {"identifier":"ABC-3","priority":9}]'
-out="$(printf '%s' "$board" | "$queue" "${QUEUE_ARGS[@]}" 2>/dev/null)"; out_status=$?
-err="$(printf '%s' "$board" | "$queue" "${QUEUE_ARGS[@]}" 2>&1 >/dev/null)"
+out="$(printf '%s' "$board" | "$queue" 2>/dev/null)"; out_status=$?
+err="$(printf '%s' "$board" | "$queue" 2>&1 >/dev/null)"
 if [[ $out_status -eq 3 && -z "$out" \
       && "$err" == *"skipped ABC-1"* && "$err" == *"skipped ABC-2"* \
       && "$err" == *"skipped ABC-3"* ]]; then
@@ -204,15 +197,15 @@ refuses "input that is not JSON at all is refused" \
   "JSON" \
   'ABC-7'
 
-got="$(printf '[]' | "$queue" "${QUEUE_ARGS[@]}" 2>&1)"; status=$?
+got="$(printf '[]' | "$queue" 2>&1)"; status=$?
 if [[ $status -eq 0 && -z "$got" ]]; then
   ok "an empty list prints nothing and exits 0"
 else
   bad "an empty list printed [$got] and exited $status"
 fi
 
-out="$(printf '[]' | "$queue" "${QUEUE_ARGS[@]}" extra-argument 2>/dev/null)"; out_status=$?
-err="$(printf '[]' | "$queue" "${QUEUE_ARGS[@]}" extra-argument 2>&1 >/dev/null)"
+out="$(printf '[]' | "$queue" extra-argument 2>/dev/null)"; out_status=$?
+err="$(printf '[]' | "$queue" extra-argument 2>&1 >/dev/null)"
 if [[ $out_status -eq 2 && -z "$out" && "$err" == *"usage"* ]]; then
   ok "an extra argument exits 2 and names the usage on stderr"
 else
