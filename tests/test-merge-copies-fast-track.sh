@@ -254,6 +254,22 @@ else
   bad "$name (exit $status, out: $out, log: $(cat "$log"))"
 fi
 
+# --- 11 -----------------------------------------------------------------------
+# GitHub labels are case-insensitive. gh pr view returns the stored name
+# (Fast-Track) while FAST_TRACK_LABEL is fast-track. Exact membership misses
+# it, so the stale label stays on and the merge still fast-tracks. PRA-459.
+name="a differently-cased fast-track label the card lacks is removed before the merge"
+GH_PR_LABELS="Fast-Track" run_merge fast "" '{"identifier":"PRA-11","labels":{"nodes":[{"name":"bug"}]}}'
+remove_at="$(line_of "pr edit 42 --remove-label fast-track")"
+merge_at="$(line_of "pr merge 42 --squash")"
+if [[ "$status" -eq 0 && "$remove_at" -gt 0 && "$merge_at" -gt "$remove_at" ]] \
+   && ! grep -q -- '--add-label' "$log" \
+   && [[ "$(json_field merged)" == true && "$(json_field fast_tracked)" == false ]]; then
+  ok "$name"
+else
+  bad "$name (exit $status, remove $remove_at, merge $merge_at, out: $out, log: $(cat "$log"))"
+fi
+
 if [[ "$failures" -gt 0 ]]; then
   echo "$failures case(s) failed" >&2
   exit 1
