@@ -576,6 +576,20 @@ for harness in claude codex opencode; do
     bad "$harness skill-prompt names the board skill in one non-empty line"
   fi
 
+  # A skill-prompt that STOPS at the invocation runs no pass. Measured
+  # 2026-09-19: opencode's skill tool returns the skill text and the run ends,
+  # so a prompt reading only "use skill tool to load board" gave one tool call
+  # per session and no board pass -- the board silently stopped moving. The
+  # prompt must ask for the pass in the same breath as the load. Claude differs
+  # (`/loop` loops inside one session), so this pins the two harnesses whose
+  # wrapper re-invokes the CLI once per pass.
+  if [[ "$harness" != "claude" ]]; then
+    case "$(run_adapter skill-prompt board)" in
+      *pass*) ok "$harness skill-prompt asks for a pass, not only an invocation" ;;
+      *) bad "$harness skill-prompt stops at the invocation and would run no pass: $(run_adapter skill-prompt board)" ;;
+    esac
+  fi
+
   # The loop, counted from the marker side: every pass now ends at once, so
   # what lands in the runs file is one line per pass and nothing else. Reset
   # first, because every verb above has already run the binary.

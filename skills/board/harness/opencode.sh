@@ -426,7 +426,15 @@ skill_prompt_text() { # <name>
   # for the superpowers plugin, which targets this same tool): "use skill tool
   # to load <name>" is the prescribed phrasing, and skills-dir above is where
   # it looks.
-  printf 'use skill tool to load %s\n' "$1"
+  #
+  # THE SECOND CLAUSE IS LOAD-BEARING. On 2026-09-19 every tick session, on
+  # several models, loaded the skill and then stopped with "Loaded the `board`
+  # skill." -- the skill tool RETURNS the skill's text and the run ends there,
+  # so a prompt that asks only to load produces no board pass at all and the
+  # board silently stops moving. Measured on the same host and model: the
+  # minimal prompt gave 1 tool call per session, this one gave 26. Ask for the
+  # pass in the same breath as the load.
+  printf 'use skill tool to load %s, then carry out one full pass exactly as the skill instructs\n' "$1"
 }
 
 detached_main "$@"

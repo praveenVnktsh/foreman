@@ -586,7 +586,11 @@ skill_prompt_text() { # <name>
   # spelling is wrong, every prompt this adapter builds still reaches codex --
   # it just fails to invoke the skill, the same failure a typo'd `/board` would
   # be for claude.sh.
-  printf '$%s\n' "$1"
+  #
+  # The second clause carries the same weight as opencode.sh's: a prompt that
+  # only invokes a skill may end at the invocation, with no pass run. See the
+  # measurement recorded there.
+  printf '$%s, then carry out one full pass exactly as the skill instructs\n' "$1"
 }
 
 detached_main "$@"
