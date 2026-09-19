@@ -10,16 +10,14 @@
 # and the subprocess that actually talks to Linear is the only thing that reads
 # it.
 
-# This installation's own clone. Derived once, from this file's location:
-# config.sh lives in skills/board/, so the root of the clone is two directories
-# up. The target repository is not obliged to ship any of these scripts.
+# Foreman's own clone. Derived once, from this file's location: config.sh
+# lives in skills/board/, so the root of the clone is two directories up. The
+# target repository is not obliged to ship any of these scripts.
 #
-# THREE ROOTS, and they are not each other. This one is the CLONE
-# (~/.foreman/<installation>/install). `FOREMAN_HOME` is the installation's own
-# directory, the clone's parent. `FOREMAN_ROOT` is the MACHINE root that holds
-# every installation, one level above that. This local used to be called
-# `_foreman_root`, one character from the machine root's name, in a file that
-# exports both.
+# TWO ROOTS, and they are not each other. This one is the CLONE
+# (~/.foreman/install). `FOREMAN_HOME` is foreman's own directory, the clone's
+# parent, and there is only one -- ~/.foreman IS the installation. FOREMAN_ROOT
+# is kept equal to it for readers that still ask; it is no longer a level above.
 _foreman_install_root="$(dirname -- "$(dirname -- "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)")")"
 
 # The reader for this installation's loaders -- bin/installation.py,
@@ -35,51 +33,34 @@ if ! . "$_foreman_install_root/bin/load-pairs.sh"; then
   if [[ $- == *i* ]]; then return 1; else exit 1; fi
 fi
 
-# Which installation this is: its home, the root it shares with its siblings,
-# its harness, whether it owns the cards that carry no label, and the four
-# stage models further down. bin/installation.py reads all of that out of
-# $FOREMAN_HOME/installation.toml, and answers for a home that has none by
-# naming it a lone Claude installation -- which is what every machine looked
-# like before installations existed.
+# Which foreman this is: its home, its harness, and the four stage models and
+# fallback tiers further down. bin/installation.py reads all of that out of
+# $FOREMAN_HOME/foreman.toml, and answers for a home that has none with
+# Claude's defaults -- which is what every machine looked like before
+# foreman.toml existed.
 #
-# FOREMAN_HOME has NO default here any more. One machine now runs several
-# installations under one root, and identity comes from the path: the home is
+# FOREMAN_HOME has NO default here. Identity comes from the path: the home is
 # the parent of this clone. installation.py owns that derivation and this file
 # copies none of it -- two derivations of one home agree only until one of
-# them is edited, and the half that disagreed would read a sibling's
-# boards.toml. An explicit FOREMAN_HOME still wins, which is how a test points
-# everything at a temporary directory.
+# them is edited. An explicit FOREMAN_HOME still wins, which is how a test
+# points everything at a temporary directory.
 #
 # Exported BEFORE the load rather than with the rest at the end: both
 # installation.py here and bin/boards.py below read $FOREMAN_HOME themselves
-# to find their file, so an unexported home leaves this shell and the loaders
-# it runs answering for two different installations. `export` on an unset
-# variable exports nothing, so this never turns an absent home into an empty
-# one.
+# to find their file. `export` on an unset variable exports nothing, so this
+# never turns an absent home into an empty one.
 export FOREMAN_HOME
-# These four come from the loader ALONE, so they are unset first. Every other
-# key in this file is environment-wins, and these four cannot be: they say who
-# this installation is, and the environment is not allowed to answer that.
-#
-# Two failures, both silent. `IS_DEFAULT=1` in the environment makes a
-# non-default installation claim every card carrying no `foreman:*` label,
-# straight past bin/installation.py's one-default check -- two ticks then
-# dispatch the same unlabelled card. `INSTALLATION=a-b` reopens the
-# hyphen-absorption hole this file documents for INSTANCE below, one segment
-# earlier: worktree_path joins the installation with a hyphen, so a-b's
-# worktrees match installation a's sweep glob on a shared REPO.
-#
-# LEGACY_NAMES is the third silent failure. `LEGACY_NAMES=1` in the
-# environment gives a scoped installation the legacy shapes below: its sweep
-# then globs foreman-<board>-* and reaps the worktrees of a legacy sibling
-# that serves the same repository, and its reconcile reads that sibling's pull
-# requests as its own.
+# These come from the loader ALONE, so they are unset first. Every other key in
+# this file is environment-wins, and these cannot be: they say what foreman is,
+# and the environment is not allowed to answer that. `INSTALLATION=other` in
+# the environment would compose every agent name, worktree and branch under a
+# segment that nothing else on the machine answers to.
 #
 # FOREMAN_HOME above is deliberately NOT in this list. An explicit home is how
-# every test in tests/ points a whole installation at a temporary directory,
-# and it selects a home rather than contradicting what that home declares.
+# every test in tests/ points a whole foreman at a temporary directory, and it
+# selects a home rather than contradicting what that home declares.
 unset INSTALLATION IS_DEFAULT HARNESS FOREMAN_ROOT LEGACY_NAMES
-if ! _foreman_load_pairs "this installation's declaration" "$_foreman_install_root/bin/installation.py"; then
+if ! _foreman_load_pairs "foreman's declaration" "$_foreman_install_root/bin/installation.py"; then
   if [[ $- == *i* ]]; then return 1; else exit 1; fi
 fi
 if [[ -z "${FOREMAN_HOME:-}" ]]; then
@@ -87,64 +68,20 @@ if [[ -z "${FOREMAN_HOME:-}" ]]; then
   # come from an explicitly empty environment override, which the `-` above
   # honours. It would resolve boards.toml, instances/ and supervise.lock
   # against "/", quietly.
-  printf 'foreman: FOREMAN_HOME resolved empty; leave it unset to derive it from this installation\n' >&2
-  if [[ $- == *i* ]]; then return 1; else exit 1; fi
-fi
-# No hyphen, no slash, the same rule INSTANCE is held to below and for the same
-# glob: worktree_path and every sweep glob join the installation and the
-# instance with a HYPHEN, so INSTALLATION=a-b makes "foreman-a-b-demo-PRA-1"
-# match installation a's glob "foreman-a-*" on a repository both serve.
-#
-# Re-checked HERE even though bin/installation.py applies the rule when it
-# reads the name. The loader above is not the only way a value arrives, and a
-# name this shell pastes into a glob is worth one line to re-establish. It is
-# also the check that catches a loader whose own rule is one day loosened.
-if [[ ! "$INSTALLATION" =~ ^[A-Za-z0-9_]+$ ]]; then
-  printf 'foreman: installation name %s is invalid; only letters, digits and underscore are allowed (no hyphen, no slash)\n' "$INSTALLATION" >&2
+  printf 'foreman: FOREMAN_HOME resolved empty; leave it unset to derive it from this clone\n' >&2
   if [[ $- == *i* ]]; then return 1; else exit 1; fi
 fi
 
 # THE ONE PLACE A NAME'S SHAPE IS DECIDED. Every agent name, worktree, branch
 # and evidence ref below, and every glob in sweep.sh, reconcile.py and
-# watch-agents.py, reads these two segments instead of spelling the
-# installation in again.
-#
-#   scoped (every installation created with an installation.toml that does
-#   not say otherwise):
-#     foreman/<installation>/<board>/<ticket>/<role>-<attempt>
-#     foreman/<installation>/tick
-#     $REPO/.claude/worktrees/foreman-<installation>-<board>-<ticket>
-#     foreman/<installation>/<board>/<ticket>                (branch)
-#     refs/foreman/<installation>/<board>/evidence/<n>
-#
-#   legacy (a home with no installation.toml, and the home `boardctl migrate`
-#   writes with `names = "legacy"`):
-#     foreman/<board>/<ticket>/<role>-<attempt>
-#     foreman/tick
-#     $REPO/.claude/worktrees/foreman-<board>-<ticket>
-#     foreman/<board>/<ticket>                               (branch)
-#     refs/foreman/<board>/evidence/<n>
-#
-# Legacy exists because a Claude home installed before installations has open
-# pull requests on foreman/<board>/<ticket>. reconcile.py finds a card's pull
-# request by that branch, so renaming it under a live card reads as "no PR"
-# and the board builds the card again on top of the open one. The installation
-# that already exists keeps its names; bin/installation.py refuses a second
-# legacy sibling, and a legacy board named like a scoped sibling, because
-# either one makes these globs match another installation's work.
-#
-# Assigned here, never read from the environment, for the reason LEGACY_NAMES
-# is unset above. The same holds for every name composed from them:
-# NAME_SCOPE, WORKTREE_SCOPE, BOARD_NAME_PREFIX, BOARD_WORKTREE_PREFIX and
-# TICK_AGENT_NAME.
-if [[ -n "$LEGACY_NAMES" ]]; then
-  NAME_SCOPE=""
-  WORKTREE_SCOPE=""
-else
-  NAME_SCOPE="$INSTALLATION/"
-  WORKTREE_SCOPE="$INSTALLATION-"
-fi
-export FOREMAN_HOME FOREMAN_ROOT INSTALLATION HARNESS IS_DEFAULT LEGACY_NAMES NAME_SCOPE WORKTREE_SCOPE
+# watch-agents.py, reads these prefixes instead of spelling the shape in again.
+# There is one foreman, so the names carry no installation segment:
+#   foreman/<board>/<ticket>/<role>-<attempt>
+#   foreman/tick
+#   $REPO/.claude/worktrees/foreman-<board>-<ticket>
+#   foreman/<board>/<ticket>                (branch)
+#   refs/foreman/<board>/evidence/<n>
+export FOREMAN_HOME FOREMAN_ROOT INSTALLATION HARNESS IS_DEFAULT LEGACY_NAMES
 
 # The adapter for this installation's harness: Claude Code, Codex or OpenCode.
 # Every script that ran `claude` itself runs this instead, so one file knows
@@ -155,7 +92,7 @@ export FOREMAN_HOME FOREMAN_ROOT INSTALLATION HARNESS IS_DEFAULT LEGACY_NAMES NA
 # adapter that is missing or not executable otherwise surfaces inside
 # dispatch.sh, after the worktree is cut and the branch pushed, once for every
 # card the board takes.
-# WHICH HARNESSES THIS INSTALLATION MAY SPAWN ON: its own, plus any named as a
+# WHICH HARNESSES FOREMAN MAY SPAWN ON: its own, plus any named as a
 # prefix in a fallback tier or a stage model. One tick can then fall back
 # across CLIs and not only across models, and harness/registry.sh -- the reader
 # every script uses -- merges exactly this set. See its header.
@@ -242,13 +179,13 @@ fi
 INSTANCE_HOME="$FOREMAN_HOME/instances/$INSTANCE"
 BOARD_HOME="${BOARD_HOME:-$INSTANCE_HOME}"
 
-# This board's two name roots, composed once from the scope above. Every
-# per-card name is one of these plus the ticket: the functions at the bottom of
-# this file, sweep.sh's globs, and reconcile.py and watch-agents.py, which read
-# both through reconcile.py's _load_config. Not environment-wins, for the
-# reason NAME_SCOPE is not.
-BOARD_NAME_PREFIX="foreman/$NAME_SCOPE$INSTANCE"
-BOARD_WORKTREE_PREFIX="foreman-$WORKTREE_SCOPE$INSTANCE"
+# This board's two name roots, composed once. Every per-card name is one of
+# these plus the ticket: the functions at the bottom of this file, sweep.sh's
+# globs, and reconcile.py and watch-agents.py, which read both through
+# reconcile.py's _load_config. Not environment-wins: a name this shell pastes
+# into a glob is not the environment's to answer.
+BOARD_NAME_PREFIX="foreman/$INSTANCE"
+BOARD_WORKTREE_PREFIX="foreman-$INSTANCE"
 
 # ids.env is KEY=VALUE, written by bin/resolve-ids.py, never by hand and never
 # by a target repository. Read line by line rather than sourced: the same rule
@@ -457,28 +394,22 @@ AGENT_SKIP_PERMISSIONS="${AGENT_SKIP_PERMISSIONS-1}"
 
 # The self-looping tick agent, and the watchdog that keeps it alive.
 #
-# This INSTALLATION runs ONE long-lived background agent executing the board
-# skill on a loop. Cron does not run ticks — it runs supervise.sh, which only
-# ensures that agent exists and is healthy. Keeping dispatch out of cron is
-# deliberate: a watchdog that could also dispatch would double-dispatch the
-# moment it misjudged liveness.
+# Foreman runs ONE long-lived background agent executing the board skill on a
+# loop. Cron does not run ticks — it runs supervise.sh, which only ensures that
+# agent exists and is healthy. Keeping dispatch out of cron is deliberate: a
+# watchdog that could also dispatch would double-dispatch the moment it
+# misjudged liveness.
 #
-# The name carries the installation scope and no board segment, unlike
-# agent_name, branch_name, worktree_path and evidence_ref below. There is ONE
-# tick for every board this installation serves -- it walks them in turn -- so
-# a per-board name would ask supervise.sh to keep N agents alive and let N
-# ticks dispatch against one machine-wide HOST_MAX_CONCURRENT. The installation
-# segment is the other half: a machine runs one tick per installation, on a
-# different harness each, and two ticks named `foreman/tick` in one registry
-# would each read the other as the one supervise.sh must stop before starting a
-# replacement. The legacy installation keeps `foreman/tick`; installation.py
-# allows only one of those per root, so the name stays unique.
+# The name carries no board segment, unlike agent_name, branch_name,
+# worktree_path and evidence_ref below. There is ONE tick for every board --
+# it walks them in turn -- so a per-board name would ask supervise.sh to keep N
+# agents alive and let N ticks dispatch against one machine-wide
+# HOST_MAX_CONCURRENT.
 #
 # NOT environment-wins, unlike the knobs around it. Found in review on
-# 2026-09-14: an operator shell exporting TICK_AGENT_NAME=foreman/tick gave a
-# scoped sibling the legacy tick's name, and `supervise.sh --restart` there
-# would stop the legacy installation's live tick.
-TICK_AGENT_NAME="foreman/${NAME_SCOPE}tick"
+# 2026-09-14: an operator shell exporting TICK_AGENT_NAME would give the tick a
+# name `supervise.sh --restart` no longer stops before starting a replacement.
+TICK_AGENT_NAME="foreman/tick"
 TICK_INTERVAL_MINUTES="${TICK_INTERVAL_MINUTES:-20}"
 
 # Wedged: mid-turn and silent. A tick genuinely working is never quiet this long.
@@ -646,7 +577,7 @@ BOARD_DRY_RUN="${BOARD_DRY_RUN:-}"
 # `BOARD_HOME`) now move both at once because there is only one derivation
 # left to move.
 #
-# THIS INSTALLATION's own bin/tmp-dir.sh, never the target's. A target repo
+# FOREMAN's own bin/tmp-dir.sh, never the target's. A target repo
 # is not obliged to ship any particular directory of its own scripts --
 # asking it for a scratch-dir helper of its own was a leftover from before
 # foreman was extracted from the project it grew up in, and it made every
@@ -668,22 +599,13 @@ fi
 card_dir() { printf '%s/cards/%s\n' "$BOARD_HOME" "$1"; }
 # The scratch dir paired with a worktree path. Same basename, so a sweep that
 # reaps the worktree can reap the scratch without tracking anything.
-# THIS INSTALLATION's bin/tmp-dir.sh -- see the comment above AGENT_TMP_ROOT.
+# FOREMAN's bin/tmp-dir.sh -- see the comment above AGENT_TMP_ROOT.
 agent_tmp_for() { BOARD_HOME="$BOARD_HOME" "$_foreman_tmp_dir_sh" "$1"; }
-# Every name carries the installation and then the instance. The agent registry
-# is one flat list shared by everything on this machine, matched by prefix in
-# reconcile.py and sweep.sh and by regex in watch-agents.py; without the
-# INSTANCE segment two boards reap each other's agents, and two projects may
-# legitimately both use the team key PRA.
-#
-# The INSTALLATION segment closes the same hole one level up: two installations
-# on this machine may serve one repository -- that is the point of running a
-# second harness -- and they then share a board name, a ticket key, a REPO and
-# so every worktree, branch and evidence ref under it. Without this segment the
-# codex installation's sweep reaps the claude installation's worktree, and its
-# dispatch pushes onto the branch a live build is committing to. The legacy
-# installation goes without it; see NAME_SCOPE near the top of this file for
-# why, and for the two refusals that keep it apart from its siblings.
+# Every name carries the board (the instance). The agent registry is one flat
+# list shared by everything on this machine, matched by prefix in reconcile.py
+# and sweep.sh and by regex in watch-agents.py; without the INSTANCE segment
+# two boards reap each other's agents, and two projects may legitimately both
+# use the team key PRA.
 #
 # The prefix is its own function because sweep.sh matches on it: everything a
 # card ever dispatched -- plan, build, review, every attempt and every resume

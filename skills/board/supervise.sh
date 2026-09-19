@@ -421,18 +421,9 @@ start_agent() {
   log "started $TICK_AGENT_NAME: $prompt"
 }
 
-# EVERY per-card agent of THIS INSTALLATION, stopped ones included, one
-# "<name><TAB><state>" per line. A card agent is any `foreman/$NAME_SCOPE`
-# name in the registry that is not the tick.
-#
-# The installation segment is what keeps a sibling's builds out of this
-# listing. Two installations share one registry on a Claude machine, and a
-# restart that reported a sibling's card agents would tell the operator this
-# gesture had touched agents it cannot even stop.
-#
-# The legacy installation has no segment, so its prefix is `foreman/` and a
-# scoped Claude sibling's card agents do appear in its listing. That is a
-# display only: nothing here stops by prefix, and the tick is stopped by id.
+# EVERY per-card agent of THIS FOREMAN, stopped ones included, one
+# "<name><TAB><state>" per line. A card agent is any `foreman/` name in the
+# registry that is not the tick.
 #
 # A restart must leave all of them running, which is only true because
 # dispatch.sh parents each one to the harness rather than to the tick. They are
@@ -461,7 +452,7 @@ for a in agents:
     name=a.get("name") or ""
     state=a.get("state") or "?"
     if name.startswith(prefix) and name!=tick: print("%s\t%s"%(name,state))
-' "$TICK_AGENT_NAME" "foreman/$NAME_SCOPE"
+' "$TICK_AGENT_NAME" "foreman/"
 }
 
 # Print the card agents that are IN FLIGHT. A stopped one is a finished build
