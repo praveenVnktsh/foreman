@@ -167,6 +167,25 @@ if [[ ! "$INSTANCE" =~ ^[A-Za-z0-9_]+$ ]]; then
   printf 'foreman: instance name %s is invalid; only letters, digits and underscore are allowed (no hyphen, no slash)\n' "$INSTANCE" >&2
   if [[ $- == *i* ]]; then return 1; else exit 1; fi
 fi
+# CROSS-BOARD GUARD, before any per-board value is derived. The values below
+# and in FOREMAN_BOARD_EXPORTS are environment-wins (`-`, and
+# `BOARD_HOME="${BOARD_HOME:-...}"`), so a shell that has sourced config.sh for
+# one board -- or a child that inherited those exports -- would serve the NEXT
+# board with the previous board's REPO, KEY_FILE and runtime home. Measured
+# 2026-09-19: one tick configured four boards in one shell and ran three of them
+# against the first board's repository; a pakka card's worktree, branch and card
+# history landed inside the foreman repo. Record which board these belong to and
+# drop them when a DIFFERENT board is configured, so each is derived fresh. An
+# override for the SAME board (how the tests point BOARD_HOME at a scratch dir)
+# is left alone, and a first source with no marker is untouched.
+if [[ -n "${FOREMAN_CONFIG_INSTANCE:-}" && "$FOREMAN_CONFIG_INSTANCE" != "$INSTANCE" ]]; then
+  unset REPO KEY_FILE INSTANCE_HOME BOARD_HOME BOARD_NAME_PREFIX BOARD_WORKTREE_PREFIX AGENT_TMP_ROOT
+fi
+# EXPORTED, so a child shell inheriting this board's REPO/BOARD_HOME also
+# inherits the marker that says whose they are, and can drop them for another.
+FOREMAN_CONFIG_INSTANCE="$INSTANCE"
+export FOREMAN_CONFIG_INSTANCE
+
 # The per-board runtime directory: cards/, HALT, and the ids.env cache.
 #
 # Its absence is not a refusal any more. $FOREMAN_HOME/boards.toml is what

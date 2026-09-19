@@ -419,4 +419,62 @@ else
   not_ok "loader failed silently (no message on stderr)"
 fi
 
+# ============================================================================
+# CROSS-BOARD GUARD: two boards in ONE shell.
+#
+# config.sh is environment-wins for REPO/KEY_FILE/BOARD_HOME, and one tick
+# serves every board from a single shell (the agents' bash tool keeps
+# exports). On 2026-09-19 that served three boards with the first board's
+# repository: a pakka card's worktree, branch and card history were written
+# inside the foreman repo. Sourcing a second board in the same shell must drop
+# the first board's values. Two REAL repositories, so an identical REPO cannot
+# make the case pass by luck.
+# ============================================================================
+two="$work/twoboard"; mkdir -p "$two"
+repo_a="$work/repo-a"; repo_b="$work/repo-b"
+for r in "$repo_a" "$repo_b"; do
+  mkdir -p "$r"; git -C "$r" init -q -b main
+  cat >"$r/board.toml" <<'TOML'
+[linear]
+team = "PRA"
+project = "example"
+[checks]
+required = ["Tests"]
+ci_workflow = "CI"
+[test]
+command = "true"
+TOML
+done
+cat >"$two/boards.toml" <<TOML
+[boards.alpha]
+repo = "$repo_a"
+
+[boards.beta]
+repo = "$repo_b"
+TOML
+
+# One shell: configure alpha, then beta, printing beta's REPO and BOARD_HOME
+# after the second source. Nothing is run in a subshell here on purpose -- that
+# is exactly the shape that leaked.
+second_source="$(env FOREMAN_HOME="$two" bash -c "
+  export FOREMAN_INSTANCE=alpha
+  . '$root/skills/board/config.sh' >/dev/null
+  export FOREMAN_INSTANCE=beta
+  . '$root/skills/board/config.sh' >/dev/null
+  printf '%s|%s' \"\$REPO\" \"\$BOARD_HOME\"
+")"
+check "a second board in one shell gets its own REPO and runtime home" \
+  "$repo_b|$two/instances/beta" "$second_source"
+
+# The marker names the board the environment's values belong to, so a child
+# shell can make the same decision.
+marker="$(env FOREMAN_HOME="$two" FOREMAN_INSTANCE=alpha bash -c \
+  ". '$root/skills/board/config.sh' >/dev/null; printf '%s' \"\$FOREMAN_CONFIG_INSTANCE\"")"
+check "the configured board is marked for children" "alpha" "$marker"
+
+# A same-board override still wins: the guard keys on a CHANGE of board.
+same_override="$(env FOREMAN_HOME="$two" FOREMAN_INSTANCE=beta BOARD_HOME="$work/custom-home" \
+  bash -c ". '$root/skills/board/config.sh' >/dev/null; printf '%s' \"\$BOARD_HOME\"")"
+check "an override for the same board is untouched" "$work/custom-home" "$same_override"
+
 exit "$fail"
