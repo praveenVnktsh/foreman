@@ -54,7 +54,9 @@ _foreman_load_pairs "this installation's declaration" "$INSTALL_ROOT/bin/install
 # The unit names carry the installation: two installations on one machine each
 # get their own service and timer, so enabling one never disables the other's
 # and `systemctl --user stop foreman-<name>.timer` stops exactly one watchdog.
-UNIT_NAME="foreman-$INSTALLATION"
+# ONE FOREMAN, so the unit carries no installation segment. It is simply
+# `foreman`.
+UNIT_NAME="foreman"
 
 HARNESS_SH="$INSTALL_ROOT/skills/board/harness/$HARNESS.sh"
 [[ -x "$HARNESS_SH" ]] || die "no adapter at $HARNESS_SH for harness '$HARNESS'"
@@ -97,63 +99,9 @@ fi
 
 UNIT_DIR="$HOME/.config/systemd/user"
 
-# THE PRE-INSTALLATIONS WATCHDOG, still enabled beside this one. It is named
-# plain `foreman`, this one `foreman-$INSTALLATION`, so systemd sees two
-# unrelated units and starts both. Its ExecStart names the install/ directory
-# `boardctl migrate` moved, so it wakes every ten minutes and fails for as long
-# as it is enabled -- and a machine whose board is healthy grows a permanently
-# red unit that nobody can explain. `boardctl migrate` prints the disable as
-# its third step; this is what happens when that step is skipped.
-#
-# NOTHING IS DELETED HERE. The operator did not ask for a file to be removed,
-# and a unit file is the only record of what the old watchdog was.
-#
-# So the refusal asks whether the old watchdog can still RUN, not whether its
-# file exists. `systemctl disable` removes the enablement symlink and leaves the
-# unit file in place. On 2026-09-14, while migrating a live machine, an
-# operator did what this message said -- disable, then run again -- and was
-# refused again, because the check was `-e` on the file this message told them
-# to keep. Nothing short of deleting that file got past it.
-#
-# Only the timer's enablement is asked. The legacy service has no [Install]
-# section, so is-enabled reports it `static` for ever, and that state would
-# refuse a machine where nothing can start it. Both units' activity is asked: a
-# fire already running is a second watchdog until it exits.
-#
-# Every other answer refuses, an empty one included. is-enabled reports
-# enabled, enabled-runtime, linked, linked-runtime, alias, static, indirect,
-# generated and transient for a unit that something can still start; is-active
-# reports active, activating, reloading and deactivating for one still running.
-# A state this list has not met is not one to guess about.
-legacy_enablement() { systemctl --user is-enabled foreman.timer 2>/dev/null || true; }
-legacy_activity() { systemctl --user is-active "$1" 2>/dev/null || true; }
-legacy_can_run() {
-  case "$(legacy_enablement)" in
-    disabled|masked|not-found) ;;
-    *) return 0 ;;
-  esac
-  local unit
-  for unit in foreman.timer foreman.service; do
-    case "$(legacy_activity "$unit")" in
-      inactive|failed) ;;
-      *) return 0 ;;
-    esac
-  done
-  return 1
-}
-for legacy in foreman.service foreman.timer; do
-  [[ -e "$UNIT_DIR/$legacy" ]] || continue
-  if legacy_can_run; then
-    die "$UNIT_DIR/$legacy is the pre-installations watchdog, and it can still run.
-systemd reports foreman.timer '$(legacy_enablement)' and '$(legacy_activity foreman.timer)', foreman.service '$(legacy_activity foreman.service)'.
-It runs the install/ directory that migration moved, so it fails every fire, and
-enabling $UNIT_NAME.timer beside it would leave two watchdogs on this machine.
-Disable it first, then run this again:
-  systemctl --user disable --now foreman.timer
-The unit files are left where they are; remove them by hand once you are sure."
-  fi
-  printf 'install-service: saw %s/%s, the pre-installations watchdog; it is disabled and inactive, so it is left alone.\n' "$UNIT_DIR" "$legacy"
-done
+# NO LEGACY-WATCHDOG CHECK ANY MORE. The pre-installations watchdog was named
+# plain `foreman`, and this one now is too -- there is one foreman. A check for
+# a unit called foreman.timer would find this installation's own unit and refuse.
 
 service_unit() {
   cat <<UNIT

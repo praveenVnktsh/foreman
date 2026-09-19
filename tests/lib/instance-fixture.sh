@@ -127,9 +127,12 @@ fixture_linear_key() {
 # knob and not a fifth argument, so every existing caller stays exactly as it
 # reads.
 fixture_add_installation() {
-  local home="$1" name="$2" harness="$3" default_flag="${4:-}"
-  local legacy_flag=""
-  [[ -z "${FIXTURE_LEGACY_NAMES:-}" ]] || legacy_flag="--legacy-names"
+  # <name> locates the home, not an installation: the loader answers wherever
+  # FOREMAN_HOME points, and there is one foreman regardless. A test that wants
+  # two harnesses under one root simply writes two homes here. The 4th argument
+  # and FIXTURE_LEGACY_NAMES are gone: there is no default to claim and no name
+  # scope to choose, and names are always installation-free.
+  local home="$1" name="$2" harness="$3"
   local root="$home/.foreman"
   local install_home="$root/$name"
   local repo_root models=()
@@ -143,6 +146,5 @@ fixture_add_installation() {
   # bash 3.2 + `set -u`: "${arr[@]}" on an EMPTY array is an unbound-variable
   # error, not an empty expansion.
   "$repo_root/bin/installation.py" --write --home "$install_home" \
-    --harness "$harness" ${default_flag:+"$default_flag"} \
-    ${legacy_flag:+"$legacy_flag"} ${models[@]+"${models[@]}"}
+    --harness "$harness" ${models[@]+"${models[@]}"}
 }

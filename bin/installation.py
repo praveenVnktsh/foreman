@@ -38,6 +38,15 @@ import tomllib
 
 INSTALLATION_FILE = "installation.toml"
 
+# ONE FOREMAN. The machine root ~/.foreman IS the installation: the clone sits
+# at ~/.foreman/install and ~/.foreman/foreman.toml declares the harness, the
+# stage models and the fallback tiers. There is no installation name, no default
+# and no siblings -- a card belongs to foreman and its board decides the repo.
+# The legacy three keys below are still emitted, as constants, so a reader that
+# has not been updated yet gets the single, installation-free answer.
+CONFIG_FILE = "foreman.toml"
+FOREMAN = "foreman"
+
 # The three harnesses skills/board/harness/<harness>.sh implements. A fourth
 # name is a typo until an adapter exists for it, and the failure would be a
 # tick that spawns nothing.
@@ -568,55 +577,63 @@ def refuse_undeclared_beside_siblings(home: str) -> None:
 
 
 def record(home: str) -> list[str]:
-    """The KEY, VALUE fields for one home."""
-    # A HOME WITH NO installation.toml IS A LONE CLAUDE INSTALLATION. That is
-    # exactly the layout every machine had before installations existed: the
-    # clone sits directly under ~/.foreman beside boards.toml and instances/.
-    # Such a home must keep working unmigrated, so this loader answers for it
-    # rather than leaving every consumer to guess -- and it has no siblings,
-    # because a root that holds one un-migrated home holds no installations.
-    #
-    # ITS NAMES ARE LEGACY. That is what keeps a machine safe between `git
-    # pull` and `boardctl migrate`. The pulled code must go on finding the
-    # branches, agents and worktrees the old code named, or every in-flight
-    # card reads "no PR" and is built again on top of its open pull request.
-    if not declared(home):
-        refuse_undeclared_beside_siblings(home)
-        return fields(CLAUDE, CLAUDE, True, True, home, home, CLAUDE_MODELS,
-                      resolve_fallback(home, CLAUDE, CLAUDE_MODELS, None))
+    """The KEY, VALUE fields for the one foreman home.
 
-    path = os.path.join(home, INSTALLATION_FILE)
-    name = os.path.basename(home)
-    validate_name(home, name)
-    root = foreman_root(home)
-    harness, declares_default, legacy_names, models, fallback = parse(path)
-    entries = siblings_checked(root)
-    # AN INSTALLATION WITH NO SIBLING IS THE DEFAULT, whatever its file says.
-    # One installation on the machine is the common case, and it must own
-    # every card: there is no other installation for an unlabelled card to
-    # belong to. On 2026-09-14 it did not. The documented first install --
-    # `install.sh --harness claude`, no --default -- wrote `default = false`,
-    # so IS_DEFAULT came back empty, skills/board/queue.py dropped every
-    # unlabelled card as FOREIGN and exited 0, and a board installed exactly
-    # as the README says never dispatched anything and never said why.
-    is_default = declares_default or len(entries) == 1
-    return fields(name, harness, is_default, legacy_names, home, root, models, fallback)
+    The harness, models and fallback tiers come from `<home>/foreman.toml` when
+    it exists, and from Claude's defaults when it does not -- so a bare
+    `~/.foreman/install` clone still answers. Nothing here names a second
+    installation, checks a default, or lists a sibling.
+    """
+    path = os.path.join(home, CONFIG_FILE)
+    if os.path.isfile(path):
+        harness, models, fallback = parse_config(path)
+    else:
+        harness = CLAUDE
+        models = dict(CLAUDE_MODELS)
+        fallback = resolve_fallback(path, CLAUDE, models, None)
+    return fields(FOREMAN, harness, home, models, fallback)
 
 
-def fields(name: str, harness: str, is_default: bool, legacy_names: bool,
-           home: str, root: str, models: dict, fallback: dict) -> list[str]:
-    # IS_DEFAULT and LEGACY_NAMES are two keys whose empty value is
-    # meaningful: config.sh tests them with `-n`, so "" is false and "1" is
-    # true. FALLBACK_TIERS "" means fallback is off, and a *_FLOOR "" means
-    # the stage may fall to the bottom of the tiers. Every other key here
-    # refuses to be empty.
+def parse_config(path: str) -> tuple[str, dict, dict]:
+    """foreman.toml as (harness, models, fallback), refusing rather than degrading."""
+    doc = load_toml(path)
+    unknown = sorted(set(doc) - TOP_KEYS)
+    if unknown:
+        die(f"{path}: unknown key(s): {', '.join(unknown)}")
+
+    harness = doc.get("harness")
+    if harness is None:
+        die(f"{path}: declares no harness; expected one of {', '.join(HARNESSES)}")
+    if not isinstance(harness, str):
+        die(f"{path}: harness must be a string")
+    if harness not in HARNESSES:
+        die(f"{path}: unknown harness {harness!r}; expected one of {', '.join(HARNESSES)}")
+
+    table = doc.get(MODELS_TABLE, {})
+    if not isinstance(table, dict):
+        die(f"{path}: {MODELS_TABLE} must be a table")
+    unknown = sorted(set(table) - set(STAGES))
+    if unknown:
+        die(f"{path}: unknown key(s) in {MODELS_TABLE}: {', '.join(unknown)}")
+
+    models = resolve_models(path, harness, table)
+    fallback = resolve_fallback(path, harness, models, doc.get(FALLBACK_TABLE))
+    return harness, models, fallback
+
+
+def fields(name: str, harness: str, home: str, models: dict, fallback: dict) -> list[str]:
+    # INSTALLATION is always "foreman", IS_DEFAULT always true and LEGACY_NAMES
+    # always set, so names carry no installation segment. They stay in the wire
+    # format for readers that still ask; there is nothing else they could be.
+    # FALLBACK_TIERS "" means fallback is off; a *_FLOOR "" means the stage may
+    # fall to the bottom of the tiers.
     return [
         "INSTALLATION", name,
         "HARNESS", harness,
-        "IS_DEFAULT", "1" if is_default else "",
-        "LEGACY_NAMES", "1" if legacy_names else "",
+        "IS_DEFAULT", "1",
+        "LEGACY_NAMES", "1",
         "FOREMAN_HOME", home,
-        "FOREMAN_ROOT", root,
+        "FOREMAN_ROOT", home,
         "TICK_MODEL", models["tick"],
         "PLAN_MODEL", models["plan"],
         "BUILD_MODEL", models["build"],
@@ -636,61 +653,50 @@ def toml_string(value: str) -> str:
     return f'"{escaped}"'
 
 
-def render(harness: str, is_default: bool, legacy_names: bool, models: dict) -> str:
-    """installation.toml as text. tomllib reads TOML and cannot write it, and
-    a writer is not worth a dependency for eight lines of two-token keys."""
+def render(harness: str, models: dict, fallback: dict) -> str:
+    """foreman.toml as text. tomllib reads TOML and cannot write it, and a
+    writer is not worth a dependency for a handful of two-token keys."""
     lines = [
-        "# What this installation is: the harness that runs it, and the models",
-        "# it spends. Written by bin/install.sh; bin/installation.py reads it.",
+        "# What foreman is: the harness it runs on, the models it spends, and the",
+        "# tiers it falls back through. Written by bin/install.sh;",
+        "# bin/installation.py reads it.",
         "",
         f"harness = {toml_string(harness)}",
-        f"default = {'true' if is_default else 'false'}",
-        f"{NAMES_KEY} = {toml_string(LEGACY_NAMES if legacy_names else SCOPED_NAMES)}",
         "",
         f"[{MODELS_TABLE}]",
     ]
     lines += [f"{stage} = {toml_string(models[stage])}" for stage in STAGES]
+    lines += [
+        "",
+        f"[{FALLBACK_TABLE}]",
+        f"{TIERS_KEY} = [{', '.join(toml_string(tier) for tier in fallback['tiers'])}]",
+        f"{COOLDOWN_KEY} = {fallback['cooldown']}",
+    ]
     return "\n".join(lines) + "\n"
 
 
-def write(home: str, harness: str | None, is_default: bool, legacy_names: bool,
-          given: dict, dry_run: bool, boards_file: str | None) -> None:
-    """Declare <home> an installation, refusing to overwrite one that exists.
-
-    With <dry_run>, write nothing and refuse exactly where the write would.
-    bin/boardctl migrate runs it BEFORE it moves a home. Found in review on
-    2026-09-14: migrate moved the home first and the write refused after,
-    leaving ~/.foreman/claude undeclared, its FOREMAN_ROOT no longer pointing
-    at the linear.key left one level up, and a re-run moving it again into
-    claude/claude. <boards_file> is where the boards are before the move, so
-    the collision check reads the boards the home will have.
-    """
+def write(home: str, harness: str | None, given: dict, dry_run: bool) -> None:
+    """Write <home>/foreman.toml, refusing to overwrite one that exists."""
     if harness is None:
         die(f"--write needs --harness (one of {', '.join(HARNESSES)})")
     if harness not in HARNESSES:
         die(f"--write: unknown harness {harness!r}; "
             f"expected one of {', '.join(HARNESSES)}")
     if not os.path.isdir(home):
-        die(f"no installation directory at {home}; "
-            "clone into <root>/<name>/install first")
-    validate_name(home, os.path.basename(home))
-    # Validated BEFORE the file exists, by the same function that validates a
-    # file being read, so a codex write with a model missing refuses instead
-    # of writing something no reader will accept.
+        die(f"no home at {home}; clone into {home}/install first")
+    # Validated BEFORE the file exists, so a codex write with a model missing
+    # refuses instead of writing something no reader will accept.
     models = resolve_models("--write", harness, given)
+    fallback = resolve_fallback("--write", harness, models, None)
 
-    path = os.path.join(home, INSTALLATION_FILE)
+    path = os.path.join(home, CONFIG_FILE)
     if dry_run:
         if os.path.exists(path):
             die(f"{path} already exists; edit or remove it, this never overwrites one")
-        # The same sibling checks record() applies to the file once written.
-        pending = (os.path.basename(home), home, is_default, legacy_names)
-        siblings_checked(os.path.dirname(home), pending,
-                         {home: boards_file} if boards_file else None)
         return
-    # O_EXCL, not a stat and then a write: the refusal to overwrite is the
-    # whole safety of this command, and a check separate from the write is a
-    # window in which a second operator's install lands.
+    # O_EXCL, not a stat and then a write: the refusal to overwrite is the whole
+    # safety of this command, and a check separate from the write is a window in
+    # which a second write lands.
     try:
         fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644)
     except FileExistsError:
@@ -699,14 +705,10 @@ def write(home: str, harness: str | None, is_default: bool, legacy_names: bool,
         die(f"cannot write {path}: {exc}")
     try:
         with os.fdopen(fd, "w") as fh:
-            fh.write(render(harness, is_default, legacy_names, models))
+            fh.write(render(harness, models, fallback))
         # Read back what was written, through the real loader. It proves the
-        # text this file emitted parses, and it applies the sibling check --
-        # so `--write --default` beside an existing default refuses, and so
-        # does a second installation written while no sibling claims default,
-        # and so does a second `--legacy-names`.
-        # A refused write leaves the home exactly as it was found, which is
-        # why the file goes away again before the exit propagates.
+        # text this file emitted parses. A refused read leaves the home as it
+        # was found, which is why the file goes away again.
         record(home)
     except (OSError, SystemExit):
         os.unlink(path)
@@ -721,8 +723,7 @@ def emit(out: list[str]) -> None:
 
 def usage() -> None:
     die("usage: installation.py [--home <path>] "
-        "[--siblings | --write --harness <name> [--default] [--legacy-names] "
-        "[--model-<stage> <model>] [--dry-run [--boards-file <path>]]]")
+        "[--siblings | --write --harness <name> [--model-<stage> <model>] [--dry-run]]")
 
 
 def main(argv: list[str]) -> int:
@@ -730,10 +731,7 @@ def main(argv: list[str]) -> int:
     want_siblings = False
     want_write = False
     harness = None
-    is_default = False
-    legacy_names = False
     dry_run = False
-    boards_file = None
     models = {}
 
     rest = argv[1:]
@@ -755,50 +753,31 @@ def main(argv: list[str]) -> int:
             want_siblings = True
         elif arg == "--write":
             want_write = True
-        elif arg == "--default":
-            is_default = True
-        elif arg == "--legacy-names":
-            legacy_names = True
         elif arg == "--dry-run":
             dry_run = True
-        elif arg == "--boards-file":
-            boards_file = absolute(value_for(arg), "--boards-file")
         else:
             usage()
     if want_siblings and want_write:
         usage()
-    # --boards-file changes what a dry run reads; on a real write the boards
-    # are wherever the home is, and accepting it there would check a file the
-    # written installation never reads.
-    if boards_file is not None and not dry_run:
-        die("--boards-file is only for --write --dry-run")
 
     if home is None:
         home = os.path.normpath(foreman_home())
     if want_write:
-        write(home, harness, is_default, legacy_names, models, dry_run, boards_file)
+        write(home, harness, models, dry_run)
         return 0
     # A flag that only --write reads, passed to a read, means the operator
     # believes they are writing. Saying nothing would print a record that
     # ignores every model they named.
-    if harness is not None or is_default or legacy_names or models or dry_run:
-        die("--harness, --default, --legacy-names, --model-<stage> and --dry-run "
-            "are only for --write")
+    if harness is not None or models or dry_run:
+        die("--harness, --model-<stage> and --dry-run are only for --write")
 
     if not want_siblings:
         emit(record(home))
         return 0
-    # An un-migrated home is its own only installation: there is no root full
-    # of siblings to list, because the root IS the home.
-    if not declared(home):
-        refuse_undeclared_beside_siblings(home)
-        emit([CLAUDE, home])
-        return 0
-    root = os.path.dirname(home)
-    out = []
-    for name, sibling_home, _, _ in siblings_checked(root):
-        out += [name, sibling_home]
-    emit(out)
+    # There is one foreman. `--siblings` answers with it and nothing else, so a
+    # caller that still asks -- the tick composing queue.py's arguments -- gets
+    # the single, installation-free answer.
+    emit([FOREMAN, home])
     return 0
 
 

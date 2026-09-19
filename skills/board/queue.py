@@ -307,10 +307,10 @@ def main(argv: list[str]) -> int:
 
     seen: set[str] = set()
     keys = []
-    # True once a card that IS this installation's to handle fails to make the
-    # order: an owned card with an unrankable priority, or a card whose label
-    # names no sibling at all. A card dropped only because a sibling owns it
-    # never sets this -- that card was never this installation's problem.
+    # A card whose priority cannot be read is skipped and named; that is the
+    # only reason this batch fails to rank every card. There is NO ownership
+    # filter: there is one foreman, and the tick hands it its own board's cards,
+    # so every card here is foreman's and is ranked.
     #
     # Read ONLY when nothing ranked. A batch that produced an order exits 0
     # however many cards it also reported on stderr; see NOTHING_RANKED.
@@ -323,20 +323,6 @@ def main(argv: list[str]) -> int:
             # twice while never reaching the other.
             die(f"{identifier}: appears twice; every card must be listed once")
         seen.add(identifier)
-
-        try:
-            verdict = route.verdict(item, args.installation, args.default, args.siblings)
-        except route.LabelShape as exc:
-            # Not caught by route.verdict on purpose -- see its docstring. A
-            # card with unreadable labels is a shape nobody has taught this
-            # module, and ranking it anyway could rank a sibling's card.
-            die(f"{identifier}: {exc}")
-
-        if not verdict.owned:
-            report_drop(identifier, verdict.detail)
-            if verdict.reason is not route.Reason.FOREIGN:
-                unresolved = True
-            continue
 
         try:
             rank = band(item.get("priority"))

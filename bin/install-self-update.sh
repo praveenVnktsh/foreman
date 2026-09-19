@@ -96,7 +96,8 @@ git -C "$INSTALL_ROOT" rev-parse --git-dir >/dev/null 2>&1 \
 # is called: reaching this name from there would need an installation named
 # `update-<installation>`, which yields `foreman-update-update-<installation>`
 # here, not this.
-UNIT_NAME="foreman-update-$INSTALLATION"
+# ONE FOREMAN, so the unit carries no installation segment.
+UNIT_NAME="foreman-update"
 UNIT_DIR="$HOME/.config/systemd/user"
 
 service_unit() {

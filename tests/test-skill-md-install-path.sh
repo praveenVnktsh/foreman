@@ -111,7 +111,7 @@ printf '[boards.demo]\nrepo = "%s"\n' "$target" >"$foreman_home/boards.toml"
 # above it, where no boards.toml lives.
 if out="$(env -u FOREMAN_HOME FOREMAN_INSTANCE=demo bash -c \
      ". '$install_root/skills/board/config.sh'; printf '%s|%s' \"\$TEST_COMMAND\" \"\$INSTALLATION\"" 2>&1)"; then
-  if [[ "$out" == "true|claude" ]]; then
+  if [[ "$out" == "true|foreman" ]]; then
     ok "config.sh at the path SKILL.md now names finds bin/contract.py and loads the target's contract"
   else
     bad "config.sh loaded but produced the wrong value: $out"

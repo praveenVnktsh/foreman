@@ -203,34 +203,34 @@ host_json="$(HOME="$slots_home" FOREMAN_HOME="$slots_home/.foreman" \
 # installations on one machine may serve one repository and would otherwise
 # share a board name. This home declares no installation.toml, so
 # bin/installation.py reads it as the lone Claude installation and every key
-# below is `claude/<board>`.
-expect "1" "$(verdict_field "$host_json" 'v["instances"]["claude/alpha"]')" \
+# below is `foreman/<board>`.
+expect "1" "$(verdict_field "$host_json" 'v["instances"]["foreman/alpha"]')" \
   "alpha's in-flight card is counted"
-expect "1" "$(verdict_field "$host_json" 'v["instances"]["claude/beta"]')" \
+expect "1" "$(verdict_field "$host_json" 'v["instances"]["foreman/beta"]')" \
   "beta's card is counted even though beta is not the current instance"
 expect "7" "$(verdict_field "$host_json" 'len(v["instances"])')" \
   "every instance directory appears in the report, including empty ones"
 echo "ok  --host-slots counts cards across every instance, not just this one"
 
-expect "0" "$(verdict_field "$host_json" 'v["instances"]["claude/delta"]')" \
+expect "0" "$(verdict_field "$host_json" 'v["instances"]["foreman/delta"]')" \
   "a card whose history's last line is a released event must not count"
 echo "ok  --host-slots ignores a card whose history says it finished"
 
-expect "0" "$(verdict_field "$host_json" 'v["instances"]["claude/gamma"]')" \
+expect "0" "$(verdict_field "$host_json" 'v["instances"]["foreman/gamma"]')" \
   "an instance with no cards/ at all must read as zero, not raise"
 expect "3" "$(verdict_field "$host_json" 'v["total"]')" \
   "the total is alpha (1) + beta (1) + delta (0) + gamma (0) + current (0) + epsilon (0) + zeta (1)"
 echo "ok  --host-slots survives an instance directory with no cards/ at all"
 
-expect "0" "$(verdict_field "$host_json" 'v["instances"]["claude/epsilon"]')" \
+expect "0" "$(verdict_field "$host_json" 'v["instances"]["foreman/epsilon"]')" \
   "a card directory with no history.jsonl at all must not count, and must not raise"
 echo "ok  --host-slots survives a card directory with no history.jsonl"
 
-expect "1" "$(verdict_field "$host_json" 'v["instances"]["claude/zeta"]')" \
+expect "1" "$(verdict_field "$host_json" 'v["instances"]["foreman/zeta"]')" \
   "a corrupt trailing line must not crash the read -- it falls back to the last line that DID parse"
 echo "ok  --host-slots survives a malformed trailing line in history.jsonl"
 
-expect "False" "$(verdict_field "$host_json" '"claude/theta" in v["instances"]')" \
+expect "False" "$(verdict_field "$host_json" '"foreman/theta" in v["instances"]')" \
   "an undeclared board's leftover runtime directory must not even appear in the report"
 expect "3" "$(verdict_field "$host_json" 'v["total"]')" \
   "theta's in-flight card must not raise the total above alpha (1) + beta (1) + zeta (1) -- a board removed from boards.toml must not silently pin the machine ceiling forever"
@@ -297,9 +297,9 @@ write_boards_toml "$wedge_home" "$wedge_target" current lambda kappa mu nu
 wedge_json="$(HOME="$wedge_home" FOREMAN_HOME="$wedge_home/.foreman" \
   FOREMAN_INSTANCE=current "$reconcile" --host-slots)"
 
-expect "4" "$(verdict_field "$wedge_json" 'v["instances"]["claude/lambda"]')" \
+expect "4" "$(verdict_field "$wedge_json" 'v["instances"]["foreman/lambda"]')" \
   "four unreleased cards read as 4 -- confirmed AT the shipped HOST_MAX_CONCURRENT default, this is a real deadlock shape, not a hypothetical one"
-expect "0" "$(verdict_field "$wedge_json" 'v["instances"]["claude/kappa"]')" \
+expect "0" "$(verdict_field "$wedge_json" 'v["instances"]["foreman/kappa"]')" \
   "the same four cards, released at both board-failed exits (as SKILL.md now instructs), do not accumulate -- dispatch is never wedged by them"
 echo "ok  cumulative board-failed cards release their slots once released (no permanent deadlock)"
 
@@ -321,9 +321,9 @@ write_wedge_history nu PRA-N1 "$FRESH_SPAWN"
 backstop_json="$(HOME="$wedge_home" FOREMAN_HOME="$wedge_home/.foreman" \
   FOREMAN_INSTANCE=current HOST_SLOT_STALE_MINUTES=5 "$reconcile" --host-slots)"
 
-expect "0" "$(verdict_field "$backstop_json" 'v["instances"]["claude/mu"]')" \
+expect "0" "$(verdict_field "$backstop_json" 'v["instances"]["foreman/mu"]')" \
   "a card with no released marker but a 26-year-old last entry must stop counting -- this is the self-heal for a marker nobody wrote"
-expect "1" "$(verdict_field "$backstop_json" 'v["instances"]["claude/nu"]')" \
+expect "1" "$(verdict_field "$backstop_json" 'v["instances"]["foreman/nu"]')" \
   "a card with no released marker but a SECONDS-old last entry must still count -- the backstop must not mistake live work for a leak"
 echo "ok  a stale, unreleased card self-heals past HOST_SLOT_STALE_MINUTES (backstop)"
 
