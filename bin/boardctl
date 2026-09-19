@@ -8,7 +8,6 @@
 #     boardctl halt <name>
 #     boardctl resume <name>
 #     boardctl cleanup <name>
-#     boardctl migrate            boards.toml, then this home under <root>/claude
 #
 # A board is ONE declared fact: the local path of the repository it builds.
 # boardctl is the only writer of $FOREMAN_HOME/boards.toml; bin/boards.py
@@ -24,13 +23,6 @@
 # `add` never creates it and `remove` never deletes it, so removing a board's
 # declaration never costs an operator its card history by accident -- that is
 # a separate, deliberate act.
-#
-# `migrate` has two steps, and each one reports itself as a no-op rather than
-# refusing when there is nothing left for it to do. The first writes
-# boards.toml from the per-board instance.env files that predate it. The
-# second moves a whole pre-installations home under <root>/claude/, which is
-# what turns one machine's single foreman into one installation among
-# siblings.
 set -euo pipefail
 
 here="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
@@ -49,51 +41,27 @@ die() { printf 'boardctl: %s\n' "$*" >&2; exit 1; }
 # derives it, which is the parent of this clone unless the environment says
 # otherwise.
 #
-# ONE FACT, ONE PLACE. boardctl defaulted to $HOME/.foreman. A machine now
-# runs several installations under that root, each with its own clone, so the
-# default named the wrong installation for every clone but one: `boardctl add`
-# run from ~/.foreman/codex/install would declare the board in the claude
-# installation's boards.toml, where the codex tick never looks for it.
+# ONE FACT, ONE PLACE. An explicit FOREMAN_HOME wins, so a test can point a
+# whole foreman at a temporary directory; otherwise the home is the clone's
+# parent. Deriving it a second time here would agree with installation.py only
+# until one of them was edited.
 load_foreman_home() {
   # Only the home is wanted here, and the reader lets the environment win for
   # every key it reads, so the rest are cleared first: boardctl must never take
   # an INSTALLATION or a HARNESS from a stray export in an operator's shell.
-  # FOREMAN_HOME itself is left alone -- installation.py reads it to pick which
+  # FOREMAN_HOME itself is left alone -- installation.py reads it to find the
   # home to answer for, and clearing it would point this at another one.
   unset INSTALLATION IS_DEFAULT HARNESS FOREMAN_ROOT
   # installation.py has already named what it could not make sense of.
-  _foreman_load_pairs "this installation's declaration" "$installation_py" \
-    || die "bin/installation.py refused; cannot tell which installation this clone belongs to"
+  _foreman_load_pairs "foreman's declaration" "$installation_py" \
+    || die "bin/installation.py refused; cannot tell which home this clone belongs to"
 
   [[ -n "${FOREMAN_HOME:-}" ]] || die "bin/installation.py emitted no FOREMAN_HOME"
   export FOREMAN_HOME
 }
 
-# MIGRATE DOES NOT ASK bin/installation.py WHICH HOME THIS IS. It is the one
-# command that repairs a home installation.py refuses to read: a home migrate
-# moved but never declared sits under a root of declared siblings, and
-# installation.py refuses such a home by design. So migrate takes the same
-# answer installation.py derives -- $FOREMAN_HOME, else the parent of this
-# clone with symlinks resolved -- without the refusal.
-if [[ "${1:-}" == migrate ]]; then
-  FOREMAN_HOME="${FOREMAN_HOME:-$(cd -- "$root/.." && pwd -P)}"
-  export FOREMAN_HOME
-else
-  load_foreman_home
-fi
+load_foreman_home
 boards_toml="$FOREMAN_HOME/boards.toml"
-
-# The installation a pre-installations home becomes. Its harness carries the
-# same name, and that is not a coincidence: bin/installation.py's record()
-# answers for an un-migrated home with exactly this name and this harness, so
-# migrate must write what that home already reported.
-MIGRATED_INSTALLATION="claude"
-
-# Everything a pre-installations home holds directly that belongs to the one
-# installation it turns out to be. linear.key and mcp.json are deliberately
-# absent: they are per-workspace, shared by every sibling, and stay at the
-# root.
-MIGRATED_ENTRIES="install boards.toml instances installed-skills replaced-skills tmp supervise.lock"
 
 usage() {
   cat >&2 <<'USAGE'
@@ -105,14 +73,9 @@ usage:
   boardctl halt <name>
   boardctl resume <name>
   boardctl cleanup <name>
-  boardctl migrate            boards.toml, then this home under <root>/claude
 USAGE
   exit 2
 }
-
-# The priority `add` writes for a board in an installation that is NOT this
-# machine's default. See priority_lines for why.
-SURPLUS_ONLY_PRIORITY=0
 
 instance_home() { printf '%s/instances/%s\n' "$FOREMAN_HOME" "$1"; }
 
@@ -124,24 +87,6 @@ validate_name() {
   local name="$1"
   [[ "$name" =~ ^[A-Za-z0-9_]+$ ]] || \
     die "board name '$name' is invalid; only letters, digits and underscore are allowed (no hyphen, no slash)"
-}
-
-# read_env_key <file> <KEY> -- KEY=VALUE, comments and blanks skipped, first
-# match wins. Not sourced: a config boardctl itself once wrote is still
-# outside this run, and `migrate` is the one command that still has to read
-# it. Only `migrate` calls this; `add`/`remove`/`list`/`status` read boards
-# through bin/boards.py instead.
-read_env_key() {
-  local file="$1" want="$2" line key value
-  [[ -r "$file" ]] || return 1
-  while IFS= read -r line || [[ -n "$line" ]]; do
-    [[ -z "$line" || "$line" == \#* ]] && continue
-    key="${line%%=*}"; value="${line#*=}"
-    [[ "$key" == "$want" ]] || continue
-    printf '%s' "$value"
-    return 0
-  done <"$file"
-  return 1
 }
 
 # toml_string <value> -- <value> as a TOML basic string. Paths are the only
@@ -243,34 +188,14 @@ new_tmp() {
 
 # priority_lines <priority> -- the lines `add` writes into a new board's table
 # for its priority. <priority> is what the operator passed to --priority, or
-# empty when they passed nothing.
-#
-# A BOARD IN A NON-DEFAULT INSTALLATION TAKES ONLY SURPLUS. Measured on
-# 2026-09-14: HOST_MAX_CONCURRENT is divided between every board of every
-# installation on the machine by priority, and each board with a priority
-# above 0 reserves a floor of at least one slot. The default Claude
-# installation ran three boards at priorities 2, 0 and 3. A Codex installation
-# added the same three boards with no priority line, so each read as 1 and
-# reserved a slot while holding no cards. The live product board then read "at
-# its share: 1 of 4 slots are held and 4 more are reserved", and the Claude
-# tick planned nothing until the Codex boards were set to 0 by hand. So a board added to a
-# non-default installation is written at 0, and adding an installation never
-# throttles the boards already running.
-#
-# The default installation keeps writing no line, which reads as
-# bin/boards.py's DEFAULT_PRIORITY. A boards.toml written before priorities
-# existed then divides exactly as it always did.
+# empty when they passed nothing. Writing no line reads as bin/boards.py's
+# DEFAULT_PRIORITY, so a boards.toml written before priorities existed divides
+# exactly as it always did.
 priority_lines() {
   local priority="$1"
   if [[ -n "$priority" ]]; then
     printf 'priority = %s\n' "$priority"
-    return 0
   fi
-  [[ -z "${IS_DEFAULT:-}" ]] || return 0
-  printf '# This installation is not the default, so this board takes only capacity\n'
-  printf '# the default installation is not using, and adding it never throttles the\n'
-  printf '# boards already running. Raise it deliberately to give this board a floor.\n'
-  printf 'priority = %s\n' "$SURPLUS_ONLY_PRIORITY"
 }
 
 cmd_add() {
@@ -326,30 +251,7 @@ cmd_add() {
 
   revert_unless_valid "$tmp" \
     "boards.toml would not parse after adding '$name'; nothing written"
-
-  # A boards.toml that parses can still break the root. Found in review on
-  # 2026-09-14: `boardctl add codex` on the legacy installation succeeded
-  # beside a scoped `codex` sibling, and every installation under the root
-  # refused on its next read, because a legacy board named like a sibling
-  # makes their names collide. bin/installation.py is the one reader that
-  # knows that rule, so it is asked after the write, and the previous file
-  # comes back byte for byte when it refuses.
-  local backup=""
-  if [[ -f "$boards_toml" ]]; then
-    backup="$(new_tmp)"
-    cp -p "$boards_toml" "$backup"
-  fi
   mv -f "$tmp" "$boards_toml"
-  local err_out
-  if ! err_out="$("$installation_py" --home "$FOREMAN_HOME" 2>&1 >/dev/null)"; then
-    if [[ -n "$backup" ]]; then
-      mv -f "$backup" "$boards_toml"
-    else
-      rm -f "$boards_toml"
-    fi
-    die "adding '$name' would make this root's installations refuse to load; boards.toml restored: $err_out"
-  fi
-  [[ -z "$backup" ]] || rm -f "$backup"
 
   printf 'boardctl: board %s added, serving %s\n' "$name" "$repo"
 }
@@ -442,263 +344,6 @@ cmd_cleanup() {
   printf 'boardctl: cleanup for %s is due on its next slice\n' "$name"
 }
 
-# migrate_boards_toml -- migrate's first step: boards.toml from the per-board
-# instance.env files that predate it.
-migrate_boards_toml() {
-  local dir="$FOREMAN_HOME/instances"
-  local names=() inst
-  if [[ -d "$dir" ]]; then
-    for inst in "$dir"/*/; do
-      [[ -f "$inst/instance.env" ]] && names+=("$(basename -- "$inst")")
-    done
-  fi
-  if [[ ${#names[@]} -eq 0 ]]; then
-    printf 'boardctl: nothing to migrate; no %s/*/instance.env found\n' "$dir"
-    return 0
-  fi
-
-  # A NO-OP, NOT A REFUSAL. boards.toml existing means this step already ran,
-  # so there is nothing left for it to do and nothing it could overwrite --
-  # every write below is guarded by this return. It used to die here, and the
-  # old first step tells the operator to delete the instance.env files by hand
-  # afterwards, so a home where they survive -- measured in a temp farm on
-  # 2026-09-14 -- made `boardctl migrate` exit 1 forever. cmd_migrate then
-  # never reached migrate_home_under_root, and the second step was unreachable
-  # on exactly the homes it exists for.
-  if [[ -f "$boards_toml" ]]; then
-    printf 'boardctl: nothing to migrate; %s already exists (edit it by hand to change a board)\n' \
-      "$boards_toml"
-    return 0
-  fi
-
-  # Every board is validated before anything is written -- a migrate that
-  # writes nine of ten boards and dies on the tenth leaves an operator with a
-  # boards.toml that looks complete and is not. See revert_unless_valid for
-  # the same principle applied to the file as a whole, below.
-  local repos=() keys=()
-  local name repo
-  for name in "${names[@]}"; do
-    validate_name "$name"
-    inst="$(instance_home "$name")"
-    repo="$(read_env_key "$inst/instance.env" REPO || true)"
-    [[ -n "$repo" ]] || die "migrate: $inst/instance.env declares no REPO"
-    [[ -d "$repo" ]] || die "migrate: board $name: repo is not a directory: $repo"
-    repo="$(cd -- "$repo" && pwd)"
-    [[ -f "$repo/board.toml" ]] || die "migrate: board $name: $repo has no board.toml"
-    repos+=("$repo")
-
-    # A per-board linear.key is carried forward only when it differs from
-    # the shared default -- an identical copy is exactly what the shared
-    # credential replaces, and carrying it forward anyway would make every
-    # migrated board look like it lives in its own Linear workspace.
-    local key_line=""
-    if [[ -f "$inst/linear.key" ]]; then
-      if [[ -f "$FOREMAN_HOME/linear.key" ]] && cmp -s "$inst/linear.key" "$FOREMAN_HOME/linear.key"; then
-        key_line=""
-      else
-        key_line="$inst/linear.key"
-      fi
-    fi
-    keys+=("$key_line")
-  done
-
-  local tmp; tmp="$(new_tmp)"
-  : >"$tmp"
-  local i=0
-  for name in "${names[@]}"; do
-    [[ -s "$tmp" ]] && printf '\n' >>"$tmp"
-    printf '[boards.%s]\n' "$name" >>"$tmp"
-    printf 'repo = %s\n' "$(toml_string "${repos[$i]}")" >>"$tmp"
-    [[ -n "${keys[$i]}" ]] && printf 'key = %s\n' "$(toml_string "${keys[$i]}")" >>"$tmp"
-    i=$((i + 1))
-  done
-
-  revert_unless_valid "$tmp" "migrated boards.toml would not parse; nothing written"
-  mv -f "$tmp" "$boards_toml"
-
-  for name in "${names[@]}"; do
-    printf 'boardctl: migrated board %s\n' "$name"
-  done
-  i=0
-  for name in "${names[@]}"; do
-    if [[ -n "${keys[$i]}" ]]; then
-      printf 'boardctl: board %s keeps its own linear.key (differs from %s): %s\n' \
-        "$name" "$FOREMAN_HOME/linear.key" "${keys[$i]}"
-    fi
-    i=$((i + 1))
-  done
-  printf 'boardctl: nothing was deleted -- once %s looks right, remove %s/*/instance.env and any per-board linear.key by hand\n' \
-    "$boards_toml" "$dir"
-}
-
-# live_foreman_agents -- every foreman/ agent the Claude registry does not
-# call stopped, one name per line.
-#
-# Asked through the adapter rather than `claude agents` directly, so the one
-# file that knows how that CLI spells its flags stays the only one.
-live_foreman_agents() {
-  local harness_sh="$root/skills/board/harness/$MIGRATED_INSTALLATION.sh"
-  [[ -x "$harness_sh" ]] || \
-    die "migrate: $harness_sh is missing; cannot ask which agents are live"
-  "$harness_sh" list | python3 -c '
-import json, sys
-
-# The adapter prints nothing when it refuses, and has already said why on
-# stderr. A traceback on top of that message buries it.
-try:
-    agents = json.load(sys.stdin)
-except ValueError:
-    sys.exit(3)
-if not isinstance(agents, list):
-    sys.exit(3)
-# Anything but "stopped" counts as live, a state this file has never seen
-# included. Migration moves the home under every agent, so guessing "not
-# really running" wrong leaves a build writing to a BOARD_HOME that has moved.
-print("\n".join(sorted({
-    a["name"] for a in agents
-    if isinstance(a, dict) and isinstance(a.get("name"), str)
-    and a["name"].startswith("foreman/") and a.get("state") != "stopped"
-})))
-'
-}
-
-# migrate_home_under_root -- migrate's second step: this whole home moves to
-# $FOREMAN_HOME/claude/, and declares itself an installation there.
-#
-# There is no --dry-run because there is nothing to rehearse: every move is
-# printed as it happens, and the one irreversible act, moving the running
-# clone, is guarded by the live-agent refusal above it.
-migrate_home_under_root() {
-  local new_home="$FOREMAN_HOME/$MIGRATED_INSTALLATION"
-
-  # Both no-ops, not refusals, so a second run of `boardctl migrate` is a
-  # report rather than an error an operator has to read past.
-  if [[ -f "$FOREMAN_HOME/installation.toml" ]]; then
-    printf 'boardctl: nothing to migrate; %s is already an installation\n' "$FOREMAN_HOME"
-    return 0
-  fi
-  # A HALF-MIGRATED ROOT: <root>/claude holds install/ and no
-  # installation.toml, and <root> holds no install/. A move that landed and a
-  # declaration that did not. Found in review on 2026-09-14: a re-run treated
-  # <root>/claude as a fresh un-migrated home and moved it again into
-  # claude/claude. Such a root is completed by declaring it, and nothing
-  # moves. Seen from either end: this clone's own home, or the root above it.
-  local half_home=""
-  if [[ "$(basename -- "$FOREMAN_HOME")" == "$MIGRATED_INSTALLATION" \
-        && -d "$FOREMAN_HOME/install" \
-        && ! -e "$(dirname -- "$FOREMAN_HOME")/install" ]]; then
-    half_home="$FOREMAN_HOME"
-  elif [[ ! -e "$FOREMAN_HOME/install" && -d "$new_home/install" \
-          && ! -f "$new_home/installation.toml" ]]; then
-    half_home="$new_home"
-  fi
-  if [[ -n "$half_home" ]]; then
-    printf 'boardctl: %s was moved but never declared; declaring it, moving nothing\n' "$half_home"
-    declare_migrated_home "$half_home"
-    print_migrate_next_steps "$half_home" "$(dirname -- "$half_home")"
-    return 0
-  fi
-
-  if [[ ! -d "$FOREMAN_HOME/install" ]]; then
-    printf 'boardctl: nothing to migrate; %s holds no install/ of its own\n' "$FOREMAN_HOME"
-    return 0
-  fi
-
-  local live
-  live="$(live_foreman_agents)" || \
-    die "migrate: could not read the Claude agent registry; refusing to move a home that may hold a live agent"
-  if [[ -n "$live" ]]; then
-    # NAMES ARE KEPT: the installation.toml written below says
-    # `names = "legacy"`, so every agent, branch and worktree keeps the shape
-    # it has today. The refusal stands for a different reason. install/,
-    # instances/ and tmp/ move, so a live agent's BOARD_HOME, its card
-    # history and its scratch directory move out from under it while it is
-    # still writing to them.
-    printf 'boardctl: these agents are still live:\n%s\n' "$live" >&2
-    die "migrate: stop them first -- their names are kept, but BOARD_HOME and its scratch move under a running agent"
-  fi
-
-  [[ -e "$new_home" ]] && \
-    die "migrate: $new_home already exists; move it aside, this never merges into one"
-  mkdir -p "$new_home"
-
-  # REFUSED BEFORE THE MOVE, not after. The write below checks the new home
-  # against every sibling under this root -- one default, one legacy
-  # installation, no legacy board named like a sibling -- and a refusal after
-  # the move left <root>/claude undeclared. The dry run is that same check,
-  # reading the boards where they are now.
-  if ! "$installation_py" --write --dry-run --home "$new_home" \
-      --harness "$MIGRATED_INSTALLATION" --default --legacy-names \
-      --boards-file "$FOREMAN_HOME/boards.toml"; then
-    rmdir "$new_home"
-    die "migrate: $new_home could not be declared (see above); nothing was moved"
-  fi
-
-  # mv, not a copy: install/ is the clone this script is running from. The
-  # move is a rename within one directory, so the descriptor bash is reading
-  # this file through survives it -- and a copy would leave the operator with
-  # two clones and no way to tell which one the service starts.
-  local entry
-  for entry in $MIGRATED_ENTRIES; do
-    [[ -e "$FOREMAN_HOME/$entry" ]] || continue
-    mv "$FOREMAN_HOME/$entry" "$new_home/$entry"
-    printf 'boardctl: moved %s -> %s\n' "$FOREMAN_HOME/$entry" "$new_home/$entry"
-  done
-
-  declare_migrated_home "$new_home"
-  print_migrate_next_steps "$new_home" "$FOREMAN_HOME"
-}
-
-# declare_migrated_home <home> -- writes <home>/installation.toml as the
-# migrated Claude installation.
-#
-# --legacy-names: THE MIGRATED HOME KEEPS ITS NAMES. Its open pull requests
-# sit on branches foreman/<board>/<ticket>, and skills/board/reconcile.py
-# finds a card's pull request by that branch. Moving to the scoped shape here
-# would make every in-flight card read "no PR", and the board would dispatch a
-# fresh build on top of each open pull request.
-declare_migrated_home() {
-  local home="$1"
-  # The path this script invoked installation.py by may have gone with the clone.
-  local writer="$installation_py"
-  [[ -x "$writer" ]] || writer="$home/install/bin/installation.py"
-  "$writer" --write --home "$home" \
-    --harness "$MIGRATED_INSTALLATION" --default --legacy-names \
-    || die "migrate: $home is moved but not declared (see above); fix the refusal and re-run boardctl migrate from $home/install -- it declares that home and moves nothing again"
-  printf 'boardctl: wrote %s/installation.toml (harness %s, default, legacy names kept)\n' \
-    "$home" "$MIGRATED_INSTALLATION"
-}
-
-# print_migrate_next_steps <new_home> <old_root> -- the three steps migrate
-# cannot do. Each wrote the OLD path into a symlink, a unit file or a crontab,
-# and only the operator can replace it.
-print_migrate_next_steps() {
-  local new_home="$1" old_root="$2"
-  printf 'boardctl: now run these three:\n'
-  printf 'boardctl:   %s/install/bin/install-skills.sh\n' "$new_home"
-  printf 'boardctl:   %s/install/bin/install-service.sh   (or point the cron line at the new path)\n' \
-    "$new_home"
-  # THE THIRD STEP IS THE ONE NOBODY THINKS OF. The pre-installations watchdog
-  # is named plain `foreman`, the new one `foreman-claude`, so installing the
-  # new one leaves BOTH enabled. The old unit's ExecStart names
-  # <old_root>/install/skills/board/supervise.sh, which migrate moved, so it
-  # wakes every ten minutes and fails -- a red unit beside a green one, on a
-  # machine whose board looks healthy. bin/install-service.sh refuses to enable
-  # the new timer until this is done.
-  if [[ "$(uname -s)" == "Linux" ]]; then
-    printf 'boardctl:   systemctl --user disable --now foreman.timer   (the pre-installations watchdog; it now points at a path that moved)\n'
-  else
-    printf 'boardctl:   remove the cron line that runs %s/install/skills/board/supervise.sh (that path has moved)\n' \
-      "$old_root"
-  fi
-}
-
-cmd_migrate() {
-  [[ $# -eq 0 ]] || usage
-  migrate_boards_toml
-  migrate_home_under_root
-}
-
 [[ $# -ge 1 ]] || usage
 cmd="$1"; shift
 case "$cmd" in
@@ -709,6 +354,5 @@ case "$cmd" in
   halt) cmd_halt "$@" ;;
   resume) cmd_resume "$@" ;;
   cleanup) cmd_cleanup "$@" ;;
-  migrate) cmd_migrate "$@" ;;
   *) usage ;;
 esac

@@ -76,7 +76,7 @@ esac
 mkdir -p "$skills/board"; printf 'somebody else\n' > "$skills/board/SKILL.md"
 out="$(run --dry-run)"
 case "$out" in
-  *"not this installation's board skill"*) ok "names a foreign board skill rather than reporting it missing" ;;
+  *"not foreman's board skill"*) ok "names a foreign board skill rather than reporting it missing" ;;
   *) bad "did not distinguish a foreign skill from an absent one: $out" ;;
 esac
 rm -rf "$skills/board"

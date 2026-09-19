@@ -29,33 +29,28 @@ command -v systemctl >/dev/null || die "systemctl not found; this host does not 
 HERE="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 INSTALL_ROOT="$(dirname -- "$HERE")"
 
-# WHICH INSTALLATION THIS IS. bin/installation.py is the one place that derives
-# name, home and harness from where this clone sits, so a second derivation
+# WHICH HOME AND HARNESS THIS IS. bin/installation.py is the one place that
+# derives home and harness from where this clone sits, so a second derivation
 # here would be a copy that drifts from it -- the same reasoning bin/install.sh
 # and bin/install-skills.sh give. bin/load-pairs.sh is the shared reader of its
 # NUL-separated pairs and its comment carries the bash 3.2 temp-file rule. This
 # is that reader, not a source of skills/board/config.sh: config.sh also picks a
 # board, so it requires FOREMAN_INSTANCE, which a systemd unit for the whole
-# installation's watchdog has no reason to know.
+# watchdog has no reason to know.
 . "$INSTALL_ROOT/bin/load-pairs.sh" || die "cannot read $INSTALL_ROOT/bin/load-pairs.sh"
 
-# This installation's own declaration, never the operator's shell: the reader
-# lets the environment win, and a stray INSTALLATION would write units named
-# for an installation this clone is not. FOREMAN_HOME is left alone --
-# installation.py reads it itself to pick the home it answers for, which is how
-# a test points this at a temporary directory.
+# This clone's own declaration, never the operator's shell: the reader lets the
+# environment win, and a stray HARNESS would write a unit for a harness this
+# clone does not run. FOREMAN_HOME is left alone -- installation.py reads it
+# itself to pick the home it answers for, which is how a test points this at a
+# temporary directory.
 unset INSTALLATION IS_DEFAULT HARNESS FOREMAN_ROOT
-_foreman_load_pairs "this installation's declaration" "$INSTALL_ROOT/bin/installation.py" \
-  || die "installation.py could not read this installation's declaration"
-[[ -n "$INSTALLATION" ]] || die "installation.py did not report an installation name"
+_foreman_load_pairs "foreman's declaration" "$INSTALL_ROOT/bin/installation.py" \
+  || die "installation.py could not read foreman's declaration"
 [[ -n "$FOREMAN_HOME" ]] || die "installation.py did not report a home"
 [[ -n "$HARNESS" ]] || die "installation.py did not report a harness"
 
-# The unit names carry the installation: two installations on one machine each
-# get their own service and timer, so enabling one never disables the other's
-# and `systemctl --user stop foreman-<name>.timer` stops exactly one watchdog.
-# ONE FOREMAN, so the unit carries no installation segment. It is simply
-# `foreman`.
+# ONE FOREMAN, so the unit carries no segment. It is simply `foreman`.
 UNIT_NAME="foreman"
 
 HARNESS_SH="$INSTALL_ROOT/skills/board/harness/$HARNESS.sh"
@@ -88,25 +83,24 @@ board_is_ours() {
 }
 if ! board_is_ours; then
   if [[ -e "$BOARD_LINK" ]]; then
-    die "$BOARD_LINK exists but is not this installation's board skill.
+    die "$BOARD_LINK exists but is not foreman's board skill.
 A tick started now would run that skill instead of this one. Inspect it, then run
   $INSTALL_ROOT/bin/install-skills.sh          (refuses to replace it)
   $INSTALL_ROOT/bin/install-skills.sh --force  (replaces it, keeping a backup)"
   fi
-  die "this installation's skills are not resolvable; a tick could not find /board.
+  die "foreman's skills are not resolvable; a tick could not find /board.
 Run: $INSTALL_ROOT/bin/install-skills.sh"
 fi
 
 UNIT_DIR="$HOME/.config/systemd/user"
 
-# NO LEGACY-WATCHDOG CHECK ANY MORE. The pre-installations watchdog was named
-# plain `foreman`, and this one now is too -- there is one foreman. A check for
-# a unit called foreman.timer would find this installation's own unit and refuse.
+# There is no legacy-watchdog check: the old watchdog was named plain `foreman`
+# and so is this one -- there is one foreman.
 
 service_unit() {
   cat <<UNIT
 [Unit]
-Description=foreman watchdog for installation '$INSTALLATION' ($HARNESS; keeps one tick alive for every declared board)
+Description=foreman watchdog ($HARNESS; keeps one tick alive for every declared board)
 Documentation=file://$INSTALL_ROOT/skills/board/SKILL.md
 
 [Service]
@@ -134,7 +128,7 @@ UNIT
 timer_unit() {
   cat <<UNIT
 [Unit]
-Description=foreman watchdog for installation '$INSTALLATION' every 10 minutes
+Description=foreman watchdog every 10 minutes
 
 [Timer]
 OnBootSec=2min

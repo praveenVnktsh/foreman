@@ -9,20 +9,14 @@
 # $FOREMAN_HOME/instances/<name>/HALT even before that directory otherwise
 # exists, and refuse an undeclared board; `cleanup` deletes
 # instances/<name>/last-cleanup (a no-op when it is not there) and refuses an
-# undeclared board without creating its runtime directory; `migrate` writes boards.toml from
-# instance.env files without ever deleting them, all-or-nothing, reports
-# a per-board linear.key that differs from the shared default, and reports
-# itself a no-op rather than refusing once boards.toml exists -- migrate has a
-# second step, and a refusal here would put it out of reach.
+# undeclared board without creating its runtime directory.
 #
-# `add` writes `priority = 0` in an installation that is not the default, so a
-# second installation takes only surplus; writes no priority in the default
-# one; takes `--priority N` over both; and refuses a priority that is not a
-# non-negative integer, leaving boards.toml byte-identical.
+# `add` writes no priority line unless `--priority N` is passed, and refuses a
+# priority that is not a non-negative integer, leaving boards.toml
+# byte-identical.
 #
-# No network is reached anywhere here: unlike the instance-directory-building
-# `add` this replaces, the new one never calls bin/resolve-ids.py, so there is
-# no Linear stub to start.
+# No network is reached anywhere here: `add` never calls bin/resolve-ids.py, so
+# there is no Linear stub to start.
 set -euo pipefail
 
 repo_root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -58,19 +52,6 @@ new_target() {
   local dir; dir="$(mktemp -d "$work_dir/target.XXXXXX")"
   fixture_board_toml "$dir"
   printf '%s' "$dir"
-}
-
-# legacy_instance <foreman_home> <name> <repo> -- writes the pre-migration
-# instance.env layout directly under <foreman_home>/instances/<name>.
-# tests/lib/instance-fixture.sh's own fixture_add_instance writes under
-# <arg>/.foreman/instances/<name> instead, because its callers pass a $HOME
-# and let config.sh derive FOREMAN_HOME from it -- every case here passes
-# FOREMAN_HOME straight to `run`, so that convention would double the
-# ".foreman" segment.
-legacy_instance() {
-  local home="$1" name="$2" repo="$3"
-  mkdir -p "$home/instances/$name"
-  printf 'REPO=%s\n' "$repo" >"$home/instances/$name/instance.env"
 }
 
 # =============================================================================
@@ -393,114 +374,6 @@ if [[ $status -ne 0 ]] && [[ ! -e "$home9/instances/nosuch" ]]; then
   ok "cleanup REFUSES an undeclared board, creating no directory"
 else
   not_ok "cleanup REFUSES an undeclared board, creating no directory: status=$status err=$(cat "$work_dir/cleanup3.err") created=$([[ -e "$home9/instances/nosuch" ]] && echo yes || echo no)"
-fi
-
-# =============================================================================
-# Case: migrate writes boards.toml from instance.env files, deleting nothing
-# =============================================================================
-home10="$(new_home)"
-target10="$(new_target)"
-legacy_instance "$home10" delta "$target10"
-run "$home10" migrate >"$work_dir/migrate1.out" 2>"$work_dir/migrate1.err"
-listing10="$(run "$home10" list)"
-if [[ -f "$home10/boards.toml" ]] && [[ "$listing10" == *"delta"* && "$listing10" == *"$target10"* ]] \
-    && [[ -f "$home10/instances/delta/instance.env" ]]; then
-  ok "migrate writes boards.toml from instance.env files, deleting nothing"
-else
-  not_ok "migrate writes boards.toml from instance.env files, deleting nothing: listing=$listing10 out=$(cat "$work_dir/migrate1.out") err=$(cat "$work_dir/migrate1.err")"
-fi
-
-# =============================================================================
-# Case: migrate omits key= for a board whose linear.key matches the shared default
-# =============================================================================
-home11="$(new_home)"
-target11="$(new_target)"
-mkdir -p "$home11"
-printf 'sharedsecret\n' >"$home11/linear.key"
-legacy_instance "$home11" epsilon "$target11"
-mkdir -p "$home11/instances/epsilon"
-printf 'sharedsecret\n' >"$home11/instances/epsilon/linear.key"
-run "$home11" migrate >"$work_dir/migrate2.out" 2>"$work_dir/migrate2.err"
-if ! grep -q "^key = " "$home11/boards.toml"; then
-  ok "migrate omits key= for a board whose linear.key matches the shared default"
-else
-  not_ok "migrate omits key= for a board whose linear.key matches the shared default: $(cat "$home11/boards.toml")"
-fi
-
-# =============================================================================
-# Case: migrate reports and keeps a per-board linear.key that differs from
-# the shared default
-# =============================================================================
-home12="$(new_home)"
-target12="$(new_target)"
-mkdir -p "$home12"
-printf 'sharedsecret\n' >"$home12/linear.key"
-legacy_instance "$home12" zeta "$target12"
-mkdir -p "$home12/instances/zeta"
-printf 'a-different-secret\n' >"$home12/instances/zeta/linear.key"
-run "$home12" migrate >"$work_dir/migrate3.out" 2>"$work_dir/migrate3.err"
-if grep -qF "key = \"$home12/instances/zeta/linear.key\"" "$home12/boards.toml" \
-    && grep -qi "differs" "$work_dir/migrate3.out"; then
-  ok "migrate reports and keeps a per-board linear.key that differs from the shared default"
-else
-  not_ok "migrate reports and keeps a per-board linear.key that differs from the shared default: toml=$(cat "$home12/boards.toml") out=$(cat "$work_dir/migrate3.out")"
-fi
-
-# =============================================================================
-# Case: migrate's boards.toml step is a no-op when boards.toml already exists
-#
-# A no-op and NOT a refusal, because migrate has a second step after this one.
-# The instance.env files survive the first step by design -- it tells the
-# operator to delete them by hand -- so dying here would make `boardctl
-# migrate` exit 1 forever on exactly the homes the second step exists for.
-# The file it would have written is left byte-identical either way.
-# =============================================================================
-home13="$(new_home)"
-target13="$(new_target)"
-mkdir -p "$home13"
-run "$home13" add already --repo "$target13" >/dev/null 2>&1
-before13="$(cat "$home13/boards.toml")"
-legacy_instance "$home13" leftover "$target13"
-status=0
-run "$home13" migrate >"$work_dir/migrate4.out" 2>"$work_dir/migrate4.err" || status=$?
-after13="$(cat "$home13/boards.toml")"
-if [[ $status -eq 0 ]] && [[ "$after13" == "$before13" ]] \
-    && grep -qi "nothing to migrate" "$work_dir/migrate4.out"; then
-  ok "migrate's boards.toml step is a no-op, saying so, when boards.toml already exists"
-else
-  not_ok "migrate's boards.toml step is a no-op, saying so, when boards.toml already exists: status=$status changed=$([[ "$after13" != "$before13" ]] && echo yes || echo no) out=$(cat "$work_dir/migrate4.out") err=$(cat "$work_dir/migrate4.err")"
-fi
-
-# =============================================================================
-# Case: migrate does nothing, successfully, when there is nothing to migrate
-# =============================================================================
-home14="$(new_home)"
-mkdir -p "$home14"
-status=0
-run "$home14" migrate >"$work_dir/migrate5.out" 2>"$work_dir/migrate5.err" || status=$?
-if [[ $status -eq 0 ]] && [[ ! -e "$home14/boards.toml" ]]; then
-  ok "migrate does nothing, successfully, when there is nothing to migrate"
-else
-  not_ok "migrate does nothing, successfully, when there is nothing to migrate: status=$status err=$(cat "$work_dir/migrate5.err")"
-fi
-
-# =============================================================================
-# Case: migrate is all-or-nothing -- one board's repo gone means NO
-# boards.toml is written, not a partial one
-# =============================================================================
-home15="$(new_home)"
-good15="$(new_target)"
-gone15="$(new_target)"
-legacy_instance "$home15" fine "$good15"
-legacy_instance "$home15" broken "$gone15"
-rm -rf "$gone15"
-status=0
-run "$home15" migrate >"$work_dir/migrate6.out" 2>"$work_dir/migrate6.err" || status=$?
-if [[ $status -ne 0 ]] && [[ ! -e "$home15/boards.toml" ]] \
-    && grep -qi "broken" "$work_dir/migrate6.err"; then
-  ok "migrate is all-or-nothing: one bad board leaves no boards.toml written"
-else
-  not_ok "migrate is all-or-nothing: one bad board leaves no boards.toml written: status=$status exists=$([[ -e "$home15/boards.toml" ]] && echo yes || echo no) err=$(cat "$work_dir/migrate6.err")"
 fi
 
 # =============================================================================
