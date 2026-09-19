@@ -186,7 +186,7 @@ for line in lines:
 # substituted path contains `/tmp/` at all: green locally, red on the runner.
 subs = [
     ("/tmp/", work + "/"),
-    ("~/.foreman/<installation>/install/skills/board", shim),
+    ("~/.foreman/install/skills/board", shim),
     ("<ticket-body>", body),
     ("<headRefOid>", sha),
     ("<TICKET>", ticket),
@@ -284,8 +284,8 @@ else
 $out"
 fi
 
-# This home declares no installation.toml, so bin/installation.py reads it as
-# the lone Claude installation with legacy names: no installation segment.
+# This home declares no foreman.toml, so bin/installation.py reads it with
+# Claude's defaults. Names carry no installation segment.
 if spawned "foreman/demo/$TICKET/plan-1"; then
   ok "the plan block spawns a plan agent for the card"
 else
