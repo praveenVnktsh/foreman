@@ -473,22 +473,13 @@ def todo_nodes(api_url: str, key: str, config: dict[str, str]) -> list:
         after = cursor
 
 
-def routed_identifiers(home: str, config: dict[str, str], nodes: list) -> list[str]:
-    """The Todo cards this installation owns and can rank, from queue.py.
+def routed_identifiers(nodes: list) -> list[str]:
+    """The Todo cards that can be ranked, from queue.py.
 
     Asked of queue.py rather than re-derived, so a card the tick would never
-    dispatch -- a sibling's, or one with no priority -- never reads as starved.
+    dispatch -- one with no priority -- never reads as starved.
     """
-    listing = run([INSTALLATION_PY, "--home", home, "--siblings"],
-                  "bin/installation.py --siblings")
-    fields = nul_fields(listing.stdout)
-    if listing.returncode != 0 or not fields or len(fields) % 2:
-        raise NoVerdict(f"could not list the installations under {home}")
-    args = [QUEUE_PY, "--installation", config["INSTALLATION"],
-            "--siblings", ",".join(fields[0::2])]
-    if config["IS_DEFAULT"]:
-        args.append("--default")
-    done = run(args, "queue.py", stdin=json.dumps(nodes))
+    done = run([QUEUE_PY], "queue.py", stdin=json.dumps(nodes))
     # 3 is "nothing ranked" with an empty stdout; queue.py names each card on
     # stderr, which reaches the operator through ours.
     if done.returncode not in (0, 3):
@@ -552,7 +543,7 @@ def verdict_for(args: argparse.Namespace) -> Verdict:
 
     nodes = todo_nodes(args.api_url, read_key(config["KEY_FILE"]), config)
     cards = [parse_card(node, config["STATE_TO_PICK_UP"]) for node in nodes]
-    routed = routed_identifiers(home, config, nodes)
+    routed = routed_identifiers(nodes)
     verdict = todo_verdict(board, max_concurrent - held, cards, routed,
                            args.now, args.older_than)
     if not verdict.starved:

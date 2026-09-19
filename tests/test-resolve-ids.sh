@@ -151,11 +151,6 @@ JSON
 # `cleanup` is absent too, and is the THIRD create. It is the label the
 # cleanup agent writes onto the card it files, and a fixture that pre-declared
 # it would stop proving that a board resolving for the first time gets one.
-#
-# `foreman:claude` is absent too, and is the FOURTH create. It is the label that
-# says which installation owns a card, and its name is only known at run time
-# from --installation -- so a fixture that pre-declared it would stop proving
-# that an installation resolving for the first time gets a label at all.
 
 start_stub "$work_dir/happy.json"
 if run_resolve "$STUB_URL"; then
@@ -188,7 +183,7 @@ if run_resolve "$STUB_URL"; then
        && grep -q "^mutation CreateLabel .*\"board-failed\"" "$happy_log" \
        && grep -q "^mutation CreateLabel .*\"needs-plan\"" "$happy_log" \
        && grep -q "^mutation CreateLabel .*\"cleanup\"" "$happy_log" \
-       && [[ "$create_calls" -eq 4 ]]; then
+       && [[ "$create_calls" -eq 3 ]]; then
     ok "creates both absent labels, the board's and the operator's, and records their ids"
   else
     not_ok "creates absent labels: board-failed=[$created_id] needs-plan=[$needs_plan_id] creates=[$create_calls] log=$(cat "$happy_log")"
@@ -205,21 +200,10 @@ if run_resolve "$STUB_URL"; then
     not_ok "creates the absent cleanup label: LABEL_CLEANUP=[$cleanup_id] log=$(cat "$happy_log")"
   fi
 
-  # The installation's own label, named from --installation and written where
-  # the tick reads it. An installation that never resolves one cannot claim a
-  # card, and every card it takes stays owned by whoever is default.
-  installation_id="$(read_id "$ids_env" LABEL_INSTALLATION)"
-  if [[ "$installation_id" == created-* ]] \
-       && grep -q "^mutation CreateLabel .*\"foreman:claude\"" "$happy_log"; then
-    ok "creates foreman:<installation> and records it as LABEL_INSTALLATION"
-  else
-    not_ok "creates foreman:<installation>: LABEL_INSTALLATION=[$installation_id] log=$(cat "$happy_log")"
-  fi
-
   if [[ "$(read_id "$ids_env" LABEL_FOLLOW_UP)" == "label-followup" && \
         "$(read_id "$ids_env" LABEL_FOLLOW_UPS_WRITTEN)" == "label-followupswritten" && \
         "$(read_id "$ids_env" LABEL_NEEDS_MERGE)" == "label-needsmerge" && \
-        "$create_calls" -eq 4 ]]; then
+        "$create_calls" -eq 3 ]]; then
     ok "reuses a label that does exist rather than creating a second"
   else
     not_ok "reuses a label that does exist: $(cat "$ids_env")"

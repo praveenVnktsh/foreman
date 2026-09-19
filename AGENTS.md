@@ -55,15 +55,15 @@
 | Order this machine's boards for one pass | `skills/board/reconcile.py --board-order` | the name order `bin/boards.py --list` prints |
 | Record that a board's slice reached it | `skills/board/reconcile.py --served <board>` | assuming `history.jsonl` shows it; an idle slice writes nothing |
 | Manage a board | `bin/boardctl add\|list\|status\|halt\|resume` | editing `boards.toml` by hand |
-| Write a new installation's config | `bin/install.sh --harness H ...` | writing `installation.toml` by hand |
-| Change a stage's model or its fallback | `installation.toml` `[models]` and `[fallback]` (a tier is `model` or `harness:model`) | editing `config.sh`; it reads the declaration |
+| Write foreman's config | `bin/install.sh --harness H ...` | writing `foreman.toml` by hand |
+| Change a stage's model or its fallback | `foreman.toml` `[models]` and `[fallback]` (a tier is `model` or `harness:model`) | editing `config.sh`; it reads the declaration |
 | See every live agent, across harnesses | `"$HARNESS_SH" list` (`skills/board/harness/registry.sh`) | one harness's adapter, which sees only its own registry |
 | Make skills resolvable | `bin/install-skills.sh` | assuming the install directory is searched |
 | View a diagram | `bin/render-diagram.sh <file.md>` | committing the render |
 | Check a plan is a graph | `bin/check-plan-graph.py --max-label-chars <N> <file>` | reading the plan by eye, or the checker's default budget over a target that sets its own |
 | Restart the tick, leaving cards alone | `skills/board/supervise.sh --restart` | `systemctl --user restart foreman.service`; it finds a healthy tick |
-| Update an installation to the latest release | `bin/self-update.sh` | `git -C ~/.foreman/<name>/install pull` by hand; the tick keeps running the code it started with, so the machine reports healthy while running a version nobody chose |
-| Cut a release installations follow | `bin/release.sh` (CI runs it on a push to `main`) | assuming a merge deploys; it does, so a commit that should not ship needs the marker below |
+| Update foreman to the latest release | `bin/self-update.sh` | `git -C ~/.foreman/install pull` by hand; the tick keeps running the code it started with, so the machine reports healthy while running a version nobody chose |
+| Cut a release foreman follows | `bin/release.sh` (CI runs it on a push to `main`) | assuming a merge deploys; it does, so a commit that should not ship needs the marker below |
 | Opt a commit out of releasing | `Release: skip` (or `[skip release]`) in the commit or PR body | editing `release.yml`; the marker is per commit |
 
 - `git show origin/main:<path>` reads a **local** ref. No fetch is guaranteed to

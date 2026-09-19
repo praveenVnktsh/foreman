@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
-# Install this installation's self-updater as a systemd user timer.
+# Install foreman's self-updater as a systemd user timer.
 #
 #   install-self-update.sh --dry-run          print both units and change nothing
 #   install-self-update.sh                    write, enable and start them
 #   install-self-update.sh --ref <ref>        track <ref> instead of origin/main
 #
-# --ref writes FOREMAN_UPDATE_REF into the unit. An installation pinned to
+# --ref writes FOREMAN_UPDATE_REF into the unit. A clone pinned to
 # origin/release (bin/release.sh promotes main onto it) does not deploy on a
 # merge to main; it deploys when a release is promoted. See docs/INSTALLING.md.
 #
@@ -13,7 +13,7 @@
 # skills/board/supervise.sh, and it is deliberately the same shape. The two
 # timers are separate because they answer different questions: the watchdog
 # asks "is a tick alive", the updater asks "is this clone current". A machine
-# can want either without the other -- an installation pinned to a known
+# can want either without the other -- a clone pinned to a known
 # commit still wants its watchdog.
 set -euo pipefail
 
@@ -59,14 +59,13 @@ command -v systemctl >/dev/null || die "systemctl not found; expected a systemd 
 HERE="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 INSTALL_ROOT="$(dirname -- "$HERE")"
 
-# WHICH INSTALLATION THIS IS, derived the one place it is derived: see
+# WHICH HOME THIS IS, derived the one place it is derived: see
 # bin/install-service.sh's comment, which this follows rather than repeats.
 . "$INSTALL_ROOT/bin/load-pairs.sh" || die "cannot read $INSTALL_ROOT/bin/load-pairs.sh"
 
 unset INSTALLATION IS_DEFAULT HARNESS FOREMAN_ROOT
-_foreman_load_pairs "this installation's declaration" "$INSTALL_ROOT/bin/installation.py" \
-  || die "installation.py could not read this installation's declaration"
-[[ -n "$INSTALLATION" ]] || die "installation.py did not report an installation name"
+_foreman_load_pairs "foreman's declaration" "$INSTALL_ROOT/bin/installation.py" \
+  || die "installation.py could not read foreman's declaration"
 [[ -n "$FOREMAN_HOME" ]] || die "installation.py did not report a home"
 
 UPDATER="$INSTALL_ROOT/bin/self-update.sh"
@@ -74,7 +73,7 @@ UPDATER="$INSTALL_ROOT/bin/self-update.sh"
 # REFUSE TO SCHEDULE SOMETHING THAT CANNOT RUN. A timer whose ExecStart is
 # missing fails every fire, and a machine whose board is healthy grows a
 # permanently red unit nobody can explain -- the failure bin/install-service.sh
-# describes for the pre-installations watchdog.
+# describes for the pre-clones watchdog.
 [[ -x "$UPDATER" ]] || die "no executable self-updater at $UPDATER"
 git -C "$INSTALL_ROOT" rev-parse --git-dir >/dev/null 2>&1 \
   || die "$INSTALL_ROOT is not a git repository; there is nothing for a self-updater to fast-forward"
@@ -86,23 +85,16 @@ git -C "$INSTALL_ROOT" rev-parse --git-dir >/dev/null 2>&1 \
 # refusing to install a timer over it would be refusing the wrong question.
 # One fact, one place.
 
-# THE UNIT NAMES CARRY THE INSTALLATION, for the reason install-service.sh
-# gives: two installations on one machine must each be startable and stoppable
-# alone. They also carry `update`, so the pair is distinguishable at a glance
-# from that installation's watchdog in `systemctl --user list-timers`.
-#
-# The segment order matters. `foreman-update-<installation>` can never collide
-# with install-service.sh's `foreman-<installation>`, whatever an installation
-# is called: reaching this name from there would need an installation named
-# `update-<installation>`, which yields `foreman-update-update-<installation>`
-# here, not this.
-UNIT_NAME="foreman-update-$INSTALLATION"
+# ONE FOREMAN, so the unit carries no segment. It is `foreman-update`, which is
+# distinguishable at a glance from install-service.sh's `foreman` in
+# `systemctl --user list-timers`.
+UNIT_NAME="foreman-update"
 UNIT_DIR="$HOME/.config/systemd/user"
 
 service_unit() {
   cat <<UNIT
 [Unit]
-Description=foreman self-updater for installation '$INSTALLATION' (fast-forwards the clone, restarts the tick)
+Description=foreman self-updater (fast-forwards the clone, restarts the tick)
 Documentation=file://$INSTALL_ROOT/README.md
 
 [Service]
@@ -142,7 +134,7 @@ UNIT
 timer_unit() {
   cat <<UNIT
 [Unit]
-Description=foreman self-updater for installation '$INSTALLATION' every 5 minutes
+Description=foreman self-updater every 5 minutes
 
 [Timer]
 OnBootSec=3min
@@ -152,14 +144,11 @@ OnBootSec=3min
 # be frequent; the expensive part -- the restart -- happens only when the SHA
 # actually moved.
 OnUnitActiveSec=5min
-# SPREAD THE INSTALLATIONS APART. Every installation on a machine gets one of
-# these timers, and an operator installs them back to back, so their schedules
-# start within a second of each other and stay in lockstep for ever: every five
-# minutes, every installation fetches the same remote at the same instant.
-# Measured on 2026-09-16 with three installations installed together -- all
-# three fetches stalled at once. Whether the lockstep caused the stall or only
-# multiplied it, it is a thundering herd this machine inflicts on itself, and a
-# random offset per fire costs nothing.
+# SPREAD THE FIRES ON A FLEET. One machine has one foreman and one updater, but
+# several machines installed together stay in lockstep for ever and hit the same
+# remote at the same instant. Measured on 2026-09-16 with three clones installed
+# together -- all three fetches stalled at once. Whether the lockstep caused the
+# stall or only multiplied it, a random offset per fire costs nothing.
 RandomizedDelaySec=90s
 # A host that sleeps would otherwise skip every fire it was off for, and the
 # clone would stay behind until someone noticed.

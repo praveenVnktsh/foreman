@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Make this installation's skills resolvable to its harness.
+# Make foreman's skills resolvable to its harness.
 #
 #   install-skills.sh --dry-run   say what would change, change nothing
 #   install-skills.sh             link them into the harness's skill directory
@@ -7,7 +7,7 @@
 #   install-skills.sh --force     replace a colliding skill, backing it up first
 #
 # WHY THIS EXISTS. A tick agent runs the board skill through whichever harness
-# this installation declares, and each harness resolves skills by name from its
+# this foreman declares, and each harness resolves skills by name from its
 # own directory -- never from wherever this repository happens to be installed.
 # Without this step the loop looks installed and is not: the watchdog starts a
 # tick, the tick asks for the board skill, and the harness either finds nothing
@@ -48,14 +48,14 @@ SRC="$INSTALL_ROOT/skills"
 # reason to know.
 . "$INSTALL_ROOT/bin/load-pairs.sh" || die "cannot read $INSTALL_ROOT/bin/load-pairs.sh"
 
-# This installation's own declaration, never the operator's shell: the reader
+# Foreman's own declaration, never the operator's shell: the reader
 # lets the environment win, and a stray HARNESS would link these skills into a
 # harness this clone does not run. FOREMAN_HOME is left alone -- installation.py
 # reads it itself to pick the home it answers for, which is how a test points
 # this at a temporary directory.
 unset HARNESS INSTALLATION IS_DEFAULT FOREMAN_ROOT
-_foreman_load_pairs "this installation's declaration" "$INSTALL_ROOT/bin/installation.py" \
-  || die "installation.py could not read this installation's declaration"
+_foreman_load_pairs "foreman's declaration" "$INSTALL_ROOT/bin/installation.py" \
+  || die "installation.py could not read foreman's declaration"
 [[ -n "$HARNESS" ]] || die "installation.py did not report a harness"
 [[ -n "$FOREMAN_HOME" ]] || die "installation.py did not report a home"
 
@@ -65,7 +65,7 @@ DEST="$("$HARNESS_SH" skills-dir)"
 [[ -n "$DEST" ]] || die "$HARNESS_SH skills-dir printed nothing"
 
 # WHERE THE MANIFEST LIVES, AND WHY IT IS NOT THE OBVIOUS PLACE. The manifest
-# describes an INSTALLATION, so it belongs with this installation's own state.
+# describes an INSTALLATION, so it belongs with foreman's own state.
 # It does not belong at either end of the link, and both mistakes are on record.
 #
 #   * Not `$DEST/<name>/`. That path is a SYMLINK into $SRC, so writing "the
@@ -81,7 +81,7 @@ DEST="$("$HARNESS_SH" skills-dir)"
 #     belonging to a DIFFERENT project's board skill, as something this install
 #     had put there.
 #
-# $FOREMAN_HOME is this installation's state root -- the same one bin/boardctl
+# $FOREMAN_HOME is foreman's state root -- the same one bin/boardctl
 # and bin/install-service.sh use -- and it is not shared with anyone.
 MANIFEST="$FOREMAN_HOME/installed-skills"
 

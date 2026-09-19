@@ -76,7 +76,7 @@ esac
 mkdir -p "$skills/board"; printf 'somebody else\n' > "$skills/board/SKILL.md"
 out="$(run --dry-run)"
 case "$out" in
-  *"not this installation's board skill"*) ok "names a foreign board skill rather than reporting it missing" ;;
+  *"not foreman's board skill"*) ok "names a foreign board skill rather than reporting it missing" ;;
   *) bad "did not distinguish a foreign skill from an absent one: $out" ;;
 esac
 rm -rf "$skills/board"
@@ -120,102 +120,17 @@ case "$out" in
   *) bad "unit does not pin FOREMAN_HOME" ;;
 esac
 
-# --- the unit name carries the installation
-#
-# $fh declares no installation.toml, so bin/installation.py reads it as the
-# lone Claude installation and the unit is foreman-claude. Two installations on
-# one machine each need their own service and timer: a shared name would mean
-# enabling one disables the other, and `systemctl --user stop` would stop a
-# watchdog the operator did not name.
+# --- the unit is named plain foreman; there is no installation segment
 case "$out" in
-  *"foreman-claude.timer"*) ok "the unit name carries the installation" ;;
-  *) bad "the unit name does not carry the installation: $out" ;;
+  *"foreman.timer"*) ok "the unit is named plain foreman" ;;
+  *) bad "the unit is not named foreman: $out" ;;
 esac
 
 # --- a dry run writes nothing
-#
-# Asserted against the name this script can actually produce. It used to name
-# foreman.timer, which install-service.sh stopped emitting when unit names
-# gained the installation, so the assertion passed whatever --dry-run did.
-if [[ -e "$work/.config/systemd/user/foreman-claude.timer" ]]; then
+if [[ -e "$work/.config/systemd/user/foreman.timer" ]]; then
   bad "--dry-run wrote a unit file"
 else
   ok "--dry-run writes nothing"
 fi
-
-# --- an installation named beta produces foreman-beta units
-#
-# The name comes from the DIRECTORY, not from a flag: an installation home
-# named beta under a machine root is the whole declaration of that fact. This
-# is the case that proves the unit name is derived rather than constant --
-# every assertion above it would also pass against a hard-coded name.
-beta_root="$work/root"; beta_home="$beta_root/beta"; mkdir -p "$beta_home"
-cat > "$beta_home/installation.toml" <<'TOML'
-harness = "claude"
-default = true
-TOML
-printf '[boards.demo]\nrepo = "%s"\n' "$work/repo" > "$beta_home/boards.toml"
-out="$(env PATH="$work/bin:$PATH" FOREMAN_HOME="$beta_home" HOME="$work" \
-        CLAUDE_SKILLS_DIR="$skills" bash "$root/bin/install-service.sh" --dry-run 2>&1)"
-case "$out" in
-  *"foreman-beta.timer"*) ok "an installation named beta produces foreman-beta.timer" ;;
-  *) bad "an installation named beta did not produce foreman-beta.timer: $out" ;;
-esac
-case "$out" in
-  *"installation 'beta'"*) ok "the unit says which installation it watches" ;;
-  *) bad "the unit does not name the installation it watches: $out" ;;
-esac
-
-# --- the pre-installations watchdog is refused, not installed beside
-#
-# The old unit is named plain foreman and the new one foreman-<installation>,
-# so systemd sees two unrelated units and runs both. The old one's ExecStart
-# names the install/ directory `boardctl migrate` moved, so it fails every ten
-# minutes forever beside a board that is otherwise healthy.
-mkdir -p "$work/.config/systemd/user"
-printf '[Unit]\nDescription=old foreman\n' > "$work/.config/systemd/user/foreman.timer"
-echo enabled > "$work/unit-state/foreman.timer.enabled"
-out="$(run --dry-run)"
-case "$out" in
-  *"pre-installations watchdog, and it can still run"*) ok "refuses to install beside the pre-installations watchdog" ;;
-  *) bad "installed beside the pre-installations watchdog: $out" ;;
-esac
-case "$out" in
-  *"systemctl --user disable --now foreman.timer"*) ok "names the command that disables the old watchdog" ;;
-  *) bad "does not name the command that disables the old watchdog: $out" ;;
-esac
-# Refused, never deleted: the operator did not ask for a file to be removed,
-# and the unit file is the only record of what the old watchdog was.
-if [[ -f "$work/.config/systemd/user/foreman.timer" ]]; then
-  ok "leaves the legacy unit file alone"
-else
-  bad "deleted a unit file the operator did not ask to delete"
-fi
-
-# --- a disabled, inactive legacy unit file does not refuse
-#
-# `systemctl disable` leaves the unit file behind. On 2026-09-14 an operator
-# who disabled the old timer, as the refusal told them to, was refused again
-# for as long as the file they were told to keep existed.
-echo disabled > "$work/unit-state/foreman.timer.enabled"
-out="$(run --dry-run)"
-case "$out" in
-  *"can still run"*) bad "refused a disabled, inactive legacy watchdog: $out" ;;
-  *"saw $work/.config/systemd/user/foreman.timer"*"foreman-claude.timer"*)
-    ok "a disabled, inactive legacy unit is named and not refused" ;;
-  *) bad "did not name the disabled legacy unit it saw: $out" ;;
-esac
-
-# --- a disabled legacy watchdog that is still running refuses
-#
-# `disable` without `--now` leaves the timer armed until it is stopped, so a
-# second watchdog keeps firing beside the new one.
-echo active > "$work/unit-state/foreman.timer.active"
-out="$(run --dry-run)"
-case "$out" in
-  *"can still run"*) ok "refuses beside a disabled legacy watchdog that is still active" ;;
-  *) bad "installed beside a legacy watchdog that is still active: $out" ;;
-esac
-rm -f "$work/.config/systemd/user/foreman.timer" "$work/unit-state"/*
 
 exit "$fail"

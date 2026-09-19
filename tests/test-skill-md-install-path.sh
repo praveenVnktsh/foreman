@@ -3,8 +3,8 @@
 # not README.md. It used to hardcode `B=~/.claude/skills/board` (and 14 other
 # spots) as the installation root, left over from before this project had an
 # instance model at all. README.md's actual, and only documented, install
-# instruction is `git clone <url> ~/.foreman/<installation>/install`, giving
-# `~/.foreman/<installation>/install/skills/board/config.sh`. config.sh derives
+# instruction is `git clone <url> ~/.foreman/install`, giving
+# `~/.foreman/install/skills/board/config.sh`. config.sh derives
 # `bin/contract.py`'s path as two directories up from its OWN location
 # (`skills/board/config.sh` -> `bin/contract.py`), which resolves correctly
 # for `~/.foreman/install/...` but not for a tick agent that `cd`s into
@@ -12,11 +12,8 @@
 # levels up at all -- silently, since nothing here raises on a wrong path
 # fed to config.sh by hand; it just fails to find `~/.claude/bin/contract.py`.
 #
-# The installation segment is now part of that path. A machine runs several
-# installations under one root, each with its own clone, and config.sh derives
-# which installation it is from where the clone sits -- so a SKILL.md that
-# still named a root with no installation segment would send the tick to read
-# a boards.toml one directory above every installation's own.
+# There is one foreman, so the path has no installation segment: ~/.foreman is
+# the home and the root, and the clone sits at ~/.foreman/install.
 set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -41,15 +38,15 @@ fi
 # fails when somebody legitimately adds an eleventh, passes when ten of them are
 # wrong, and tells a reader nothing about what must be true. What must be true
 # is that SKILL.md names one install root and it is the documented one.
-if grep -q '~/.foreman/<installation>/install/skills/board' "$repo_root/skills/board/SKILL.md"; then
+if grep -q '~/.foreman/install/skills/board' "$repo_root/skills/board/SKILL.md"; then
   ok "SKILL.md names the documented install root"
 else
-  bad "SKILL.md never references ~/.foreman/<installation>/install/skills/board"
+  bad "SKILL.md never references ~/.foreman/install/skills/board"
 fi
 
 others="$(grep -oE '(~|\$HOME)/[A-Za-z0-9._/<>-]*/skills/board' "$repo_root/skills/board/SKILL.md" \
   | sed 's|^[$]HOME|~|' | sort -u \
-  | grep -v '^~/\.foreman/<installation>/install/skills/board$' || true)"
+  | grep -v '^~/\.foreman/install/skills/board$' || true)"
 if [[ -z "$others" ]]; then
   ok "SKILL.md names no other install root"
 else
@@ -66,10 +63,9 @@ fi
 work_dir="$(mktemp -d)"
 trap 'rm -rf "$work_dir"' EXIT
 
-# <root>/<installation>/install, the shape SKILL.md now names. `claude` is a
-# legal installation name and the one an un-migrated machine's home becomes.
+# ~/.foreman/install, the shape SKILL.md now names.
 foreman_root="$work_dir/dot-foreman"
-foreman_home="$foreman_root/claude"
+foreman_home="$foreman_root"
 install_root="$foreman_home/install"
 mkdir -p "$install_root/skills/board" "$install_root/bin"
 cp "$repo_root/skills/board/config.sh" "$install_root/skills/board/config.sh"
@@ -107,17 +103,16 @@ printf '[boards.demo]\nrepo = "%s"\n' "$target" >"$foreman_home/boards.toml"
 
 # NO FOREMAN_HOME. Identity comes from the path: bin/installation.py reads the
 # home as the parent of the clone, so this also proves the derivation lands on
-# the installation directory SKILL.md's paths describe and not on the root
-# above it, where no boards.toml lives.
+# the home SKILL.md's paths describe, where boards.toml lives.
 if out="$(env -u FOREMAN_HOME FOREMAN_INSTANCE=demo bash -c \
      ". '$install_root/skills/board/config.sh'; printf '%s|%s' \"\$TEST_COMMAND\" \"\$INSTALLATION\"" 2>&1)"; then
-  if [[ "$out" == "true|claude" ]]; then
+  if [[ "$out" == "true|foreman" ]]; then
     ok "config.sh at the path SKILL.md now names finds bin/contract.py and loads the target's contract"
   else
     bad "config.sh loaded but produced the wrong value: $out"
   fi
 else
-  bad "config.sh at ~/.foreman/<installation>/install/skills/board/config.sh could not load the contract: $out"
+  bad "config.sh at ~/.foreman/install/skills/board/config.sh could not load the contract: $out"
 fi
 
 exit "$fail"

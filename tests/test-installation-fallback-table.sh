@@ -65,7 +65,7 @@ refuses() { # claim, needle, args...
 home_with() { # name, toml body -- prints the home
   local home="$work/$1/$1"
   mkdir -p "$home"
-  printf '%s\n' "$2" >"$home/installation.toml"
+  printf '%s\n' "$2" >"$home/foreman.toml"
   printf '%s' "$home"
 }
 
@@ -82,10 +82,10 @@ for key in PLAN_FLOOR BUILD_FLOOR REVIEW_FLOOR; do
     "" "$(read_key "$key" --home "$claude")"
 done
 
-# The un-migrated home, with no installation.toml at all, is a Claude
+# The un-migrated home, with no foreman.toml at all, is a Claude
 # installation and gets Claude's list.
 bare="$work/bare"; mkdir -p "$bare"
-check "a home with no installation.toml gets the claude tiers" \
+check "a home with no foreman.toml gets the claude tiers" \
   "fable opus sonnet haiku" "$(read_key FALLBACK_TIERS --home "$bare")"
 
 for harness in codex opencode; do

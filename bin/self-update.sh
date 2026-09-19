@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Fast-forward this installation's clone to the latest GitHub Release and restart
+# Fast-forward foreman's clone to the latest GitHub Release and restart
 # its tick. A merge to main reaches a machine only when bin/release.sh cuts a
 # release. FOREMAN_UPDATE_REF=origin/<branch> overrides that to track a ref.
 #
@@ -8,7 +8,7 @@
 #
 # FOREMAN UPDATES ITSELF BY PULLING. Nothing inbound ever executes on this
 # host: CI runs on GitHub-hosted runners, and the only way a merged commit
-# reaches an installation is the installation fetching it. That is the whole
+# reaches an foreman is the foreman fetching it. That is the whole
 # design, and it is why there is no deploy workflow to read. A self-hosted
 # Actions runner would be the alternative, and on a public repository it hands
 # a stranger's fork the user that owns this machine's gh token, its harness
@@ -68,28 +68,27 @@ esac
 DRY=""
 [[ "$MODE" == "--dry-run" ]] && DRY=1
 
-# WHICH INSTALLATION THIS IS. bin/installation.py is the one place that derives
-# name, home and harness from where this clone sits, so a second derivation
+# WHICH HOME THIS IS. bin/installation.py is the one place that derives
+# the home and harness from where this clone sits, so a second derivation
 # here would be a copy that drifts from it -- the same reasoning
 # bin/install-service.sh, bin/install.sh and bin/install-skills.sh all give.
 # bin/load-pairs.sh is the shared reader of its NUL-separated pairs and its
 # comment carries the bash 3.2 temp-file rule.
 . "$INSTALL_ROOT/bin/load-pairs.sh" || die "cannot read $INSTALL_ROOT/bin/load-pairs.sh"
 
-# This installation's own declaration, never the operator's shell: the reader
-# lets the environment win, and a stray INSTALLATION would restart a tick this
+# Foreman's own declaration, never the operator's shell: the reader
+# lets the environment win, and a stray HARNESS would restart a tick this
 # clone does not own. FOREMAN_HOME is left alone -- installation.py reads it
 # itself to pick the home it answers for, which is how a test points this at a
 # temporary directory.
 unset INSTALLATION IS_DEFAULT HARNESS FOREMAN_ROOT
-_foreman_load_pairs "this installation's declaration" "$INSTALL_ROOT/bin/installation.py" \
-  || die "installation.py could not read this installation's declaration"
-[[ -n "$INSTALLATION" ]] || die "installation.py did not report an installation name"
+_foreman_load_pairs "foreman's declaration" "$INSTALL_ROOT/bin/installation.py" \
+  || die "installation.py could not read foreman's declaration"
 [[ -n "$FOREMAN_HOME" ]] || die "installation.py did not report a home"
 
-# WHAT THIS INSTALLATION FOLLOWS. By default the LATEST GITHUB RELEASE: a merge
+# WHAT THIS CLONE FOLLOWS. By default the LATEST GITHUB RELEASE: a merge
 # to main reaches a machine only when bin/release.sh cuts a release. An
-# installation overrides that to track a git ref instead by setting
+# clone overrides that to track a git ref instead by setting
 # FOREMAN_UPDATE_REF=origin/<branch> (bin/install-self-update.sh --ref), which a
 # development machine uses to follow main. See docs/INSTALLING.md.
 #
@@ -133,10 +132,10 @@ BRANCH="$(git_ro symbolic-ref --short -q HEAD || true)"
 #
 # UNTRACKED FILES DO NOT BLOCK AN UPDATE, and --untracked-files=no is what says
 # so. Measured on 2026-09-16, deploying this to its first real machine: one of
-# three installations there had a stray 25KB API-response dump sitting in its
+# three clones there had a stray 25KB API-response dump sitting in its
 # install root, written by nothing in this repository. Under a bare
 # `status --porcelain` that clone was permanently dirty, so it would have
-# refused every fire for ever -- an installation that silently stops updating
+# refused every fire for ever -- an foreman that silently stops updating
 # because of a file nobody remembers leaving there.
 #
 # It is safe because a fast-forward cannot quietly eat an untracked file: if an
@@ -159,7 +158,7 @@ fi
 # THE FETCH MUST NOT BE ABLE TO HANG, and these four options are why.
 #
 # Measured on 2026-09-16, the first time this ran from a systemd timer rather
-# than a terminal: three installations fired within two seconds of each other,
+# than a terminal: three clones fired within two seconds of each other,
 # and all three `git fetch` processes stalled -- connected to the remote, then
 # silent. They were still stalled two minutes later. A fresh run a moment
 # afterwards completed in two seconds, so this is a transient the network can
@@ -169,7 +168,7 @@ fi
 # service that never finishes stays `activating` for ever, and systemd will not
 # compute the next elapse of a timer whose service has not finished:
 # `NextElapseUSecMonotonic=infinity`. One stalled fetch therefore does not cost
-# one update -- it silently ends every future update for that installation, and
+# one update -- it silently ends every future update for that foreman, and
 # nothing anywhere reports it. A board would go on ticking healthily against
 # code that quietly stopped being refreshed.
 #
@@ -200,7 +199,7 @@ else
   FETCH_REF="$(cd -- "$INSTALL_ROOT" && gh release list --limit 1 --json tagName --jq '.[0].tagName // ""' 2>/dev/null)" \
     || die "gh release list failed; is gh installed and authenticated (run gh auth status)? Nothing was changed."
   if [[ -z "$FETCH_REF" ]]; then
-    printf 'self-update: %s follows releases and none exists yet; nothing to do.\n' "$INSTALLATION"
+    printf 'self-update: foreman follows releases and none exists yet; nothing to do.\n'
     exit 0
   fi
   SOURCE="release $FETCH_REF"
@@ -223,7 +222,7 @@ NEW_SHORT="$(git_ro rev-parse --short "$NEW")"
 # minutes forever, and a board whose tick is always seconds old looks healthy
 # while getting nothing done.
 if [[ "$OLD" == "$NEW" ]]; then
-  printf 'self-update: %s is already at %s; nothing to do.\n' "$INSTALLATION" "$OLD_SHORT"
+  printf 'self-update: foreman is already at %s; nothing to do.\n' "$OLD_SHORT"
   exit 0
 fi
 
@@ -245,7 +244,7 @@ SKILLS_BEFORE="$(skill_names "$OLD")"
 SKILLS_AFTER="$(skill_names "$NEW")"
 
 if [[ -n "$DRY" ]]; then
-  printf 'self-update: would fast-forward %s from %s to %s\n' "$INSTALLATION" "$OLD_SHORT" "$NEW_SHORT"
+  printf 'self-update: would fast-forward foreman from %s to %s\n' "$OLD_SHORT" "$NEW_SHORT"
   if [[ "$SKILLS_BEFORE" != "$SKILLS_AFTER" ]]; then
     printf 'would run: %s/bin/install-skills.sh   (the set of skills changed)\n' "$INSTALL_ROOT"
   else
@@ -275,5 +274,5 @@ fi
 FOREMAN_HOME="$FOREMAN_HOME" "$SUPERVISE" --restart \
   || die "fast-forwarded to $NEW_SHORT, but supervise.sh --restart failed. The clone is updated and the tick may still be running $OLD_SHORT."
 
-printf 'self-update: %s %s -> %s; skills relinked: %s; tick restarted.\n' \
-  "$INSTALLATION" "$OLD_SHORT" "$NEW_SHORT" "$RELINKED"
+printf 'self-update: foreman %s -> %s; skills relinked: %s; tick restarted.\n' \
+  "$OLD_SHORT" "$NEW_SHORT" "$RELINKED"
