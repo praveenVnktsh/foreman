@@ -69,6 +69,15 @@ BOARDS="$(FOREMAN_HOME="$FOREMAN_HOME" "$INSTALL_ROOT/bin/boards.py" --list 2>/d
 UNIT_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user"
 UNIT="$UNIT_DIR/foreman-dashboard.service"
 
+# UNQUOTED DELIMITER, because $DASHBOARD, $FOREMAN_HOME and $PORT have to be
+# expanded into the unit. That makes everything else in here live too: the
+# comments below are shell text, so a `$name` in one is expanded and a
+# backtick pair in one is RUN. Measured 2026-09-20 -- the first version of
+# this block said "$HARNESS_SH list" and "too old for `tomllib`" in its own
+# prose, and installing printed "HARNESS_SH: unbound variable" and
+# "tomllib: command not found" while writing a unit with two sentences that
+# stopped mid-clause. Anything literal in here is escaped; nothing in a
+# comment is worth a command substitution.
 read -r -d '' UNIT_TEXT <<UNIT_EOF || true
 [Unit]
 Description=foreman dashboard (one page: what this foreman is doing)
@@ -79,14 +88,14 @@ Type=simple
 # THE HARNESS BINARY IS IN ~/.local/bin, and a systemd user unit is given
 # /usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin and nothing
 # else. Without this the page renders "the agent registry could not be read"
-# forever, because `$HARNESS_SH list` shells out to a CLI that is not on its
+# forever, because \$HARNESS_SH list shells out to a CLI that is not on its
 # PATH -- measured 2026-09-20, where the first install of this unit did
 # exactly that while the tick beside it was healthy.
 #
 # ~/.local/bin LEADS and the system directories TRAIL, the same order
 # skills/board/supervise.sh carries and for the same two reasons: the harness
 # binary is what has to be found first, and putting /usr/bin ahead of the
-# operator's own PATH shadows their python3 with one too old for `tomllib`.
+# operator's own PATH shadows their python3 with one too old for tomllib.
 Environment=PATH=%h/.local/bin:%h/bin:/usr/local/bin:/usr/bin:/bin
 # The installed clone, never a working tree -- the same pin the tick runs on,
 # for the same reason: a dashboard reading uncommitted code would report a
