@@ -81,7 +81,7 @@ DRY=""
 # clone does not own. FOREMAN_HOME is left alone -- installation.py reads it
 # itself to pick the home it answers for, which is how a test points this at a
 # temporary directory.
-unset INSTALLATION IS_DEFAULT HARNESS FOREMAN_ROOT
+unset HARNESS FOREMAN_ROOT
 _foreman_load_pairs "foreman's declaration" "$INSTALL_ROOT/bin/installation.py" \
   || die "installation.py could not read foreman's declaration"
 [[ -n "$FOREMAN_HOME" ]] || die "installation.py did not report a home"

@@ -89,25 +89,29 @@ You need `git`, `gh`, Python 3, a Linear API key, a Linear MCP config, and one
 supported harness.
 
 ```bash
-git clone https://github.com/praveenVnktsh/foreman.git ~/.foreman/claude/install
-~/.foreman/claude/install/bin/install.sh --harness claude
-~/.foreman/claude/install/bin/install-skills.sh
+git clone https://github.com/praveenVnktsh/foreman.git ~/.foreman/install
+~/.foreman/install/bin/install.sh --harness claude
+~/.foreman/install/bin/install-skills.sh
 install -m 600 ~/.config/linear.key ~/.foreman/linear.key
 cp path/to/linear-mcp.json ~/.foreman/mcp.json
-~/.foreman/claude/install/bin/boardctl add myproject --repo ~/Developer/myproject
+~/.foreman/install/bin/boardctl add myproject --repo ~/Developer/myproject
 ```
 
 Then keep it running and up to date with systemd user timers (Linux; on macOS
 use launchd or cron):
 
 ```bash
-~/.foreman/claude/install/bin/install-service.sh
-~/.foreman/claude/install/bin/install-self-update.sh
+~/.foreman/install/bin/install-service.sh
+~/.foreman/install/bin/install-self-update.sh
 ```
 
+The clone goes at `~/.foreman/install` and nowhere else: foreman derives its
+home from where the clone sits, so a clone one directory deeper puts the home
+somewhere the `linear.key` and `mcp.json` above are not.
+
 `install-skills.sh` is required: the tick runs `/board`, and the harness only
-finds skills in its own skills directory. The release branch, migrating an old
-home and the other harnesses are covered in
+finds skills in its own skills directory. The release branch, the rate-limit
+fallback and the other harnesses are covered in
 [docs/INSTALLING.md](docs/INSTALLING.md).
 
 ## Models and fallback

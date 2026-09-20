@@ -90,27 +90,27 @@ fi
 #
 # A COUNT THAT CANNOT BE TAKEN REFUSES THE DISPATCH. This used to read
 # `HELD="$(... 2>/dev/null || true)"` and then skip the whole gate when HELD
-# was empty, so any failure of `--host-slots` -- a sibling installation whose
-# boards.toml will not load is enough, and one unmounted repository path is
-# enough for that -- disabled both ceilings with nothing at all on stderr. That
+# was empty, so any failure of `--host-slots` -- a boards.toml that will not
+# load is enough, and one unmounted repository path is enough for that --
+# disabled both ceilings with nothing at all on stderr. That
 # is the same silence this comment's own 2026-09-01 paragraph records, reached
 # the other way round. reconcile.py's stderr is not captured, so whatever it
 # could not read is named above this refusal.
 if ! HELD="$("$SKILL_DIR/reconcile.py" --host-slots)"; then
   die "could not count the machine's slots; refusing to dispatch $NAME.
-reconcile.py's own message is above: a sibling installation whose boards.toml
-will not load, or this installation's own scripts being unrunnable.
+reconcile.py's own message is above: a boards.toml that will not load, or
+foreman's own scripts being unrunnable.
 This is NOT a failure of ticket $TICKET and must not consume its attempt budget.
 Repair the machine, then dispatch again at the same attempt number."
 fi
-# `--host-slots` counts every board of every installation under this machine's
-# root, so its keys are `<installation>/<board>` and not the bare board name.
-# Two installations may serve one repository, and keyed by board alone one
-# would overwrite the other's count. Read with the bare name, every lookup
-# below missed, `held` came back empty, and this board's own ceiling passed a
-# dispatch through however many cards were already in flight -- the gate
-# disabled with no error at all, which is the failure its own comment records.
-SLOT_KEY="$INSTALLATION/$INSTANCE"
+# `--host-slots` counts every board declared in this machine's boards.toml and
+# keys them by the BARE board name. There is one foreman, so a board name is
+# already unique here; the key used to carry an installation segment, and
+# reading it with the bare name made every lookup below miss, `held` come back
+# empty, and this board's own ceiling pass a dispatch through however many
+# cards were already in flight -- the gate disabled with no error at all. The
+# shape lives in reconcile.py:host_slots and is spelled once on each side.
+SLOT_KEY="$INSTANCE"
 # No `try:` around the parse and no `|| true` on the pipeline any more. HELD is
 # what json.dump wrote a moment ago, so a parse that fails here says python3
 # itself is broken, and answering "this card holds no slot" to that is the

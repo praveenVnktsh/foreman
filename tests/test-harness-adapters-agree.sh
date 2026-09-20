@@ -113,10 +113,10 @@ for harness in claude codex opencode; do
   export HOME="$home"
   export FOREMAN_HOME="$home/.foreman/stub"
   export PATH="$work/$harness/bin:$ORIGINAL_PATH"
-  # The installation this home belongs to. config.sh exports it for every real
-  # caller, and codex.sh refuses to write an MCP profile without it rather than
-  # guess which installation's credential it is holding.
-  export INSTALLATION=stub
+  # The MCP profile codex.sh writes. There is one foreman, so the name is the
+  # constant codex.sh:_codex_profile_name prints -- not composed from anything
+  # this fixture exports.
+  CODEX_PROFILE=foreman
   # agents/ up front, because the credential claim below greps the whole
   # directory and claude.sh never creates one.
   mkdir -p "$FOREMAN_HOME/agents"
@@ -310,7 +310,7 @@ for harness in claude codex opencode; do
     # What the stub records for a variable holding the canary: a checksum,
     # never the value.
     bearer_seen="$bearer_variable $(printf '%s' "$bearer_canary" | cksum)"
-    bearer_profile="${CODEX_HOME:-$HOME/.codex}/foreman-$INSTALLATION.config.toml"
+    bearer_profile="${CODEX_HOME:-$HOME/.codex}/$CODEX_PROFILE.config.toml"
     bearer_json="$work/$harness/mcp-bearer.json"
     printf '{"mcpServers": {"board-remote": {"type": "http", "url": "https://example.invalid/mcp", "headers": {"Authorization": "Bearer %s"}}}}\n' \
       "$bearer_canary" >"$bearer_json"
@@ -435,7 +435,7 @@ for harness in claude codex opencode; do
           --name "layer-$codex_version" --cwd "$agent_cwd" --model stub-model \
           --prompt-file "$prompt" --skip-permissions --mcp-config "$bearer_json" \
           >/dev/null 2>"$bearer_err" \
-        && grep -qF -- " $layer_flag foreman-$INSTALLATION " "$HARNESS_STUB_ARGV" \
+        && grep -qF -- " $layer_flag $CODEX_PROFILE " "$HARNESS_STUB_ARGV" \
         && grep -qxF "layered $bearer_profile" "$HARNESS_STUB_PROFILES"; then
         ok "$harness $codex_version spawn layers the MCP profile through $layer_flag"
       else
@@ -465,7 +465,7 @@ for harness in claude codex opencode; do
         sleep "$POLL_SECONDS"
         tries=$(( tries + 1 ))
       done
-      if grep -qF -- " $layer_flag foreman-$INSTALLATION resume " "$HARNESS_STUB_ARGV" \
+      if grep -qF -- " $layer_flag $CODEX_PROFILE resume " "$HARNESS_STUB_ARGV" \
           && grep -qxF "layered $bearer_profile" "$HARNESS_STUB_PROFILES"; then
         ok "$harness $codex_version resume layers the MCP profile through $layer_flag before resume"
       else
@@ -703,7 +703,7 @@ for harness in claude codex opencode; do
   export HOME="$ORIGINAL_HOME"
   export PATH="$ORIGINAL_PATH"
   unset FOREMAN_HOME
-  unset INSTALLATION
+  unset CODEX_PROFILE
 done
 
 exit "$fail"

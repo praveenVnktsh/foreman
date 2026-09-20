@@ -2,7 +2,8 @@
 # boardctl -- declare and control this machine's boards.
 #
 #     boardctl add <name> --repo <path> [--key-file <path>] [--priority N]
-#     boardctl remove <name>
+#     boardctl remove <name> [--force]
+#     boardctl forget <name>
 #     boardctl list
 #     boardctl status <name>
 #     boardctl halt <name>
@@ -19,10 +20,23 @@
 # resolved ids); now `add` and `remove` touch one file.
 #
 # $FOREMAN_HOME/instances/<name>/ still exists, as the per-board RUNTIME
-# directory (cards/, ids.env, HALT). boardctl touches only HALT there.
-# `add` never creates it and `remove` never deletes it, so removing a board's
-# declaration never costs an operator its card history by accident -- that is
-# a separate, deliberate act.
+# directory (cards/, ids.env, HALT, the scratch under tmp/). `add` never
+# creates it and `remove` never deletes it, so removing a board's declaration
+# never costs an operator its card history by accident -- that is a separate,
+# deliberate act, and `forget` is it.
+#
+# AN ORPHAN IS A RUNTIME DIRECTORY WITH NO DECLARATION. It is what `remove`
+# leaves behind, and it used to be invisible: `list` showed declared boards
+# only, `status` refused an undeclared name, and nothing on the machine ever
+# said the directory was there. `list` now reports orphans and `forget`
+# reclaims one.
+#
+# The declaration is also the only record of WHERE the board built, so
+# `remove` refuses while the repository still holds that board's worktrees or
+# evidence refs: once the `[boards.<name>]` block is gone, `config.sh` refuses
+# the name and every tool that could reap them -- `sweep.sh` above all --
+# refuses with it, stranding them in the target repository forever. Sweep
+# first, then remove. `--force` is for the repository that is already gone.
 set -euo pipefail
 
 here="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
@@ -48,10 +62,10 @@ die() { printf 'boardctl: %s\n' "$*" >&2; exit 1; }
 load_foreman_home() {
   # Only the home is wanted here, and the reader lets the environment win for
   # every key it reads, so the rest are cleared first: boardctl must never take
-  # an INSTALLATION or a HARNESS from a stray export in an operator's shell.
+  # a HARNESS from a stray export in an operator's shell.
   # FOREMAN_HOME itself is left alone -- installation.py reads it to find the
   # home to answer for, and clearing it would point this at another one.
-  unset INSTALLATION IS_DEFAULT HARNESS FOREMAN_ROOT
+  unset HARNESS FOREMAN_ROOT
   # installation.py has already named what it could not make sense of.
   _foreman_load_pairs "foreman's declaration" "$installation_py" \
     || die "bin/installation.py refused; cannot tell which home this clone belongs to"
@@ -67,7 +81,8 @@ usage() {
   cat >&2 <<'USAGE'
 usage:
   boardctl add <name> --repo <path> [--key-file <path>] [--priority N]
-  boardctl remove <name>
+  boardctl remove <name> [--force]
+  boardctl forget <name>
   boardctl list
   boardctl status <name>
   boardctl halt <name>
@@ -165,6 +180,65 @@ board_repo() {
   printf '%s' "${fields[1]}"
 }
 
+# ORPHAN HELPERS. An orphan is a directory under instances/ that boards.toml
+# does not declare -- what `remove` leaves behind, and what `forget` reclaims.
+
+# orphan_names -- every runtime directory with no declaration, into `fields`.
+#
+# Reads the DIRECTORY and subtracts the roster, rather than the other way
+# round: the whole point is to find state no declaration mentions, so the
+# declaration cannot be what enumerates it.
+orphan_names() {
+  local declared=() name base
+  board_names
+  declared=(${fields[@]+"${fields[@]}"})
+  fields=()
+  [[ -d "$FOREMAN_HOME/instances" ]] || return 0
+  for name in "$FOREMAN_HOME"/instances/*/; do
+    # No match leaves the glob itself, which is not a directory.
+    [[ -d "$name" ]] || continue
+    base="$(basename -- "$name")"
+    case " ${declared[*]-} " in
+      *" $base "*) continue ;;
+    esac
+    fields+=("$base")
+  done
+}
+
+# removed_repo <name> -- the repository an orphan was removed from, or empty.
+#
+# `remove` records it because the declaration it deletes is the only place the
+# path was written down, and an operator looking at a months-old orphan has no
+# other way to learn which checkout it built.
+removed_repo() {
+  local file; file="$(instance_home "$1")/removed"
+  [[ -r "$file" ]] || return 0
+  sed -n 's/^repo = //p' "$file" | head -1
+}
+
+# repo_leftovers <name> <repo> -- the board's worktrees and evidence refs still
+# in <repo>, one per line, or nothing.
+#
+# These are what `remove` refuses over. They live in the TARGET repository, not
+# under $FOREMAN_HOME, so `forget` cannot reach them -- only `sweep.sh` can, and
+# only while the board is still declared. A repository that is gone or is not a
+# git checkout has no leftovers this can name, which is what `--force` is for.
+repo_leftovers() {
+  local name="$1" repo="$2" path ref
+  [[ -d "$repo" ]] || return 0
+  for path in "$repo"/.claude/worktrees/foreman-"$name"-*/; do
+    [[ -d "$path" ]] || continue
+    printf 'worktree %s\n' "${path%/}"
+  done
+  # `|| true`: a repo that is not a git checkout answers non-zero, and that is
+  # "nothing to report", not a failure of the removal.
+  while IFS= read -r ref; do
+    [[ -n "$ref" ]] || continue
+    printf 'evidence ref %s\n' "$ref"
+  done < <(git -C "$repo" for-each-ref --format='%(refname)' \
+             "refs/foreman/$name/evidence/*" 2>/dev/null || true)
+}
+
 # revert_unless_valid <tmp> <fail-message> -- if bin/boards.py cannot load
 # <tmp>, deletes it and dies with <fail-message> plus boards.py's own error.
 # The ORIGINAL boards.toml is never touched until this passes, and nothing
@@ -257,9 +331,40 @@ cmd_add() {
 }
 
 cmd_remove() {
-  [[ $# -eq 1 ]] || usage
-  local name="$1"
+  local name="" force=""
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --force) force=1; shift ;;
+      -*) usage ;;
+      *) [[ -z "$name" ]] || usage; name="$1"; shift ;;
+    esac
+  done
+  [[ -n "$name" ]] || usage
   raw_board_declared "$name" || die "no board named '$name' in $boards_toml"
+
+  # THE REPOSITORY IS READ BEFORE THE DECLARATION GOES, because the declaration
+  # is where it is written. `|| true`: a board whose boards.toml entry will not
+  # load (an unmounted repo path) must still be removable -- that is one of the
+  # reasons to remove it.
+  local repo=""; repo="$(board_repo "$name" 2>/dev/null || true)"
+
+  # STRANDED STATE REFUSES THE REMOVAL. `sweep.sh` is the only thing that reaps
+  # a board's worktrees and evidence refs, and it refuses a board boards.toml
+  # does not declare -- so anything left in the repository when this block goes
+  # is left there for good. The operator is told to sweep, which they can still
+  # do, rather than discovering the leftovers later with no way back.
+  local leftovers=""
+  if [[ -z "$force" && -n "$repo" ]]; then
+    leftovers="$(repo_leftovers "$name" "$repo")"
+  fi
+  if [[ -n "$leftovers" ]]; then
+    die "board $name still has state in $repo:
+$leftovers
+Reap it first -- while $name is still declared, because sweep.sh refuses a
+board that is not:
+  FOREMAN_INSTANCE=$name $root/skills/board/sweep.sh --orphans
+Then remove it. Use --force to remove anyway and strand the above."
+  fi
 
   local tmp; tmp="$(new_tmp)"
   # Removes the block from "[boards.$name]" up to (not including) the next
@@ -279,8 +384,57 @@ cmd_remove() {
   mv -f "$tmp" "$boards_toml"
 
   local inst; inst="$(instance_home "$name")"
+  # The orphan is made SELF-DESCRIBING on the way out. The repository path just
+  # deleted is the only record of where this board built, and an operator
+  # meeting the directory months later has nothing else to go on. Written only
+  # where the directory already exists: `add` never made one, so a board
+  # removed before it ever ran leaves nothing at all behind.
+  if [[ -d "$inst" ]]; then
+    {
+      printf '# Written by `boardctl remove`. This board is no longer declared.\n'
+      printf '# `boardctl forget %s` deletes this directory and everything in it.\n' "$name"
+      printf 'repo = %s\n' "$repo"
+      printf 'at = %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    } >"$inst/removed" || true
+  fi
   printf 'boardctl: board %s removed from %s\n' "$name" "$boards_toml"
-  printf 'boardctl: its runtime directory is untouched at %s\n' "$inst"
+  if [[ -d "$inst" ]]; then
+    printf 'boardctl: its runtime directory is untouched at %s\n' "$inst"
+    printf 'boardctl: `boardctl list` reports it as an orphan; `boardctl forget %s` deletes it\n' "$name"
+  fi
+}
+
+
+# cmd_forget <name> -- delete an UNDECLARED board's runtime directory.
+#
+# The deliberate act `remove`'s own comment names. It takes the card history,
+# ids.env, the stamps and the scratch under tmp/ with it, which is why nothing
+# else on this machine ever deletes that directory.
+#
+# REFUSES A DECLARED BOARD, by name. Deleting a live board's history mid-flight
+# would leave every card in it unaccounted for on the next tick, and `remove`
+# is one word away on the keyboard.
+cmd_forget() {
+  [[ $# -eq 1 ]] || usage
+  local name="$1"
+  validate_name "$name"
+  if raw_board_declared "$name"; then
+    die "board $name is still declared in $boards_toml; remove it first"
+  fi
+  local inst; inst="$(instance_home "$name")"
+  [[ -d "$inst" ]] || die "no runtime directory for '$name' at $inst"
+
+  # Named before it goes, because this is not recoverable and the line is the
+  # only record an operator gets.
+  local repo; repo="$(removed_repo "$name")"
+  local cards=0
+  [[ -d "$inst/cards" ]] && cards="$(find "$inst/cards" -mindepth 1 -maxdepth 1 -type d | wc -l | tr -d ' ')"
+  rm -rf "$inst"
+  printf 'boardctl: forgot %s -- deleted %s (%s card %s)\n' \
+    "$name" "$inst" "$cards" "$([[ "$cards" == 1 ]] && printf history || printf histories)"
+  if [[ -n "$repo" ]]; then
+    printf 'boardctl: it built in %s; anything of its own still there is not reachable from here\n' "$repo"
+  fi
 }
 
 cmd_list() {
@@ -288,6 +442,19 @@ cmd_list() {
   local name
   for name in ${fields[@]+"${fields[@]}"}; do
     printf '%s\t%s\n' "$name" "$(board_repo "$name")"
+  done | sort
+
+  # ORPHANS AFTER THE ROSTER, and only when there are any. They are not boards
+  # -- nothing dispatches into them and the machine ceiling does not count them
+  # -- but they are this command's to surface, because it is the only one that
+  # reads the whole of instances/ and they are otherwise invisible.
+  orphan_names
+  [[ ${#fields[@]} -gt 0 ]] || return 0
+  printf '\norphaned runtime directories (no declaration; `boardctl forget <name>` deletes one):\n'
+  local repo
+  for name in "${fields[@]}"; do
+    repo="$(removed_repo "$name")"
+    printf '%s\t%s\n' "$name" "${repo:-repository unrecorded}"
   done | sort
 }
 
@@ -349,6 +516,7 @@ cmd="$1"; shift
 case "$cmd" in
   add) cmd_add "$@" ;;
   remove) cmd_remove "$@" ;;
+  forget) cmd_forget "$@" ;;
   list) cmd_list "$@" ;;
   status) cmd_status "$@" ;;
   halt) cmd_halt "$@" ;;

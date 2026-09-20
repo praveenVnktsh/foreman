@@ -53,7 +53,7 @@ SRC="$INSTALL_ROOT/skills"
 # harness this clone does not run. FOREMAN_HOME is left alone -- installation.py
 # reads it itself to pick the home it answers for, which is how a test points
 # this at a temporary directory.
-unset HARNESS INSTALLATION IS_DEFAULT FOREMAN_ROOT
+unset HARNESS FOREMAN_ROOT
 _foreman_load_pairs "foreman's declaration" "$INSTALL_ROOT/bin/installation.py" \
   || die "installation.py could not read foreman's declaration"
 [[ -n "$HARNESS" ]] || die "installation.py did not report a harness"
@@ -65,7 +65,7 @@ DEST="$("$HARNESS_SH" skills-dir)"
 [[ -n "$DEST" ]] || die "$HARNESS_SH skills-dir printed nothing"
 
 # WHERE THE MANIFEST LIVES, AND WHY IT IS NOT THE OBVIOUS PLACE. The manifest
-# describes an INSTALLATION, so it belongs with foreman's own state.
+# describes this foreman, so it belongs with foreman's own state.
 # It does not belong at either end of the link, and both mistakes are on record.
 #
 #   * Not `$DEST/<name>/`. That path is a SYMLINK into $SRC, so writing "the

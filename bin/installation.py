@@ -2,25 +2,21 @@
 """Read foreman's declaration and print it for shell consumers.
 
     installation.py                  this home's keys
-    installation.py --siblings       foreman, and nothing else
     installation.py --write --harness codex [--model-tick M] ...
     installation.py [--home <path>] ...   read <path> instead of this home
 
-Emits NUL-separated KEY, VALUE pairs on stdout: INSTALLATION, HARNESS,
-IS_DEFAULT, LEGACY_NAMES, FOREMAN_HOME, FOREMAN_ROOT, TICK_MODEL, PLAN_MODEL,
-BUILD_MODEL, REVIEW_MODEL, FALLBACK_TIERS, FALLBACK_COOLDOWN_MINUTES,
-PLAN_FLOOR, BUILD_FLOOR, REVIEW_FLOOR. Consumers count fields to detect a
-failed load, so
+Emits NUL-separated KEY, VALUE pairs on stdout: HARNESS, FOREMAN_HOME,
+FOREMAN_ROOT, TICK_MODEL, PLAN_MODEL, BUILD_MODEL, REVIEW_MODEL,
+FALLBACK_TIERS, FALLBACK_COOLDOWN_MINUTES, PLAN_FLOOR, BUILD_FLOOR,
+REVIEW_FLOOR. Consumers count fields to detect a failed load, so
 EVERY key is always emitted -- this file follows bin/boards.py in structure,
 wire format and refusal style, and boards.py's docstring gives the reasoning
 behind all three.
 
-THERE IS ONE FOREMAN. ~/.foreman is the installation: the clone sits at
-~/.foreman/install and ~/.foreman/foreman.toml declares the harness, the stage
-models and the fallback tiers. The three keys INSTALLATION, IS_DEFAULT and
-LEGACY_NAMES are emitted as constants ("foreman", true, true) so a reader that
-still asks gets the single, installation-free answer; names carry no
-installation segment.
+THERE IS ONE FOREMAN, AND NOTHING NAMES IT. ~/.foreman is that foreman: the
+clone sits at ~/.foreman/install and ~/.foreman/foreman.toml declares the
+harness, the stage models and the fallback tiers. Nothing here emits a name
+for it, and no agent name, branch, worktree or evidence ref carries one.
 
 PARSED, NEVER SOURCED, for the reason bin/contract.py gives: foreman shares a
 user and a machine with the target repositories, so a config that can run code
@@ -37,12 +33,12 @@ import os
 import sys
 import tomllib
 
-# ONE FOREMAN. The machine root ~/.foreman IS the installation: the clone sits
-# at ~/.foreman/install and ~/.foreman/foreman.toml declares the harness, the
-# stage models and the fallback tiers. There is no installation name, no default
-# and no siblings -- a card belongs to foreman and its board decides the repo.
+# ONE FOREMAN. The machine root ~/.foreman IS foreman: the clone sits at
+# ~/.foreman/install and ~/.foreman/foreman.toml declares the harness, the
+# stage models and the fallback tiers. There is no installation name, no
+# default and no siblings -- a card belongs to foreman and its board decides
+# the repo.
 CONFIG_FILE = "foreman.toml"
-FOREMAN = "foreman"
 
 # The three harnesses skills/board/harness/<harness>.sh implements. A fourth
 # name is a typo until an adapter exists for it, and the failure would be a
@@ -100,13 +96,12 @@ def install_root() -> str:
 
 
 def foreman_home() -> str:
-    """This installation's home: $FOREMAN_HOME, else the parent of the clone.
+    """foreman's home: $FOREMAN_HOME, else the parent of the clone.
 
-    IDENTITY COMES FROM THE PATH. A clone at ~/.foreman/codex/install belongs
-    to the installation `codex` because of where it sits, and nothing inside
-    the clone may disagree -- the clone is the same git checkout in every
-    installation on the machine, so a name written into it would be the same
-    name for all of them.
+    IDENTITY COMES FROM THE PATH. A clone at ~/.foreman/install belongs to the
+    home ~/.foreman because of where it sits, and nothing inside the clone may
+    disagree -- the clone is the same git checkout wherever it is put, so a
+    home written into it would answer for a directory it is not in.
 
     Empty counts as unset, matching config.sh's `${FOREMAN_HOME:-...}`. Tests
     point this at a temporary directory; nothing here may touch the real one.
@@ -122,7 +117,7 @@ def absolute(path: str, what: str) -> str:
 
     A relative home would resolve against the caller's working directory,
     which differs between a tick, a sweep and an operator's shell, so the same
-    argument would name three different installations.
+    argument would name three different homes.
     """
     expanded = os.path.expanduser(path)
     if not os.path.isabs(expanded):
@@ -148,7 +143,7 @@ def load_toml(path: str) -> dict:
     except FileNotFoundError:
         die(f"no installation declaration at {path}")
     except IsADirectoryError:
-        die(f"{path} is a directory, not an {INSTALLATION_FILE}")
+        die(f"{path} is a directory; {CONFIG_FILE} must be a file")
     except tomllib.TOMLDecodeError as exc:
         die(f"{path} is not valid TOML: {exc}")
     except OSError as exc:
@@ -286,17 +281,27 @@ def record(home: str) -> list[str]:
 
     The harness, models and fallback tiers come from `<home>/foreman.toml` when
     it exists, and from Claude's defaults when it does not -- so a bare
-    `~/.foreman/install` clone still answers. Nothing here names a second
-    installation, checks a default, or lists a sibling.
+    `~/.foreman/install` clone still answers.
+
+    ANYTHING AT THAT PATH IS A DECLARATION. `os.path.lexists` and not
+    `os.path.isfile`: a directory, a dangling symlink or a device named
+    foreman.toml is not "no declaration", it is a declaration this loader
+    cannot read, and load_toml refuses each -- by name for a directory, as
+    FileNotFoundError for a symlink pointing nowhere. isfile answered False
+    for all of them and fell through to Claude's defaults: the silent degrade
+    this module's docstring exists to refuse, spending the wrong subscription
+    on every card while the operator believes their file is being read.
+    lexists, not exists, so the broken symlink is refused rather than joining
+    them.
     """
     path = os.path.join(home, CONFIG_FILE)
-    if os.path.isfile(path):
+    if os.path.lexists(path):
         harness, models, fallback = parse_config(path)
     else:
         harness = CLAUDE
         models = dict(CLAUDE_MODELS)
         fallback = resolve_fallback(path, CLAUDE, models, None)
-    return fields(FOREMAN, harness, home, models, fallback)
+    return fields(harness, home, models, fallback)
 
 
 def parse_config(path: str) -> tuple[str, dict, dict]:
@@ -326,17 +331,11 @@ def parse_config(path: str) -> tuple[str, dict, dict]:
     return harness, models, fallback
 
 
-def fields(name: str, harness: str, home: str, models: dict, fallback: dict) -> list[str]:
-    # INSTALLATION is always "foreman", IS_DEFAULT always true and LEGACY_NAMES
-    # always set, so names carry no installation segment. They stay in the wire
-    # format for readers that still ask; there is nothing else they could be.
+def fields(harness: str, home: str, models: dict, fallback: dict) -> list[str]:
     # FALLBACK_TIERS "" means fallback is off; a *_FLOOR "" means the stage may
     # fall to the bottom of the tiers.
     return [
-        "INSTALLATION", name,
         "HARNESS", harness,
-        "IS_DEFAULT", "1",
-        "LEGACY_NAMES", "1",
         "FOREMAN_HOME", home,
         "FOREMAN_ROOT", home,
         "TICK_MODEL", models["tick"],
@@ -428,12 +427,11 @@ def emit(out: list[str]) -> None:
 
 def usage() -> None:
     die("usage: installation.py [--home <path>] "
-        "[--siblings | --write --harness <name> [--model-<stage> <model>] [--dry-run]]")
+        "[--write --harness <name> [--model-<stage> <model>] [--dry-run]]")
 
 
 def main(argv: list[str]) -> int:
     home = None
-    want_siblings = False
     want_write = False
     harness = None
     dry_run = False
@@ -454,16 +452,12 @@ def main(argv: list[str]) -> int:
             harness = value_for(arg)
         elif arg in MODEL_FLAGS:
             models[MODEL_FLAGS[arg]] = value_for(arg)
-        elif arg == "--siblings":
-            want_siblings = True
         elif arg == "--write":
             want_write = True
         elif arg == "--dry-run":
             dry_run = True
         else:
             usage()
-    if want_siblings and want_write:
-        usage()
 
     if home is None:
         home = os.path.normpath(foreman_home())
@@ -476,13 +470,7 @@ def main(argv: list[str]) -> int:
     if harness is not None or models or dry_run:
         die("--harness, --model-<stage> and --dry-run are only for --write")
 
-    if not want_siblings:
-        emit(record(home))
-        return 0
-    # There is one foreman. `--siblings` answers with it and nothing else, so a
-    # caller that still asks -- the tick composing queue.py's arguments -- gets
-    # the single, installation-free answer.
-    emit([FOREMAN, home])
+    emit(record(home))
     return 0
 
 

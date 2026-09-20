@@ -105,8 +105,8 @@ printf '[boards.demo]\nrepo = "%s"\n' "$target" >"$foreman_home/boards.toml"
 # home as the parent of the clone, so this also proves the derivation lands on
 # the home SKILL.md's paths describe, where boards.toml lives.
 if out="$(env -u FOREMAN_HOME FOREMAN_INSTANCE=demo bash -c \
-     ". '$install_root/skills/board/config.sh'; printf '%s|%s' \"\$TEST_COMMAND\" \"\$INSTALLATION\"" 2>&1)"; then
-  if [[ "$out" == "true|foreman" ]]; then
+     ". '$install_root/skills/board/config.sh'; printf '%s|%s' \"\$TEST_COMMAND\" \"\$HARNESS\"" 2>&1)"; then
+  if [[ "$out" == "true|claude" ]]; then
     ok "config.sh at the path SKILL.md now names finds bin/contract.py and loads the target's contract"
   else
     bad "config.sh loaded but produced the wrong value: $out"

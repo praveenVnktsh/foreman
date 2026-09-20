@@ -95,7 +95,7 @@ BLOCKS_RELATION = "blocks"
 DISPATCHABLE_MAIN = frozenset({"green", "running"})
 
 CONFIG_KEYS = (
-    "INSTANCE", "INSTALLATION", "IS_DEFAULT", "KEY_FILE",
+    "INSTANCE", "KEY_FILE",
     "MAX_CONCURRENT", "HOST_MAX_CONCURRENT", "LINEAR_PROJECT_ID", "STATE_TO_PICK_UP",
 )
 # Written by bin/resolve-ids.py into ids.env. config.sh reads that file
@@ -382,11 +382,12 @@ def slots_held(config: dict[str, str], board: str) -> int:
     done = run([RECONCILE_PY, "--host-slots"], "reconcile.py --host-slots")
     if done.returncode != 0:
         raise NoVerdict(f"reconcile.py --host-slots exited {done.returncode}")
-    key = f"{config['INSTALLATION']}/{board}"
+    # The BARE board name: `--host-slots` keys by it, and dispatch.sh reads it
+    # the same way. There is one foreman, so nothing else can answer to it.
     try:
-        tickets = json.loads(done.stdout)["tickets"][key]
+        tickets = json.loads(done.stdout)["tickets"][board]
     except (json.JSONDecodeError, KeyError, TypeError) as exc:
-        raise NoVerdict(f"reconcile.py --host-slots named no tickets for {key}: {exc!r}") from exc
+        raise NoVerdict(f"reconcile.py --host-slots named no tickets for {board}: {exc!r}") from exc
     return len(tickets)
 
 

@@ -52,6 +52,33 @@ dispatched agent is parented to the harness's own daemon rather than to the
 tick, and the tick holds no state, so the replacement re-derives every card's
 position from Linear, `gh` and `git`.
 
+## Retiring a board
+
+`boardctl remove <name>` drops the `[boards.<name>]` block, and that block is
+the only record of which repository the board built in. Everything that could
+reap the board's leftovers — `sweep.sh` above all — refuses a board that is not
+declared, so anything still in the target repository when the block goes is
+stranded there for good.
+
+`remove` therefore refuses while that repository still holds the board's
+worktrees or evidence refs, and names them:
+
+    FOREMAN_INSTANCE=myproject ~/.foreman/install/skills/board/sweep.sh --orphans
+    ~/.foreman/install/bin/boardctl remove myproject
+
+`--force` removes anyway, for a repository that is already gone.
+
+The runtime directory `instances/<name>/` — card history, `ids.env`, the halt
+file, the scratch under `tmp/` — deliberately survives, so removing a board
+never costs its history by accident. `remove` records the repository it built in
+at `instances/<name>/removed`, and `boardctl list` reports it below the roster
+as an **orphan**: a runtime directory no declaration mentions.
+
+    boardctl forget <name>
+
+deletes it, and everything in it. That is the deliberate act; it refuses a board
+that is still declared.
+
 ## Rate-limit fallback
 
 A stage whose model is rate-limited falls back to the next tier down and keeps
@@ -90,8 +117,14 @@ is why it no longer does.
   fall all the way to the bottom of `tiers`. A floor must name a model in
   `tiers`, and it must sit at or below the stage's own model in that list;
   fallback only walks down, so a floor above the stage's model would never be
-  reached and `install.sh` refuses it. The cleanup stage shares the plan
-  stage's floor, because it shares its model.
+  reached and foreman refuses to load a `foreman.toml` that declares one. The
+  cleanup stage shares the plan stage's floor, because it shares its model.
+
+`install.sh` writes neither `tiers` nor `[fallback.floor]` — it takes only
+`--harness` and the four `--model-<stage>` flags. Both tables are hand-edited
+into `foreman.toml`, and every rule above is checked when that file is READ, so
+a floor nothing could reach stops the next command that loads the declaration
+rather than waiting for a rate limit to expose it.
 
 While a model is rate-limited, the stage runs on the strongest tier below it
 that is not, and the card's history and its Linear comment say which model was

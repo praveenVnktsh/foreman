@@ -118,14 +118,14 @@
 # world-readable file. It goes in a file this adapter creates at 0600 before
 # any content is written to it.
 #
-# That file is `$CODEX_HOME/foreman-<installation>.config.toml`. Writing under
-# the operator's CODEX_HOME is acceptable here where rewriting their
-# `config.toml` was not: the profile is additive (codex reads it only when
-# `--profile-v2` names it, so the operator's own sessions never see it),
-# foreman-owned (the `foreman-` prefix and the installation name make it ours
-# and no one else's), and deterministic (one file per installation, overwritten
-# by each spawn, so nothing accumulates). `config.toml`, by contrast, is read
-# by every Codex session on the machine and is the operator's to edit.
+# That file is `$CODEX_HOME/foreman.config.toml`. Writing under the operator's
+# CODEX_HOME is acceptable here where rewriting their `config.toml` was not:
+# the profile is additive (codex reads it only when `--profile-v2` names it, so
+# the operator's own sessions never see it), foreman-owned (the `foreman`
+# name makes it ours and no one else's), and deterministic (there is one
+# foreman, so one file, overwritten by each spawn and never accumulating).
+# `config.toml`, by contrast, is read by every Codex session on the machine and
+# is the operator's to edit.
 set -euo pipefail
 
 _CODEX_SH_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -133,23 +133,15 @@ _CODEX_SH_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$_CODEX_SH_DIR/detached.sh"
 detached_adapter codex "${BASH_SOURCE[0]}"
 
-# The profile file is named for the installation, so two installations on one
-# machine cannot overwrite each other's MCP config mid-spawn.
+# ONE FOREMAN, SO ONE PROFILE. The name used to carry an installation segment
+# so two installations on one machine could not overwrite each other's MCP
+# config mid-spawn; there is one foreman now, so the constant IS the name.
 #
-# `$INSTALLATION` is what config.sh exports; it is NOT re-derived from a path
-# here. installation.py owns that derivation, and a second copy of it agrees
-# only until one of them is edited. An unset value is refused rather than
-# guessed: the guess would write one installation's credential into another's
-# profile.
+# A literal and not a variable: this becomes a FILENAME under the operator's
+# CODEX_HOME, and the reason the old code validated the segment's shape was
+# that a name holding `/` or `..` would write outside it. A constant cannot.
 _codex_profile_name() {
-  [[ -n "${INSTALLATION:-}" ]] \
-    || die "INSTALLATION is unset; config.sh exports it, and this adapter will not guess which installation's MCP config to write"
-  # The same rule installation.py enforces on a name, enforced again because
-  # here the name becomes a FILENAME under the operator's CODEX_HOME. A name
-  # holding `/` or `..` would write outside it.
-  [[ "$INSTALLATION" =~ ^[A-Za-z0-9_]+$ ]] \
-    || die "INSTALLATION '$INSTALLATION' is not a name: letters, digits and underscore only"
-  printf 'foreman-%s' "$INSTALLATION"
+  printf 'foreman'
 }
 
 _codex_home_dir() {

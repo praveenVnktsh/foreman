@@ -44,11 +44,11 @@ done
 . "$root/bin/load-pairs.sh" || die "cannot read $root/bin/load-pairs.sh"
 
 # What this clone just declared, never what the operator's shell says: the
-# reader lets the environment win, so a stray INSTALLATION would make the line
-# below describe a home nobody wrote. FOREMAN_HOME is left alone --
+# reader lets the environment win, so a stray HARNESS would make the line
+# below describe a foreman nobody wrote. FOREMAN_HOME is left alone --
 # installation.py reads it itself to pick the home it answers for, and clearing
 # it here would read a different one than --write wrote.
-unset INSTALLATION IS_DEFAULT HARNESS FOREMAN_ROOT
+unset HARNESS FOREMAN_ROOT
 _foreman_load_pairs "foreman's declaration" "$installation_py" \
   || die "installation.py cannot read what it just wrote"
 
