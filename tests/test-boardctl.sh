@@ -180,7 +180,12 @@ printf 'history\n' >"$home6/instances/drop/cards/note"
 
 run "$home6" remove drop >"$work_dir/rm1.out" 2>"$work_dir/rm1.err"
 listing6="$(run "$home6" list)"
-if [[ "$listing6" == *"keep"* ]] && [[ "$listing6" != *"drop"* ]] \
+# The ROSTER is everything above the orphan heading. `drop` must be gone from
+# it -- and must appear BELOW it, because its runtime directory survives the
+# removal and `list` is what makes that visible.
+roster6="$(printf '%s\n' "$listing6" | sed -n '1,/orphaned runtime directories/p')"
+if [[ "$roster6" == *"keep"* ]] && [[ "$roster6" != *"drop	"* ]] \
+    && [[ "$listing6" == *"orphaned runtime directories"* ]] \
     && [[ -f "$home6/instances/drop/cards/note" ]] \
     && grep -q "$home6/instances/drop" "$work_dir/rm1.out"; then
   ok "remove deletes one board's table and leaves its runtime directory alone"
@@ -422,6 +427,110 @@ for bad_priority in -1 x; do
     not_ok "--priority $bad_priority is refused and boards.toml is left byte-identical: status=$status err=$(cat "$work_dir/prio-bad.err")"
   fi
 done
+
+# =============================================================================
+# Case: an orphan -- a runtime directory with no declaration
+#
+# `remove` leaves the directory behind on purpose (card history is not lost by
+# accident), which used to make it invisible: `list` showed declared boards
+# only and `status` refused the name. Prove `list` reports it, `forget` deletes
+# it, and `forget` refuses a board that is still declared.
+#
+# And prove `remove` REFUSES while the target repository still holds that
+# board's worktrees or evidence refs. Once the declaration is gone, config.sh
+# refuses the name and sweep.sh refuses with it, so those are stranded for
+# good; the refusal is what keeps the operator's one chance to sweep.
+# =============================================================================
+home_orphan="$(new_home)"
+target_orphan="$(new_target)"
+git -C "$target_orphan" init -q -b main
+git -C "$target_orphan" commit -q --allow-empty -m seed
+
+run "$home_orphan" add ghost --repo "$target_orphan" >/dev/null
+mkdir -p "$home_orphan/instances/ghost/cards/PRA-1"
+
+# A worktree and an evidence ref, the two things sweep.sh reaps and boardctl
+# cannot.
+mkdir -p "$target_orphan/.claude/worktrees/foreman-ghost-PRA-1"
+git -C "$target_orphan" update-ref refs/foreman/ghost/evidence/4242 HEAD
+
+status=0
+run "$home_orphan" remove ghost >/dev/null 2>"$work_dir/orphan-refuse.err" || status=$?
+refusal="$(cat "$work_dir/orphan-refuse.err")"
+if [[ $status -ne 0 ]] \
+   && [[ "$refusal" == *"foreman-ghost-PRA-1"* ]] \
+   && [[ "$refusal" == *"refs/foreman/ghost/evidence/4242"* ]] \
+   && [[ "$refusal" == *"sweep.sh --orphans"* ]]; then
+  ok "remove refuses while the repo still holds the board's worktrees and evidence refs"
+else
+  not_ok "remove refuses while the repo still holds the board's worktrees and evidence refs: status=$status err=$refusal"
+fi
+
+if grep -qxF '[boards.ghost]' "$home_orphan/boards.toml"; then
+  ok "the refused remove left the declaration in place"
+else
+  not_ok "the refused remove deleted the declaration anyway"
+fi
+
+# --force is for the repository that is already gone.
+status=0
+run "$home_orphan" remove ghost --force >/dev/null 2>"$work_dir/orphan-force.err" || status=$?
+if [[ $status -eq 0 ]] && ! grep -qxF '[boards.ghost]' "$home_orphan/boards.toml"; then
+  ok "remove --force removes the declaration over stranded state"
+else
+  not_ok "remove --force removes the declaration over stranded state: status=$status err=$(cat "$work_dir/orphan-force.err")"
+fi
+
+# The orphan is self-describing: the repository path the declaration carried is
+# the only record of where it built, so remove writes it down on the way out.
+if [[ -f "$home_orphan/instances/ghost/removed" ]] \
+   && grep -qxF "repo = $target_orphan" "$home_orphan/instances/ghost/removed"; then
+  ok "remove records the repository in the orphan it leaves behind"
+else
+  not_ok "remove records the repository in the orphan it leaves behind"
+fi
+
+listing="$(run "$home_orphan" list)"
+if [[ "$listing" == *"orphaned runtime directories"* ]] \
+   && [[ "$listing" == *"ghost"* ]] \
+   && [[ "$listing" == *"$target_orphan"* ]]; then
+  ok "list reports the orphan and the repository it built in"
+else
+  not_ok "list reports the orphan and the repository it built in: $listing"
+fi
+
+# A declared board is never forgotten by this command: `remove` is one word
+# away, and deleting a live board's history strands every card in it.
+run "$home_orphan" add live --repo "$(new_target)" >/dev/null
+status=0
+run "$home_orphan" forget live >/dev/null 2>"$work_dir/forget-live.err" || status=$?
+if [[ $status -ne 0 ]] && [[ "$(cat "$work_dir/forget-live.err")" == *"still declared"* ]]; then
+  ok "forget refuses a board that is still declared"
+else
+  not_ok "forget refuses a board that is still declared: status=$status err=$(cat "$work_dir/forget-live.err")"
+fi
+
+status=0
+run "$home_orphan" forget ghost >"$work_dir/forget.out" 2>&1 || status=$?
+if [[ $status -eq 0 ]] && [[ ! -d "$home_orphan/instances/ghost" ]]; then
+  ok "forget deletes the orphan's runtime directory"
+else
+  not_ok "forget deletes the orphan's runtime directory: status=$status out=$(cat "$work_dir/forget.out")"
+fi
+
+if [[ "$(run "$home_orphan" list)" != *"orphaned runtime directories"* ]]; then
+  ok "list reports no orphans once the last one is forgotten"
+else
+  not_ok "list still reports an orphan after forget"
+fi
+
+status=0
+run "$home_orphan" forget ghost >/dev/null 2>"$work_dir/forget-gone.err" || status=$?
+if [[ $status -ne 0 ]] && [[ "$(cat "$work_dir/forget-gone.err")" == *"no runtime directory"* ]]; then
+  ok "forget refuses a name with no runtime directory at all"
+else
+  not_ok "forget refuses a name with no runtime directory at all: status=$status"
+fi
 
 if [[ $fail -eq 0 ]]; then
   printf '\nPASS\n'

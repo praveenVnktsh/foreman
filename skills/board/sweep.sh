@@ -3,7 +3,7 @@
 #
 #   sweep.sh ABC-42 ABC-43        # tickets that are terminal; their idle agents
 #                                 # are stopped, and their trees and sessions go
-#   sweep.sh --orphans            # board-* trees with no live agent
+#   sweep.sh --orphans            # this board's trees with no live agent
 #
 # Either way it also reaps `refs/$BOARD_NAME_PREFIX/evidence/<pid>` refs left behind by an
 # `evidence.sh` that was killed mid-read. Nothing else in the board touches that

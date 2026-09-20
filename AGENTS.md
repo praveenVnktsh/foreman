@@ -55,6 +55,7 @@
 | Order this machine's boards for one pass | `skills/board/reconcile.py --board-order` | the name order `bin/boards.py --list` prints |
 | Record that a board's slice reached it | `skills/board/reconcile.py --served <board>` | assuming `history.jsonl` shows it; an idle slice writes nothing |
 | Manage a board | `bin/boardctl add\|list\|status\|halt\|resume` | editing `boards.toml` by hand |
+| Retire a board | `bin/boardctl remove` (sweep its worktrees first), then `forget` to delete its runtime directory | deleting `instances/<board>/` by hand; `list` is what surfaces an orphan |
 | Write foreman's config | `bin/install.sh --harness H ...` | writing `foreman.toml` by hand |
 | Change a stage's model or its fallback | `foreman.toml` `[models]` and `[fallback]` (a tier is `model` or `harness:model`) | editing `config.sh`; it reads the declaration |
 | See every live agent, across harnesses | `"$HARNESS_SH" list` (`skills/board/harness/registry.sh`) | one harness's adapter, which sees only its own registry |
