@@ -238,6 +238,24 @@ One tick now sees every board, so the machine ceiling is yours to hold directly
 rather than something several ticks each estimated separately. Check it in
 step 6, before every dispatch, on top of that board's own free-slot count.
 
+**A board's share of the machine is reserved only while it is asking for work.**
+`reconcile.py --may-dispatch` gives each board a floor — its priority's share of
+`HOST_MAX_CONCURRENT`, never below 1 — but counts that floor against the other
+boards only when the board has asked for a slot within `DEMAND_STALE_MINUTES`.
+`dispatch.sh` records the ask, so nothing in a pass has to remember to.
+
+- **An idle board reserves nothing**, so one board with a full `Todo` column may
+  take the whole machine. Measured 2026-09-20 on a machine serving four boards
+  at priority 2 with `HOST_MAX_CONCURRENT=10`: every board had a floor of 2, so
+  the only board with work could never exceed 4 of 10 while the other three sat
+  idle.
+- **A board that starts asking waits for a card to finish.** Nothing is
+  preempted. What its floor buys it is the next slot to free, ahead of the busy
+  board that would otherwise refill it.
+- **A board this tick stops reading is a board that stops asking**, and its
+  floor goes with it. Local state cannot tell that apart from an empty column,
+  which is why `starved.py` reads Linear itself, from outside the tick.
+
 ## Config
 
 `config.sh` holds every knob; each is overridable by an env var of the same name.
@@ -260,6 +278,7 @@ table says what each knob *means* and `config.sh` says what it *is*:
     CLEANUP_MAX_PLAN_NODES "$CLEANUP_MAX_PLAN_NODES" \
     HOST_MAX_CONCURRENT "$HOST_MAX_CONCURRENT" \
     HOST_SLOT_STALE_MINUTES "$HOST_SLOT_STALE_MINUTES" \
+    DEMAND_STALE_MINUTES "$DEMAND_STALE_MINUTES" \
     PLAN_MODEL "$PLAN_MODEL" BUILD_MODEL "$BUILD_MODEL" REVIEW_MODEL "$REVIEW_MODEL" \
     CLEANUP_MODEL "$CLEANUP_MODEL" \
     FALLBACK_TIERS "$FALLBACK_TIERS" FALLBACK_COOLDOWN_MINUTES "$FALLBACK_COOLDOWN_MINUTES" \
@@ -286,6 +305,7 @@ A number carried from one slice into the next is the previous board's answer.
 | `MIN_FREE_*`, `PROBE_*`, `QUICK_PROBE_MB` | environment thresholds enforced by `preflight.py` — declared per-target in `board.toml`'s `[limits]`, not here. **foreman's own defaults are sized for foreman's own cheap suite**; a target with a heavy build (a real test suite, a large `node_modules`, …) that declares no `[limits]` silently inherits them and can pass this preflight while still dying mid-build the way two consecutive attempts on one card did on 2026-08-02 — see `bin/contract.py`. |
 | `HOST_MAX_CONCURRENT` | cards holding a slot, summed across **every** board on this machine |
 | `HOST_SLOT_STALE_MINUTES` | how long a card may go without a fresh `history.jsonl` entry before `--host-slots` stops counting it even with no `released` marker — a backstop, not the primary release mechanism |
+| `DEMAND_STALE_MINUTES` | how long a board's ask for a slot keeps its share of `HOST_MAX_CONCURRENT` reserved. Derived from `TICK_INTERVAL_MINUTES`, because the tick is what refreshes the ask — see *Two ceilings* |
 | `PLAN_MODEL`, `BUILD_MODEL`, `REVIEW_MODEL` | the model each dispatched role runs on — see *One model per stage* below |
 | `CLEANUP_MODEL` | the model the cleanup agent runs on, defaulting to `PLAN_MODEL` — same section |
 | `FALLBACK_TIERS`, `FALLBACK_COOLDOWN_MINUTES` | the models a rate-limited stage falls down through, strongest first, and how long a limit is believed — `foreman.toml` `[fallback]`, see *A rate-limited model* in step 2. A tier may name its harness (`opencode:foundry/gpt-5.6-sol`), so one tick falls back across CLIs and not only across models. Empty tiers turn fallback off |

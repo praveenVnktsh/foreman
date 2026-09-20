@@ -430,6 +430,25 @@ AGENT_SKIP_PERMISSIONS="${AGENT_SKIP_PERMISSIONS-1}"
 TICK_AGENT_NAME="foreman/tick"
 TICK_INTERVAL_MINUTES="${TICK_INTERVAL_MINUTES:-20}"
 
+# How long a board's ask for a slot -- `instances/<board>/wants-slot`, written by
+# `reconcile.py --wants-slot` -- keeps its floor reserved on this machine.
+#
+# WHY A BOARD HAS TO ASK. A floor used to be reserved for every declared board,
+# whether or not it had anything to build. Measured 2026-09-20 on a machine
+# serving four boards at priority 2 with HOST_MAX_CONCURRENT=10: each board had
+# a floor of 2, so the one board with a full Todo column could never exceed 4 of
+# 10 while the other three sat idle with empty columns. Capacity nobody could
+# use was reserved against the only board that wanted it.
+#
+# DERIVED FROM THE TICK INTERVAL, not stated. The stamp is refreshed by the
+# tick, once per pass, for as long as a board still has a card waiting. A window
+# shorter than TICK_INTERVAL_MINUTES would expire between two passes of a
+# healthy tick, so a board with work waiting would lose its floor and get it
+# back on alternate passes. Three intervals leaves room for a pass that runs
+# late without ever reading a busy board as idle. An operator who slows the tick
+# therefore widens this too, instead of silently breaking every floor.
+DEMAND_STALE_MINUTES="${DEMAND_STALE_MINUTES:-$((TICK_INTERVAL_MINUTES * 3))}"
+
 # Wedged: mid-turn and silent. A tick genuinely working is never quiet this long.
 TICK_STALL_MINUTES="${TICK_STALL_MINUTES:-45}"
 # Loop dead: idle between ticks for longer than the interval can explain, which

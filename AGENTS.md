@@ -56,6 +56,7 @@
 | See the whole machine at once | `skills/board/reconcile.py --overview` (add `--with-remote` for main's CI) | asking Linear, `gh` or the registry yourself; the overview is local-file-only so a browser can poll it |
 | Watch a board from another device | `bin/install-dashboard.sh`, then publish it (`tailscale serve`) | a second reader of `boards.toml` or `instances/`; `bin/dashboard.py` derives nothing |
 | Record that a board's slice reached it | `skills/board/reconcile.py --served <board>` | assuming `history.jsonl` shows it; an idle slice writes nothing |
+| Record that a board wants a slot, so its share of the machine is reserved | `skills/board/reconcile.py --wants-slot <board>` (`dispatch.sh` already does it) | leaving it unsaid; a board that never asks reserves nothing |
 | Manage a board | `bin/boardctl add\|list\|status\|halt\|resume` | editing `boards.toml` by hand |
 | Retire a board | `bin/boardctl remove` (sweep its worktrees first), then `forget` to delete its runtime directory | deleting `instances/<board>/` by hand; `list` is what surfaces an orphan |
 | Write foreman's config | `bin/install.sh --harness H ...` | writing `foreman.toml` by hand |

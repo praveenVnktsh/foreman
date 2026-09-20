@@ -45,7 +45,8 @@ def _load_config() -> dict[str, str]:
         "REPO", "BOARD_HOME", "REQUIRED_CHECKS", "HIGH_RISK_PATHS",
         "DEPLOY_WORKFLOW", "DEPLOY_STEP", "DEPLOY_SELECTION_STEP", "CI_WORKFLOW",
         "INSTANCE",
-        "FOREMAN_HOME", "HOST_SLOT_STALE_MINUTES", "HARNESS_SH", "TICK_AGENT_NAME",
+        "FOREMAN_HOME", "HOST_SLOT_STALE_MINUTES", "DEMAND_STALE_MINUTES",
+        "HARNESS_SH", "TICK_AGENT_NAME",
         "FOREMAN_DEFAULT_HARNESS", "FOREMAN_HARNESSES",
         "BOARD_NAME_PREFIX", "BOARD_WORKTREE_PREFIX",
         "CLEANUP_EVERY_DAYS", "MAX_CONCURRENT", "REVIEWERS_PER_ROUND",
@@ -128,6 +129,18 @@ TICK_AGENT_NAME = _CFG["TICK_AGENT_NAME"]
 # real, supported value and not just an unset-variable accident.
 HOST_SLOT_STALE_MINUTES = (
     float(_CFG["HOST_SLOT_STALE_MINUTES"]) if _CFG["HOST_SLOT_STALE_MINUTES"] else None
+)
+# How long a board's ask for a slot keeps its floor reserved. config.sh derives
+# it from TICK_INTERVAL_MINUTES and says why.
+#
+# EMPTY IS NOT "disabled" here, unlike HOST_SLOT_STALE_MINUTES above. Disabling
+# the window would make every ask permanent, so the first board ever to ask
+# would hold its floor for the life of the machine -- the opposite of what an
+# operator clearing a staleness setting expects. An unreadable value falls back
+# to the same three-interval default config.sh states, because refusing a
+# machine-wide dispatch question over one unset knob would stop every board.
+DEMAND_STALE_MINUTES = (
+    float(_CFG["DEMAND_STALE_MINUTES"]) if _CFG["DEMAND_STALE_MINUTES"] else 60.0
 )
 
 
@@ -1222,23 +1235,44 @@ def dispatch_verdict(board: str, host_max: int,
     no work.
 
     THE RULE. Each board earns a FLOOR: its share of the ceiling, never below 1
-    for any declared board, so nothing with a priority is ever starved.
+    for any declared board, so no board that is asking for work is starved.
 
         floor(b)     = max(1, host_max * priority(b) / sum of priorities)
         available(b) = host_max - total_held
-                       - sum over other boards j of max(0, floor(j) - held(j))
+                       - sum over other DEMANDING boards j of
+                             max(0, floor(j) - held(j))
 
     A board may dispatch when `available >= 1`. That lets it use capacity
     nobody is using, while reserving what other boards are still owed.
 
-    Worked example, which the test pins: host_max 4, two boards at priorities 3
-    and 1, so floors 3 and 1. With nothing held the first may take three and not
-    the fourth, because the second's floor is unmet. With the first holding
-    three, the second may still take its one.
+    A FLOOR IS RESERVED ONLY FOR A BOARD THAT IS ASKING -- `board_demands()`,
+    which reads the `wants-slot` stamp `dispatch.sh` writes. Measured 2026-09-20
+    on a machine serving four boards at priority 2 with host_max 10: every board
+    had a floor of 2, so the one board with a full Todo column could never
+    exceed 4 of 10 while the other three sat idle with empty columns. A floor
+    reserved for a board with nothing to build is capacity no board on the
+    machine can use.
 
-    Priority 0 means no floor: such a board takes only surplus. That is a way to
-    say "run this when nothing else needs the machine", and it is deliberately
-    expressible.
+    NOTHING IS PREEMPTED to honour a floor that arrives late. A board that
+    starts asking while another holds every slot waits for a card to finish,
+    because foreman never kills a card to make room. What the floor still buys
+    it is the NEXT slot to free rather than a place at the back of a queue the
+    busy board keeps refilling.
+
+    `board_demands()` is asked only about the OTHER boards. A board's own ask
+    never gates its own dispatch: the stamp is written by the same run that
+    then asks this question, and reading it here would still make a board's
+    first ever dispatch depend on a file that ask had to write first.
+
+    Worked example, which the test pins: host_max 4, two boards at priorities 3
+    and 1, so floors 3 and 1, with the second asking. With nothing held the
+    first may take three and not the fourth, because the second's floor is
+    unmet. With the first holding three, the second may still take its one. Let
+    the second stop asking and the first may have the fourth as well.
+
+    Priority 0 means no floor: such a board takes only surplus, asking or not.
+    That is a way to say "run this when nothing else needs the machine", and it
+    is deliberately expressible.
     """
     slots = host_slots(stale_minutes)
     held = slots.get("instances") or {}
@@ -1255,14 +1289,19 @@ def dispatch_verdict(board: str, host_max: int,
             floors[name] = 0
         else:
             floors[name] = max(1, (host_max * priority) // weight)
-    owed = sum(max(0, floors[j] - held.get(j, 0)) for j in priorities if j != board)
+    # One list, then its sum and its names. The refusal below has to name the
+    # same boards the arithmetic reserved for, or it explains a number nobody
+    # can reproduce from what it says.
+    reserved = sorted(j for j in priorities
+                      if j != board
+                      and floors[j] > held.get(j, 0)
+                      and board_demands(FOREMAN_HOME, j))
+    owed = sum(floors[j] - held.get(j, 0) for j in reserved)
     available = host_max - total - owed
     if available >= 1:
         return ""
     if total >= host_max:
         return f"this machine holds {total} of {host_max} slots across every board"
-    reserved = sorted(j for j in priorities
-                      if j != board and floors[j] > held.get(j, 0))
     return (f"{board} is at its share: {total} of {host_max} slots are held and "
             f"{owed} more {'is' if owed == 1 else 'are'} reserved for "
             f"{', '.join(reserved)}")
@@ -1342,6 +1381,9 @@ SERVED_STAMP = "last-served"
 # cleanup, so a second spelling of the name here would leave them deleting a
 # file nothing reads and waiting three days for the pass they just asked for.
 CLEANUP_STAMP = "last-cleanup"
+# A board's ask for a slot, read by `board_demands()` and written by
+# `mark_board_wants_slot()`. The same literal in both, for the reason above.
+WANTS_STAMP = "wants-slot"
 
 
 def _stamp_path(foreman_home: str, board: str, name: str) -> str:
@@ -1412,6 +1454,50 @@ def mark_board_served(foreman_home: str, board: str) -> None:
     them is fixed for both.
     """
     write_stamp(foreman_home, board, SERVED_STAMP)
+
+
+def mark_board_wants_slot(foreman_home: str, board: str) -> None:
+    """Record that `board` has a card it wants to start. Writes, returns nothing.
+
+    Written by `dispatch.sh` immediately before the ceiling gate, so it records
+    the ask and never the outcome. A board refused a slot is exactly the board
+    whose floor has to be reserved, and a board allowed one holds it a moment
+    later, so both readings are right.
+
+    `write_stamp()` does the writing, the same as `last-served` and
+    `last-cleanup`. One stamp file is one mechanism.
+    """
+    write_stamp(foreman_home, board, WANTS_STAMP)
+
+
+def board_demands(foreman_home: str, board: str,
+                  stale_minutes: float = DEMAND_STALE_MINUTES) -> bool:
+    """Is `board` asking for capacity right now? Reads, changes nothing.
+
+    True when `instances/<board>/wants-slot` was written within
+    `stale_minutes`. False for a board that never asked, stopped asking, or
+    whose stamp cannot be read.
+
+    FALSE IS THE CHEAP DIRECTION, deliberately. A board wrongly read as idle
+    loses its reservation and waits for a slot to free; a board wrongly read as
+    asking holds capacity away from the only board that can use it, which is
+    the failure this gate exists to remove. An unreadable stamp is therefore no
+    demand, the same way `read_stamp()` reads every unanswerable stamp as
+    never.
+
+    WHAT THIS GATE GAVE UP. The floor used to be a standing guarantee: a
+    declared board was owed capacity whether or not anything asked on its
+    behalf. It is now only as good as the tick that does the asking. The
+    2026-09-16 incident -- a tick that stayed alive but stopped reading one
+    board's Todo column -- therefore costs that board its floor too, and
+    another board absorbs the machine. Nothing in local state can tell that
+    apart from a board with an empty column, which is why `starved.py` reads
+    Linear itself, from outside the tick, and is the detector for it.
+    """
+    asked = read_stamp(foreman_home, board, WANTS_STAMP)
+    if asked is None:
+        return False
+    return (datetime.now(timezone.utc) - asked).total_seconds() / 60 <= stale_minutes
 
 
 def _served_stamp(foreman_home: str, board: str) -> datetime | None:
@@ -2703,6 +2789,7 @@ def main(argv: list[str]) -> int:
               "       reconcile.py --board-order\n"
               "       reconcile.py --overview [--with-remote]\n"
               "       reconcile.py --served <board>\n"
+              "       reconcile.py --wants-slot <board>\n"
               "       reconcile.py --may-dispatch <board>\n"
               "       reconcile.py --cleanup-due <board>\n"
               "       reconcile.py --cleanup-since <board>\n"
@@ -2746,6 +2833,27 @@ def main(argv: list[str]) -> int:
         verdict = dispatch_verdict(argv[1], host_max)
         if verdict:
             print(verdict)
+        return 0
+    if argv[0] == "--wants-slot":
+        # Records that a board has a card it wants to start, so `--may-dispatch`
+        # reserves its floor. A SEPARATE VERB rather than a side effect of
+        # `--may-dispatch` itself, for two reasons: a function that answers a
+        # question and also changes the world cannot be tested at one level,
+        # and `starved.py` calls `--may-dispatch` as a diagnostic -- asking
+        # whether a board is starved would otherwise make it hold capacity.
+        #
+        # Names its board rather than reading INSTANCE from the environment,
+        # for the reason `--served` gives below.
+        if len(argv) < 2:
+            print("usage: reconcile.py --wants-slot <board>", file=sys.stderr)
+            return 2
+        # Refuse an undeclared board rather than create
+        # `instances/<typo>/wants-slot`. A stamp under a name no board has
+        # leaves the board the operator meant reserving nothing, and it reads
+        # as success.
+        if not _is_declared(argv[1], "--wants-slot"):
+            return 2
+        mark_board_wants_slot(FOREMAN_HOME, argv[1])
         return 0
     if argv[0] == "--served":
         # Written at the TOP of a slice, before the slice knows whether it will
