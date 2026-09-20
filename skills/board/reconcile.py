@@ -24,6 +24,7 @@ from the outside world, so deleting the sidecar loses history, never position.
 from __future__ import annotations
 
 import json
+import math
 import os
 import re
 import subprocess
@@ -32,6 +33,7 @@ import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from urllib.parse import unquote
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 def _load_config() -> dict[str, str]:
     """Read settings from config.sh — the single source of truth.
@@ -1839,6 +1841,87 @@ RATE_LIMIT_PATTERNS = tuple(
 )
 
 
+# WHEN A LIMIT ACTUALLY ENDS, read out of the refusal itself.
+#
+# `fallback.py mark` stamps a model as limited for FALLBACK_COOLDOWN_MINUTES,
+# which defaults to 60. That is right for a per-minute or per-hour limit and
+# badly wrong for the one measured on 2026-09-20: "You've hit your weekly
+# limit - resets 4am (America/Los_Angeles)", on a machine whose plan, build and
+# review stages all prefer the same model. A 60-minute cooldown against a
+# weekly limit means the board retries every hour for days, and each retry
+# spawns an agent that is refused on its first call and left in the registry.
+# Two such agents were still sitting there, 1.1 and 2.2 days old.
+#
+# The refusal says when it ends, in one of two shapes Claude Code writes:
+#
+#   ...|1789574400                      an epoch, after a pipe
+#   ...resets 4am (America/Los_Angeles) a wall clock and an IANA zone
+#
+# READ, NEVER GUESSED. A limit whose text says nothing this understands falls
+# back to the configured cooldown, which is what happened before this existed.
+# Guessing longer would retire a working model for the rest of the day on one
+# bad parse; guessing shorter is the hourly retry this replaces.
+_RESET_EPOCH = re.compile(r"\|\s*(\d{9,11})\b")
+_RESET_CLOCK = re.compile(
+    r"resets?\s+(\d{1,2})(?::(\d{2}))?\s*([ap])m\s*\(([^)]+)\)", re.IGNORECASE)
+
+
+def rate_limit_until(text: str, now: datetime | None = None) -> datetime | None:
+    """The moment a rate limit ends, from the refusal's own text, or None.
+
+    Only ever returns a moment in the FUTURE. An epoch already past, or a
+    wall-clock time earlier today, means the limit named there has expired or
+    belongs to tomorrow: the epoch is dropped, and the clock rolls forward a
+    day, because "resets 4am" said at noon means 4am tomorrow.
+    """
+    now = now or datetime.now(timezone.utc)
+
+    match = _RESET_EPOCH.search(text)
+    if match:
+        try:
+            moment = datetime.fromtimestamp(int(match.group(1)), timezone.utc)
+        except (OverflowError, OSError, ValueError):
+            moment = None
+        if moment is not None and moment > now:
+            return moment
+
+    match = _RESET_CLOCK.search(text)
+    if not match:
+        return None
+    hour, minute, half, zone_name = match.groups()
+    hour, minute = int(hour), int(minute or 0)
+    if not (1 <= hour <= 12) or minute > 59:
+        return None
+    hour = hour % 12 + (12 if half.lower() == "p" else 0)
+    try:
+        zone = ZoneInfo(zone_name.strip())
+    except (ZoneInfoNotFoundError, ValueError):
+        # No tz database, or a zone name this host does not carry. The
+        # configured cooldown answers instead -- a wrong zone would be a wrong
+        # moment, and a wrong moment is worse than a short one.
+        return None
+    local = now.astimezone(zone)
+    reset = local.replace(hour=hour, minute=minute, second=0, microsecond=0)
+    if reset <= local:
+        reset += timedelta(days=1)
+    return reset.astimezone(timezone.utc)
+
+
+def rate_limit_minutes(text: str, now: datetime | None = None) -> int | None:
+    """`rate_limit_until` as whole minutes from now, rounded up, or None.
+
+    Rounded UP and floored at 1, so a reset forty seconds away is one minute
+    and never zero: fallback.py refuses a non-positive cooldown, and a stamp
+    that expires the instant it is written is the hourly retry again with extra
+    steps.
+    """
+    now = now or datetime.now(timezone.utc)
+    until = rate_limit_until(text, now)
+    if until is None:
+        return None
+    return max(1, math.ceil((until - now).total_seconds() / 60))
+
+
 def _api_error_text(row: dict) -> str | None:
     """The searchable text of an API error row, or None for any other row.
 
@@ -1939,6 +2022,12 @@ def death_report(path: str | None) -> dict | None:
         "rows": len(rows),
         "rate_limited": rate_limit_error is not None,
         "rate_limit_error": rate_limit_error,
+        # How long to believe THIS limit, when its own text says. None means
+        # the text did not say and FALLBACK_COOLDOWN_MINUTES answers, which is
+        # what happened before this field existed. SKILL.md passes it to
+        # `fallback.py mark --minutes`.
+        "rate_limit_minutes": (rate_limit_minutes(rate_limit_error)
+                               if rate_limit_error else None),
     }
 
 
@@ -2363,6 +2452,10 @@ def _agent_view(agent: dict) -> dict:
     started = agent.get("startedAt")
     return {
         "name": name,
+        # The harness's own id, because that is what `stop` takes: registry.sh
+        # says "stop takes one id" and claude.sh runs `claude stop "$1"`. A fix
+        # line naming the agent's NAME reads correctly and does nothing.
+        "id": agent.get("id"),
         "board": _board_of_agent(name),
         "ticket": _ticket_of_agent(name),
         "role": _role_of_agent(name),
@@ -2608,12 +2701,36 @@ def _problems(tick: dict, boards: list[dict], machine: dict) -> list[dict]:
                                       f"slot for {_ago(idle)} since "
                                       f"{card.get('last_action') or 'nothing'}",
                             "fix": f"skills/board/sweep.sh {card['ticket']}"})
+        # BLOCKED ONLY COUNTS WHILE THE CARD STILL NEEDS THE AGENT.
+        #
+        # A blocked session whose card has been released -- merged, parked for
+        # the operator, or failed -- is debris, not an intervention. Measured
+        # 2026-09-20 on the first machine this page watched: five blocked
+        # agents were reported with a command to type, and every one of their
+        # cards had already moved. Two were rate-limit deaths on cards since
+        # parked, three had finished their turn cleanly days earlier, and
+        # sweep.sh had already reaped every one of their worktrees. Five
+        # warnings, nothing to do -- which is how an operator learns to stop
+        # reading this band.
+        #
+        # `holds_slot` is the test because it is the same rule dispatch is
+        # gated on: it reads the card's own history and asks whether that card
+        # is still occupying capacity. A card with no history at all -- an
+        # agent left behind by a layout that no longer exists -- answers no,
+        # which is correct.
+        in_flight = {c["ticket"] for c in board.get("cards", []) if c.get("holds_slot")}
         for agent in board.get("agents", []):
-            if agent.get("phase") == "blocked":
-                out.append({"severity": "warning", "kind": "agent-blocked",
-                            "detail": f"{agent['name']} is blocked, waiting on a "
-                                      "prompt nobody will answer",
-                            "fix": f"\"$HARNESS_SH\" stop {agent['name']}"})
+            if agent.get("phase") != "blocked":
+                continue
+            if agent.get("ticket") not in in_flight:
+                continue
+            # The ID, not the name. `stop` takes an id on every harness.
+            target = agent.get("id") or agent.get("name")
+            out.append({"severity": "warning", "kind": "agent-blocked",
+                        "detail": f"{agent['name']} is blocked, waiting on a "
+                                  "prompt nobody will answer, and its card is "
+                                  "still in flight",
+                        "fix": f"\"$HARNESS_SH\" stop {target}"})
     rank = {"critical": 0, "warning": 1, "info": 2}
     out.sort(key=lambda p: rank.get(p["severity"], 3))
     return out

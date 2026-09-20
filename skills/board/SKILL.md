@@ -1151,7 +1151,9 @@ Seven fields carry more than their names suggest:
   transcript ends on a tool call that never returned an answer, with
   `unanswered_tool` naming it. An agent that stops of its own accord does not
   look like this, so the field is how you tell "the build failed" from "something
-  killed the build" — see step 2. `rate_limited` means the model refused the
+  killed the build" — see step 2. `rate_limit_minutes` is how long that limit
+  lasts when the refusal itself said so, for `fallback.py mark --minutes`, and
+  null when it did not. `rate_limited` means the model refused the
   spawn: the transcript holds a rate-limit or capacity API error, quoted in
   `rate_limit_error`, **and the agent never ran a single tool**. An agent that did
   any work, before or after a limit, is not flagged — see
@@ -1488,7 +1490,13 @@ fb() {
 # <model> is the dead agent's own `model` from reconcile.py. When it is null or
 # empty there is no model to blame: skip `mark` and the `fallback` entry, and
 # void and re-dispatch as for any other environmental failure.
-fb mark <model>
+# `--minutes` ONLY when reconcile.py reported `death.rate_limit_minutes`.
+# That number is read out of the refusal's own text -- "resets 4am
+# (America/Los_Angeles)", or an epoch after a pipe -- so it is how long this
+# limit actually lasts. Omit the flag when the field is null and
+# FALLBACK_COOLDOWN_MINUTES answers, which is what happened before the field
+# existed.
+fb mark <model> [--minutes <death.rate_limit_minutes>]
 fb resolve <role> > /tmp/fallback.json
 # ONE of the next two lines, never both. `until` is what `mark` printed.
 # `floor_reached` false in /tmp/fallback.json: `next` is its `model`.
@@ -1501,7 +1509,8 @@ card_log <T> '{"action":"void","role":"<role>","attempt":"<N>","reason":"<model>
 `<role>` is the dead agent's role — `plan`, `build`, `review` or `cleanup`.
 The void's reason is written out rather than pasted from `rate_limit_error`:
 that text is the API's own JSON, and its quotes would break the entry. `mark` stamps
-the model as limited for `FALLBACK_COOLDOWN_MINUTES`; `resolve` walks down from
+the model as limited for `--minutes` when the refusal said how long, and for
+`FALLBACK_COOLDOWN_MINUTES` when it did not; `resolve` walks down from
 the stage's first choice past every model with a live stamp and prints the model
 the next dispatch will use. The `fallback` entry and the `void` carry the same
 attempt: `reconcile.py` counts attempts from spawns and voids only, so the
