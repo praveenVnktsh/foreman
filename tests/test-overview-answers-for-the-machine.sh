@@ -160,6 +160,59 @@ else
 fi
 
 # =============================================================================
+# Case: a blocked agent is a problem only while its card still needs it
+#
+# Measured 2026-09-20 on the first machine this page watched: five blocked
+# agents were reported with a command to type, and every one of their cards had
+# already moved -- two rate-limit deaths on cards since parked, three that had
+# finished their turn cleanly days earlier, and sweep.sh had reaped every one
+# of their worktrees. Five warnings and nothing to do is how an operator learns
+# to stop reading the band.
+# =============================================================================
+home1c="$(new_home)"
+mkdir -p "$home1c/instances/demo/cards/PRA-LIVE" "$home1c/instances/demo/cards/PRA-DONE"
+# Still in flight: its last entry is a spawn, so it holds a slot.
+printf '{"at":"%s","event":{"action":"spawn","role":"build","attempt":"1"}}\n' \
+  "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >"$home1c/instances/demo/cards/PRA-LIVE/history.jsonl"
+# Released: the board moved on, so its blocked agent is debris.
+{
+  printf '{"at":"%s","event":{"action":"spawn","role":"build","attempt":"1"}}\n' \
+    "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  printf '{"at":"%s","event":{"action":"released","reason":"parked: high-risk paths"}}\n' \
+    "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+} >"$home1c/instances/demo/cards/PRA-DONE/history.jsonl"
+
+out1c="$(run_overview "$home1c" '[
+  {"name":"foreman/demo/PRA-LIVE/build-1","state":"blocked","startedAt":1,"id":"live1"},
+  {"name":"foreman/demo/PRA-DONE/build-1","state":"blocked","startedAt":2,"id":"dead1"},
+  {"name":"foreman/demo/PRA-GONE/review-1a","state":"blocked","startedAt":3,"id":"gone1"}
+]')"
+
+blocked_kinds="$(field "$out1c" '[p["detail"].split()[0] for p in v["problems"] if p["kind"]=="agent-blocked"]')"
+if [[ "$blocked_kinds" == "['foreman/demo/PRA-LIVE/build-1']" ]]; then
+  ok "only the blocked agent whose card is still in flight is reported"
+else
+  not_ok "blocked agents reported: $blocked_kinds"
+fi
+
+# An agent whose card has NO history at all -- left behind by a layout that no
+# longer exists -- is debris too. Three of the five measured were exactly this.
+if [[ "$blocked_kinds" != *"PRA-GONE"* ]]; then
+  ok "a blocked agent whose card has no history is not reported"
+else
+  not_ok "a blocked agent with no card history was reported"
+fi
+
+# `stop` takes an ID on every harness -- registry.sh says so and claude.sh runs
+# `claude stop "$1"`. A fix line naming the agent reads correctly and does
+# nothing, which is worse than no fix line.
+if [[ "$(field "$out1c" '[p["fix"] for p in v["problems"] if p["kind"]=="agent-blocked"]')" == *"stop live1"* ]]; then
+  ok "the fix names the agent id, which is what stop actually takes"
+else
+  not_ok "the fix line: $(field "$out1c" '[p["fix"] for p in v["problems"] if p["kind"]=="agent-blocked"]')"
+fi
+
+# =============================================================================
 # Case: a roster that will not load is an error field, never an empty machine
 # =============================================================================
 # config.sh loads this board's own declaration before reconcile.py has a main()
