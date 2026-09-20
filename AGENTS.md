@@ -53,6 +53,8 @@
 | Serialise shared git metadata | `skills/board/withlock.py` | hoping two ticks do not collide |
 | Order a board's Todo candidates for dispatch | `skills/board/queue.py` | ordering the queue by eye |
 | Order this machine's boards for one pass | `skills/board/reconcile.py --board-order` | the name order `bin/boards.py --list` prints |
+| See the whole machine at once | `skills/board/reconcile.py --overview` (add `--with-remote` for main's CI) | asking Linear, `gh` or the registry yourself; the overview is local-file-only so a browser can poll it |
+| Watch a board from another device | `bin/install-dashboard.sh`, then publish it (`tailscale serve`) | a second reader of `boards.toml` or `instances/`; `bin/dashboard.py` derives nothing |
 | Record that a board's slice reached it | `skills/board/reconcile.py --served <board>` | assuming `history.jsonl` shows it; an idle slice writes nothing |
 | Manage a board | `bin/boardctl add\|list\|status\|halt\|resume` | editing `boards.toml` by hand |
 | Retire a board | `bin/boardctl remove` (sweep its worktrees first), then `forget` to delete its runtime directory | deleting `instances/<board>/` by hand; `list` is what surfaces an orphan |

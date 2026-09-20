@@ -31,6 +31,7 @@ import sys
 import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+from urllib.parse import unquote
 
 def _load_config() -> dict[str, str]:
     """Read settings from config.sh — the single source of truth.
@@ -44,7 +45,7 @@ def _load_config() -> dict[str, str]:
         "REPO", "BOARD_HOME", "REQUIRED_CHECKS", "HIGH_RISK_PATHS",
         "DEPLOY_WORKFLOW", "DEPLOY_STEP", "DEPLOY_SELECTION_STEP", "CI_WORKFLOW",
         "INSTANCE",
-        "FOREMAN_HOME", "HOST_SLOT_STALE_MINUTES", "HARNESS_SH",
+        "FOREMAN_HOME", "HOST_SLOT_STALE_MINUTES", "HARNESS_SH", "TICK_AGENT_NAME",
         "FOREMAN_DEFAULT_HARNESS", "FOREMAN_HARNESSES",
         "BOARD_NAME_PREFIX", "BOARD_WORKTREE_PREFIX",
         "CLEANUP_EVERY_DAYS", "MAX_CONCURRENT", "REVIEWERS_PER_ROUND",
@@ -64,6 +65,12 @@ def _load_config() -> dict[str, str]:
         raise SystemExit(f"reconcile: could not read {script}: {out.stderr.strip()}")
     return dict(zip(keys, values))
 
+
+# fallback.py owns the rate-limit stamp directory's name and its filename
+# encoding. --overview reports those stamps, and a second spelling of either
+# here would read an empty directory the day fallback.py moved its own.
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import fallback  # noqa: E402  (see sys.path.insert above -- sibling module)
 
 _CFG = _load_config()
 # registry.sh, which HARNESS_SH points at, reads the harness set from the
@@ -113,6 +120,10 @@ BOARD_WORKTREE_PREFIX = _CFG["BOARD_WORKTREE_PREFIX"]
 # The adapter for this installation's harness. config.sh refuses to export a
 # path that is not executable, so nothing here re-checks it.
 HARNESS_SH = _CFG["HARNESS_SH"]
+# The tick's own agent name, READ from config.sh and never respelled here --
+# config.sh calls itself "the one place a name's shape is decided", and
+# supervise.sh finds the tick by this same string.
+TICK_AGENT_NAME = _CFG["TICK_AGENT_NAME"]
 # Empty means "disabled" -- see host_slots()'s docstring for why that is a
 # real, supported value and not just an unset-variable accident.
 HOST_SLOT_STALE_MINUTES = (
@@ -2211,18 +2222,506 @@ def _is_declared(board: str, mode: str) -> bool:
     return False
 
 
+# =============================================================================
+# --overview: one JSON picture of this machine, for a reader that is not the
+# tick.
+#
+# WHY IT LIVES HERE. Three questions -- is anything stuck, what is happening
+# now, is the machine healthy -- are answered by evidence this file already
+# gathers for the tick: the agent registry through $HARNESS_SH, the declared
+# roster through bin/boards.py, card position from each card's history.jsonl,
+# the slot counts, the stamps, the halt files. A second reader deriving them
+# again is the drift this file exists to prevent: bin/dashboard.py used to
+# parse boards.toml with its own tomllib and carry its own copy of card state,
+# and it kept answering confidently while the layout moved underneath it.
+#
+# LOCAL FILES ONLY, unless --with-remote. A dashboard polls; `gh` is
+# rate-limited and slow, and this file's `gh` paths (pr_for, deploy_verdict,
+# main_ci_state) are twelve invocation sites that must not run on a 30-second
+# refresh. `--with-remote` adds main's CI for a caller that asks deliberately
+# -- the tick sampling once a pass, not a browser.
+#
+# HARNESS-AGNOSTIC, because the operator watching this does not care which CLI
+# is running the tick and may not be the person who chose it. Agents come from
+# load_agents(), which is $HARNESS_SH -- the registry that merges every
+# harness. Nothing here reads an adapter's own directory.
+
+
+# THE ROOT EVERY FOREMAN AGENT NAME STARTS WITH, derived from the tick's own
+# name rather than spelled again. config.sh composes `foreman/tick` and
+# `foreman/<board>/<ticket>/<role>-<attempt>` from one root and calls itself
+# "the one place a name's shape is decided"; taking the root off the tick's
+# name keeps that true here.
+#
+# It is needed because THE REGISTRY IS THE MACHINE'S, not foreman's. Measured
+# 2026-09-20: --overview on a developer's laptop listed that person's own
+# Claude Code sessions as agents, because `$HARNESS_SH list` returns every
+# session the harness knows about. A dashboard that shows an operator their
+# own editor sessions next to a build agent is worse than one that shows
+# nothing: it invites them to stop the wrong thing.
+AGENT_ROOT = TICK_AGENT_NAME.split("/", 1)[0] + "/"
+
+
+def _is_foreman_agent(agent: dict) -> bool:
+    return (agent.get("name") or "").startswith(AGENT_ROOT)
+
+
+def _agent_view(agent: dict) -> dict:
+    """One registry row, reduced to what a watcher needs.
+
+    PHASE, not liveness: a background agent idles at `done` with its pid
+    intact when its turn ends, so "the process is up" reports finished work as
+    still running. The same table the tick reads.
+    """
+    name = agent.get("name") or ""
+    started = agent.get("startedAt")
+    return {
+        "name": name,
+        "board": _board_of_agent(name),
+        "ticket": _ticket_of_agent(name),
+        "role": _role_of_agent(name),
+        "phase": PHASE.get(agent.get("state"), "unknown"),
+        "state": agent.get("state"),
+        "harness": agent.get("harness") or "",
+        "started_at": started,
+        "age_seconds": _age_seconds(started),
+    }
+
+
+def _age_seconds(started_ms: object) -> float | None:
+    """Seconds since an `startedAt` in epoch MILLIseconds, or None.
+
+    The unit is the registry's, not this file's -- detached.sh's record spec
+    names it -- so the conversion is here rather than in every caller.
+    """
+    try:
+        return max(0.0, time.time() - float(started_ms) / 1000.0)
+    except (TypeError, ValueError):
+        return None
+
+
+# `foreman/<board>/<ticket>/<role>-<attempt>`, and `foreman/tick`. Split rather
+# than matched with a pattern: config.sh composes these names and this file
+# already refuses to respell the shape, so it only ever takes them apart.
+def _name_parts(name: str) -> list[str]:
+    return [part for part in name.split("/") if part]
+
+
+def _board_of_agent(name: str) -> str:
+    parts = _name_parts(name)
+    return parts[1] if len(parts) >= 3 else ""
+
+
+def _ticket_of_agent(name: str) -> str:
+    parts = _name_parts(name)
+    return parts[2] if len(parts) >= 3 else ""
+
+
+def _role_of_agent(name: str) -> str:
+    """`build` from `.../build-2`, or `tick` for the tick itself."""
+    parts = _name_parts(name)
+    if len(parts) == 2 and parts[1] == "tick":
+        return "tick"
+    if len(parts) < 4:
+        return ""
+    # An attempt suffix is `-<n>`, and a review's is `-1a` / `-2aa`, so the
+    # role is everything before the last hyphen.
+    role, _, _ = parts[3].rpartition("-")
+    return role or parts[3]
+
+
+def _tick_view(agents: list[dict]) -> dict:
+    """The tick's own row: is one running, how old, how long since it moved.
+
+    The NEWEST row of that name, matching supervise.sh's own rule -- a stopped
+    corpse with a later startedAt must not masquerade as the live one, so
+    liveness is taken from the newest row that is not stopped when there is
+    one.
+    """
+    mine = [a for a in agents if (a.get("name") or "") == TICK_AGENT_NAME]
+    live = [a for a in mine if a.get("state") != "stopped"]
+    row = max(live or mine, key=lambda a: a.get("startedAt") or 0, default=None)
+    if row is None:
+        return {"running": False, "name": TICK_AGENT_NAME}
+    return {
+        "running": row.get("state") != "stopped",
+        "name": TICK_AGENT_NAME,
+        "id": row.get("id"),
+        "state": row.get("state"),
+        "phase": PHASE.get(row.get("state"), "unknown"),
+        "age_seconds": _age_seconds(row.get("startedAt")),
+        "live_count": len(live),
+    }
+
+
+def _rate_limit_view() -> list[dict]:
+    """Every rate-limit stamp under `$FOREMAN_HOME/rate-limits/`.
+
+    Read, never judged: skills/board/fallback.py owns the walk and this only
+    reports what it wrote. A stamp holds the moment the limit EXPIRES, so one
+    in the past is history and `expired` says which.
+
+    The filename is the model, percent-encoded by fallback.py so a name
+    holding `/` or `:` cannot escape the directory -- decoded back here rather
+    than shown raw, because `claude%3Aopus` is not what the operator called it.
+    """
+    out = []
+    directory = os.path.join(FOREMAN_HOME, fallback.STAMP_DIR)
+    try:
+        names = sorted(os.listdir(directory))
+    except OSError:
+        return out
+    now = datetime.now(timezone.utc)
+    for name in names:
+        try:
+            with open(os.path.join(directory, name)) as fh:
+                text = fh.read().strip()
+        except OSError:
+            continue
+        until = _parse_stamp(text)
+        out.append({
+            "model": unquote(name),
+            "until": text,
+            "expired": until is None or until <= now,
+            "seconds_left": (until - now).total_seconds() if until and until > now else 0,
+        })
+    return out
+
+
+def _disk_free_mb(path: str) -> float | None:
+    try:
+        st = os.statvfs(path)
+    except OSError:
+        return None
+    return st.f_bavail * st.f_frsize / (1024 * 1024)
+
+
+def _memory_free_mb() -> float | None:
+    """Free memory, from /proc/meminfo's MemAvailable.
+
+    None where there is no /proc -- macOS -- rather than a guess. preflight.py
+    is what GATES on memory; this only reports, so a platform it cannot read
+    is a blank field and never a refusal.
+    """
+    try:
+        with open("/proc/meminfo") as fh:
+            for line in fh:
+                if line.startswith("MemAvailable:"):
+                    return float(line.split()[1]) / 1024
+    except (OSError, IndexError, ValueError):
+        return None
+    return None
+
+
+def _machine_view() -> dict:
+    return {
+        "foreman_home": FOREMAN_HOME,
+        "disk_free_mb": _disk_free_mb(FOREMAN_HOME),
+        "memory_free_mb": _memory_free_mb(),
+        "host_max_concurrent": _host_max(),
+        "rate_limits": _rate_limit_view(),
+        "linear_key": os.path.exists(os.path.join(FOREMAN_HOME, "linear.key")),
+        "mcp_config": os.path.exists(os.path.join(FOREMAN_HOME, "mcp.json")),
+    }
+
+
+def _card_view(board: str, ticket: str, agents: list[dict], now: datetime) -> dict:
+    """One card's position, from its own history.jsonl and the registry.
+
+    The history is a CACHE -- "delete it and the next tick must still
+    reconstruct every card's position" -- so nothing here refuses when it
+    cannot be read. A card with no readable history and no live agent is a
+    card holding nothing, which is what an empty view says.
+    """
+    home = os.path.join(FOREMAN_HOME, "instances", board, "cards", ticket)
+    entries = _read_jsonl(os.path.join(home, "history.jsonl"))
+    last = entries[-1] if entries else None
+    stamp = _entry_stamp(last) if last else None
+    mine = [a for a in _board_agents(agents, board) if _ticket_of_agent(a["name"]) == ticket]
+    return {
+        "ticket": ticket,
+        "board": board,
+        "last_action": (last or {}).get("event", {}).get("action"),
+        "last_at": last.get("at") if last else None,
+        "idle_seconds": (now - stamp).total_seconds() if stamp else None,
+        "holds_slot": card_holds_slot(os.path.join(home, "history.jsonl"),
+                                      HOST_SLOT_STALE_MINUTES),
+        "agents": [a for a in mine],
+    }
+
+
+def _board_agents(agents: list[dict], board: str) -> list[dict]:
+    return [a for a in agents if a.get("board") == board]
+
+
+# How long a card may sit on its last logged action before --overview calls it
+# stuck. Not a gate -- nothing refuses on it -- so it is a reporting threshold
+# and lives here rather than in a target's board.toml.
+#
+# Four hours because a build plus a review round is measured in tens of
+# minutes and the tick walks every board a slice at a time: a card quiet for
+# four hours is not slow, it is waiting for somebody.
+STUCK_CARD_SECONDS = 4 * 3600
+
+# How long the tick may go without a new turn before it is called stale.
+# supervise.sh already replaces a tick that is dead or wedged; this only
+# reports, and it is deliberately looser than TICK_DEAD_MINUTES so a watchdog
+# mid-replacement does not read as a problem.
+STALE_TICK_SECONDS = 90 * 60
+
+
+def _problems(tick: dict, boards: list[dict], machine: dict) -> list[dict]:
+    """The "is anything stuck" band: everything wrong, worst first.
+
+    EVERY ENTRY NAMES WHAT TO DO. A dashboard that says "something is wrong"
+    and stops is a dashboard that gets checked once. The fix is prose, not a
+    button: this file reports and the operator acts, the same separation
+    supervise.sh keeps between the watchdog and the dispatcher.
+    """
+    out = []
+    if not tick.get("running"):
+        out.append({"severity": "critical", "kind": "tick-down",
+                    "detail": "no tick is running; no board is being walked",
+                    "fix": "skills/board/supervise.sh"})
+    elif (tick.get("age_seconds") or 0) > STALE_TICK_SECONDS:
+        out.append({"severity": "warning", "kind": "tick-stale",
+                    "detail": f"the tick has been up {_ago(tick['age_seconds'])} "
+                              "without being recycled",
+                    "fix": "skills/board/supervise.sh --restart"})
+    if (tick.get("live_count") or 0) > 1:
+        out.append({"severity": "critical", "kind": "tick-doubled",
+                    "detail": f"{tick['live_count']} ticks are live; two ticks "
+                              "dispatch against one machine ceiling",
+                    "fix": "skills/board/supervise.sh --restart"})
+    if not machine.get("linear_key"):
+        out.append({"severity": "critical", "kind": "no-linear-key",
+                    "detail": "no linear.key; the tick cannot read or move a card",
+                    "fix": "install -m 600 <key> $FOREMAN_HOME/linear.key"})
+    if not machine.get("mcp_config"):
+        out.append({"severity": "critical", "kind": "no-mcp-config",
+                    "detail": "no mcp.json; the tick reads a board and then has "
+                              "no way to move a card",
+                    "fix": "cp <linear mcp config> $FOREMAN_HOME/mcp.json"})
+    for limit in machine.get("rate_limits", []):
+        if not limit["expired"]:
+            out.append({"severity": "info", "kind": "rate-limited",
+                        "detail": f"{limit['model']} is rate-limited for another "
+                                  f"{_ago(limit['seconds_left'])}; stages below it "
+                                  "carry the work",
+                        "fix": ""})
+    for board in boards:
+        if board.get("halted"):
+            out.append({"severity": "warning", "kind": "board-halted",
+                        "detail": f"{board['name']} is halted and dispatches nothing",
+                        "fix": f"bin/boardctl resume {board['name']}"})
+        for card in board.get("cards", []):
+            idle = card.get("idle_seconds")
+            if card.get("holds_slot") and idle and idle > STUCK_CARD_SECONDS:
+                out.append({"severity": "warning", "kind": "card-stuck",
+                            "detail": f"{board['name']}/{card['ticket']} has held a "
+                                      f"slot for {_ago(idle)} since "
+                                      f"{card.get('last_action') or 'nothing'}",
+                            "fix": f"skills/board/sweep.sh {card['ticket']}"})
+        for agent in board.get("agents", []):
+            if agent.get("phase") == "blocked":
+                out.append({"severity": "warning", "kind": "agent-blocked",
+                            "detail": f"{agent['name']} is blocked, waiting on a "
+                                      "prompt nobody will answer",
+                            "fix": f"\"$HARNESS_SH\" stop {agent['name']}"})
+    rank = {"critical": 0, "warning": 1, "info": 2}
+    out.sort(key=lambda p: rank.get(p["severity"], 3))
+    return out
+
+
+def _ago(seconds: float | None) -> str:
+    """A duration an operator reads at a glance. Never a bare number of seconds
+    past a minute: the dashboard's whole job is to be understood without
+    arithmetic."""
+    if seconds is None:
+        return "?"
+    seconds = int(seconds)
+    if seconds < 60:
+        return f"{seconds}s"
+    if seconds < 3600:
+        return f"{seconds // 60}m"
+    if seconds < 86400:
+        return f"{seconds // 3600}h{(seconds % 3600) // 60:02d}m"
+    return f"{seconds // 86400}d{(seconds % 86400) // 3600:02d}h"
+
+
+def overview(with_remote: bool = False) -> dict:
+    """The whole machine, as one JSON object.
+
+    Every field is re-derived here and nothing is cached: this file's own rule
+    ("Nothing here is authoritative on its own") applies to the picture as
+    much as to a card.
+
+    TOLERANT, because a watcher that refuses tells the operator less than one
+    that reports what it could reach.
+
+    The roster is caught rather than reported, and the distinction is worth
+    stating: a boards.toml that will not parse has ALREADY stopped this
+    process, because config.sh loads the same file through the same bin/
+    boards.py before main() runs, and boards.py validates every board before
+    answering about one. So `roster_error` is not the primary path -- it
+    guards the narrow window where the file changes between that load and this
+    listing. What it buys is that the window produces a picture saying so
+    instead of a traceback, which is the whole contract this function has with
+    the page: bin/dashboard.py renders a failed --overview as a problem, and a
+    crash would render as nothing at all.
+    """
+    now = datetime.now(timezone.utc)
+    agents_raw = load_agents()
+    registry_ok = agents_raw is not None
+    mine = [a for a in (agents_raw or []) if _is_foreman_agent(a)]
+    agents = [_agent_view(a) for a in mine]
+    tick = _tick_view(mine)
+    machine = _machine_view()
+
+    boards: list[dict] = []
+    roster_error = ""
+    try:
+        names = declared_boards(FOREMAN_HOME)
+    except BoardsUnreadable as exc:
+        names, roster_error = [], str(exc)
+    slots = {}
+    try:
+        slots = host_slots().get("instances") or {}
+    except BoardsUnreadable:
+        pass
+    priorities = {}
+    try:
+        priorities = board_priorities(FOREMAN_HOME)
+    except BoardsUnreadable:
+        pass
+
+    for name in names:
+        cards_dir = os.path.join(FOREMAN_HOME, "instances", name, "cards")
+        try:
+            tickets = sorted(t for t in os.listdir(cards_dir)
+                             if os.path.isdir(os.path.join(cards_dir, t)))
+        except OSError:
+            tickets = []
+        board_agent_rows = _board_agents(agents, name)
+        cards = [_card_view(name, t, agents, now) for t in tickets]
+        served = read_stamp(FOREMAN_HOME, name, SERVED_STAMP)
+        boards.append({
+            "name": name,
+            "halted": board_is_halted(FOREMAN_HOME, name),
+            "priority": priorities.get(name),
+            "slots_held": slots.get(name, 0),
+            "last_served": served.strftime(CARD_LOG_STAMP) if served else None,
+            "last_served_seconds": (now - served).total_seconds() if served else None,
+            "agents": board_agent_rows,
+            # The cards worth showing: one holding a slot is in flight, and one
+            # with a live agent is being worked. Every other directory under
+            # cards/ is a finished card's history, which is what the operator
+            # said they did not want to read.
+            "cards": [c for c in cards
+                      if c["holds_slot"] or c["agents"]],
+            "cards_total": len(cards),
+        })
+
+    picture = {
+        "at": now.strftime(CARD_LOG_STAMP),
+        "tick": tick,
+        "machine": machine,
+        "boards": boards,
+        "agents": agents,
+        "registry_ok": registry_ok,
+        "roster_error": roster_error,
+        "inbox": _inbox_view(),
+    }
+    if not registry_ok:
+        # NOT an empty agent list. load_agents() returns None when the registry
+        # could not be read, and "no agents are running" is the one answer that
+        # must never stand in for "I could not look" -- the same distinction
+        # load_agents' own docstring defends for the tick.
+        picture["problems"] = [{
+            "severity": "critical", "kind": "registry-unreadable",
+            "detail": "the agent registry could not be read; nothing here knows "
+                      "what is running",
+            "fix": '"$HARNESS_SH" list',
+        }]
+        return picture
+    problems = _problems(tick, boards, machine)
+    if roster_error:
+        problems.insert(0, {"severity": "critical", "kind": "roster-unreadable",
+                            "detail": roster_error, "fix": "bin/boardctl list"})
+    picture["problems"] = problems
+    if with_remote:
+        # The `gh` half, for a caller that asked for it. Never on the poll path:
+        # main_ci_state shells out to gh, which is rate-limited, and a browser
+        # refreshing every 30 seconds would spend that budget on nobody.
+        picture["main_ci"] = main_ci_state()
+    return picture
+
+
+# THE TICK'S INBOX. One message per file under `$FOREMAN_HOME/inbox/`, written
+# by anyone -- bin/dashboard.py's message box today -- and read by the tick at
+# the top of each pass.
+#
+# A FILE AND NOT A SOCKET, for two reasons. The tick has no live process to
+# write to for most of its existence: on Codex and OpenCode it is a detached
+# wrapper running `<cli> run` in a loop, so between passes there is nothing but
+# a sleep, and during a pass stdin is deliberately /dev/null -- harness/
+# detached.sh records `codex exec` sitting 180 seconds waiting for an EOF that
+# never comes. And a message held in a process dies with it: the tick is
+# replaced on a schedule (TICK_MAX_AGE_HOURS) and by every restart, so a
+# channel into the process would lose exactly the messages sent while it was
+# being recycled. A file survives all of that, which is the same reason every
+# other thing foreman remembers is a file.
+INBOX_DIR = "inbox"
+INBOX_DONE = "done"
+
+
+def _inbox_view() -> dict:
+    """What is waiting for the tick, and what it has already answered.
+
+    Names only, never bodies: the picture is polled every few seconds by a
+    browser, and a message is prose an operator typed -- it belongs on the
+    page that fetches one, not in every refresh of the summary.
+    """
+    root = os.path.join(FOREMAN_HOME, INBOX_DIR)
+    def _names(path: str) -> list[str]:
+        try:
+            return sorted(n for n in os.listdir(path)
+                          if os.path.isfile(os.path.join(path, n)))
+        except OSError:
+            return []
+    return {
+        "waiting": _names(root),
+        "done_count": len(_names(os.path.join(root, INBOX_DONE))),
+    }
+
+
 def main(argv: list[str]) -> int:
     if not argv:
         print("usage: reconcile.py <TICKET> [TICKET...]\n"
               "       reconcile.py --main-ci [BRANCH]\n"
               "       reconcile.py --host-slots\n"
               "       reconcile.py --board-order\n"
+              "       reconcile.py --overview [--with-remote]\n"
               "       reconcile.py --served <board>\n"
               "       reconcile.py --may-dispatch <board>\n"
               "       reconcile.py --cleanup-due <board>\n"
               "       reconcile.py --cleanup-since <board>\n"
               "       reconcile.py --cleanup-started <board>", file=sys.stderr)
         return 2
+    if argv[0] == "--overview":
+        # LOCAL FILES ONLY unless asked otherwise -- see overview()'s own note.
+        # A browser polls this; `gh` is rate-limited and must not be on that
+        # path.
+        rest = argv[1:]
+        remote = "--with-remote" in rest
+        unknown = [a for a in rest if a != "--with-remote"]
+        if unknown:
+            print(f"reconcile: --overview takes only --with-remote, got "
+                  f"{' '.join(unknown)}", file=sys.stderr)
+            return 2
+        json.dump(overview(with_remote=remote), sys.stdout, indent=2)
+        print()
+        return 0
     if argv[0] == "--main-ci":
         # No agent registry, no Linear, no cards: this answers one question about
         # one branch, and step 0 asks it before any of that exists.

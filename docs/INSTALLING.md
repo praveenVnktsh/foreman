@@ -52,6 +52,56 @@ dispatched agent is parented to the harness's own daemon rather than to the
 tick, and the tick holds no state, so the replacement re-derives every card's
 position from Linear, `gh` and `git`.
 
+## Watching it from anywhere
+
+`bin/dashboard.py` serves one page saying what this foreman is doing: what is
+stuck and what to type about it, what is running by board and card, and whether
+the host is fit. It derives nothing itself — every number comes from
+`reconcile.py --overview`, the same file that re-derives this machine's position
+for the tick — so it cannot drift from the layout it reports on.
+
+    ~/.foreman/install/bin/install-dashboard.sh
+
+That writes and starts `foreman-dashboard.service`, bound to `127.0.0.1:8429`.
+**It stops there on purpose.** The page carries no credential and asks who
+nobody is; what keeps it private is that only this host can reach the socket.
+Publishing it is a separate, deliberate act, because who may watch a board is
+not a question this repository can answer for your network:
+
+    tailscale serve --bg --set-path /foreman 8429
+
+Now it is on every device already on your tailnet, with no port open to the
+internet. The page is written to work under any path prefix, so `--set-path` is
+yours to choose.
+
+On a headless host, `loginctl enable-linger <user>` — a user service stops at
+logout otherwise, and the page an operator reaches for when a board looks wrong
+is the worst one to find missing.
+
+`reconcile.py --overview` is the same picture as JSON, for a terminal or
+anything else that wants it. It is local-file-only: `--with-remote` adds main's
+CI state and is the only form that spends `gh`.
+
+### Saying something to the tick
+
+The page has a message box. It writes one file into `$FOREMAN_HOME/inbox/`, and
+the tick reads the whole inbox at the top of its next pass, acts on what it can,
+and moves each message to `inbox/done/` with a line saying what it did. Its
+report names every message it handled.
+
+So delivery is "send any time, answered next pass" — bounded by
+`TICK_INTERVAL_MINUTES`, not instant. That is a consequence of what a tick is:
+on Codex and OpenCode it is a detached wrapper running the CLI in a loop, so
+between passes there is no process to talk to, and during one its stdin is
+deliberately closed. A file also survives the tick being replaced, which happens
+on a schedule and on every restart — a message held in a process would be lost
+exactly when the machine was being fixed.
+
+A message is an operator talking, so it carries an operator's weight, but it
+does not widen what the tick may do: it cannot make the board merge past a
+failing check, skip a review, or build a card nobody moved to `Todo`. A message
+asking for one is answered, not obeyed.
+
 ## Retiring a board
 
 `boardctl remove <name>` drops the `[boards.<name>]` block, and that block is
