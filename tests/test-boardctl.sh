@@ -444,7 +444,11 @@ done
 home_orphan="$(new_home)"
 target_orphan="$(new_target)"
 git -C "$target_orphan" init -q -b main
-git -C "$target_orphan" commit -q --allow-empty -m seed
+# The identity is passed per command, never configured: CI's runner has none,
+# and `git commit` there dies with "empty ident name" -- the same convention
+# tests/test-sweep-reaps-leaked-evidence-refs.sh follows.
+git -c user.name="Boardctl Test" -c user.email="boardctl-test@example.com" \
+  -C "$target_orphan" commit -q --allow-empty -m seed
 
 run "$home_orphan" add ghost --repo "$target_orphan" >/dev/null
 mkdir -p "$home_orphan/instances/ghost/cards/PRA-1"
