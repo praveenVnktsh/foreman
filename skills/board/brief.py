@@ -42,11 +42,11 @@ from typing import NoReturn
 
 MAX_FINDING_CHARS = 2000
 
-# The shape config.sh holds INSTANCE and INSTALLATION to, applied here to
-# `cleanup --board`. Re-stated rather than imported because config.sh is shell;
-# the rule is one line and the file that pastes a name into a prompt is worth
-# one line to re-establish, the same argument config.sh itself makes for
-# re-checking INSTALLATION after bin/installation.py has already checked it.
+# The shape config.sh holds INSTANCE to, applied here to `cleanup --board`.
+# Re-stated rather than imported because config.sh is shell; the rule is one
+# line and the file that pastes a name into a prompt is worth one line to
+# re-establish, the same argument config.sh itself makes for re-checking a
+# name bin/boards.py has already checked.
 BOARD_NAME = re.compile(r"^[A-Za-z0-9_]+$")
 
 # The cap on a multi-line block — a ticket body, a plan graph. It is ten times

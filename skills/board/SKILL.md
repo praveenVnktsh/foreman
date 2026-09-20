@@ -79,9 +79,8 @@ machine declares only where to find it.
 **One home.** `$FOREMAN_HOME` is `~/.foreman`, and it is also the root:
 `linear.key` and `mcp.json` sit beside the clone under `install/`, the
 `boards.toml`, the `instances/<board>/`, the lock and the scratch. `config.sh`
-exports it, along with `FOREMAN_ROOT` (the same path) and `INSTALLATION`
-(always `foreman`). Compose against the variable and never against `~/.foreman`
-by hand.
+exports it, along with `FOREMAN_ROOT` (the same path). Compose against the
+variable and never against `~/.foreman` by hand.
 
 **Every name below carries the board and the ticket, and no installation
 segment.** There is one foreman.

@@ -121,17 +121,12 @@ fixture_linear_key() {
 # Codex and OpenCode have no default models, so a placeholder is passed for all
 # four stages. It is deliberately not a real model name: no test asserts on it,
 # and a plausible one invites a reader to believe the fixture spends it.
-#
-# FIXTURE_LEGACY_NAMES=1 in the caller's environment writes `names = "legacy"`,
-# the shape `boardctl migrate` gives the installation it moves. An environment
-# knob and not a fifth argument, so every existing caller stays exactly as it
-# reads.
 fixture_add_installation() {
   # <name> locates the home, not an installation: the loader answers wherever
   # FOREMAN_HOME points, and there is one foreman regardless. A test that wants
-  # two harnesses under one root simply writes two homes here. The 4th argument
-  # and FIXTURE_LEGACY_NAMES are gone: there is no default to claim and no name
-  # scope to choose, and names are always installation-free.
+  # two harnesses under one root simply writes two homes here. There is no
+  # default to claim and no name scope to choose, so names are always
+  # installation-free.
   local home="$1" name="$2" harness="$3"
   local root="$home/.foreman"
   local install_home="$root/$name"

@@ -14,10 +14,9 @@ TWO RULES MAKE THIS SAFE.
 `foreman/tick` on the legacy installation) runs the loop itself, so its turn
 ending is the board finishing work, not work arriving. Emitting that would wake
 the loop with news of itself and spin forever. Any name that is not
-`<BOARD_NAME_PREFIX>/<TICKET>/<role>-<attempt>` for THIS installation's THIS
-instance is ignored for the same reason -- including another instance's
-agents, or another installation's, which would otherwise wake this one on work
-that is not its own.
+`<BOARD_NAME_PREFIX>/<TICKET>/<role>-<attempt>` for THIS board is ignored for
+the same reason -- including another board's agents, which would otherwise
+wake this one on work that is not its own.
 
 **It emits transitions, not states.** A line is written when an agent moves from
 working into a finished phase — once, on the edge. Re-reporting a finished agent
@@ -108,19 +107,13 @@ FINISHED = {"done", "stopped"}
 
 def _dispatched(name: str) -> tuple[str, str, str] | None:
     """(ticket, role, attempt) if `name` is a plan/build/review agent dispatched
-    by THIS installation's THIS instance, else None.
+    by THIS board, else None.
 
-    Capture groups on the installation and instance segments are not enough on
-    their own -- two installations can share one repository, so a name with the
-    right instance but the wrong installation (or vice versa) still names
-    somebody else's agent. This is what actually compares EVERY captured
-    segment against this process's own BOARD_NAME_PREFIX and skips everything
-    that does not match all of them.
-
-    The comparison is against the whole prefix, not against INSTALLATION, so
-    the legacy shape is accepted exactly when this process is legacy. A scoped
-    process never matches a name with no installation segment, and a legacy
-    process never matches one that has it.
+    A capture group on the board segment is not enough on its own -- two
+    boards can share one repository, so a name with the right ticket but the
+    wrong board still names somebody else's agent. This compares the captured
+    prefix against this process's own BOARD_NAME_PREFIX and skips everything
+    that does not match it.
     """
     m = DISPATCHED.match(name)
     if not m:

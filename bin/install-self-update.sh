@@ -63,7 +63,7 @@ INSTALL_ROOT="$(dirname -- "$HERE")"
 # bin/install-service.sh's comment, which this follows rather than repeats.
 . "$INSTALL_ROOT/bin/load-pairs.sh" || die "cannot read $INSTALL_ROOT/bin/load-pairs.sh"
 
-unset INSTALLATION IS_DEFAULT HARNESS FOREMAN_ROOT
+unset HARNESS FOREMAN_ROOT
 _foreman_load_pairs "foreman's declaration" "$INSTALL_ROOT/bin/installation.py" \
   || die "installation.py could not read foreman's declaration"
 [[ -n "$FOREMAN_HOME" ]] || die "installation.py did not report a home"

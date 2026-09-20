@@ -12,10 +12,9 @@
 # misjudged liveness, and misjudging liveness is exactly what a watchdog does
 # under load.
 #
-# ONE TICK PER INSTALLATION, and this file supervises this installation's.
-# Everything it runs the harness for goes through "$HARNESS_SH", the adapter
-# config.sh picks from the installation's `harness`, so this script knows no
-# CLI's flags. Its five verbs are in
+# ONE TICK, and this file supervises it. Everything it runs the harness for
+# goes through "$HARNESS_SH", the adapter config.sh picks from foreman.toml's
+# `harness`, so this script knows no CLI's flags. Its five verbs are in
 # docs/specs/2026-09-14-installations-per-harness-design.md.
 #
 # Run mode's reasons to replace the tick are the elif chain at the bottom of
@@ -61,9 +60,8 @@ case "$MODE" in
     ;;
 esac
 
-# There is ONE tick for this installation, walking every board it serves a
-# slice at a time, so this watchdog is no longer run once per board and needs
-# no board of its own.
+# There is ONE tick, walking every board foreman serves a slice at a time, so
+# this watchdog is no longer run once per board and needs no board of its own.
 #
 # It still sources config.sh, which requires a board, because every knob it
 # reads -- TICK_AGENT_NAME, TICK_MODEL and the four staleness thresholds --
@@ -95,13 +93,13 @@ source "$SKILL_DIR/config.sh"
 
 log() { printf '%s supervise: %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$*"; }
 
-# The lock is INSTALLATION-level, not board-level, and that is load-bearing now.
-# It used to be $BOARD_HOME/supervise.lock, which was right when each board had
-# its own tick. With one tick for every board, two cron fires that resolved
-# different boards would take two different locks, both see no tick, and both
-# start one -- two ticks dispatching into the same slots, which is the exact
-# failure this lock exists to prevent. A sibling installation has its own home
-# and therefore its own lock, which is right: it supervises a different tick.
+# The lock is HOME-level, not board-level, and that is load-bearing. It used
+# to be $BOARD_HOME/supervise.lock, which was right when each board had its own
+# tick. With one tick for every board, two cron fires that resolved different
+# boards would take two different locks, both see no tick, and both start one
+# -- two ticks dispatching into the same slots, which is the exact failure this
+# lock exists to prevent. There is one home, so there is one lock, so there is
+# one tick.
 SUPERVISE_LOCK="${SUPERVISE_LOCK:-$FOREMAN_HOME/supervise.lock}"
 
 # The tick's own control plane, and it must be foreman's rather than inherited.
@@ -117,10 +115,10 @@ SUPERVISE_LOCK="${SUPERVISE_LOCK:-$FOREMAN_HOME/supervise.lock}"
 # servers the board may use would then depend on which directory it happened to
 # start in, and a target repository could hand the tick a server of its choosing.
 #
-# It lives at the ROOT, beside linear.key, because every installation on this
-# machine serves the same Linear workspace through it. A copy per installation
-# would be the same file written twice, and the second copy is the one nobody
-# updates when the server moves.
+# It lives at the home's root, beside linear.key, because every board on this
+# machine reaches Linear through it. A copy per board would be the same file
+# written N times, and the copies are the ones nobody updates when the server
+# moves.
 MCP_CONFIG="${MCP_CONFIG:-$FOREMAN_ROOT/mcp.json}"
 MCP_ARGS=()
 [[ -r "$MCP_CONFIG" ]] && MCP_ARGS=(--mcp-config "$MCP_CONFIG")
@@ -129,7 +127,22 @@ MCP_ARGS=()
 # adapter runs lives in ~/.local/bin, so without this the watchdog silently
 # finds nothing to run and the board simply stops, with a log full of
 # "command not found".
-export PATH="$HOME/.local/bin:/usr/local/bin:/usr/bin:/bin:/snap/bin:$PATH"
+#
+# TWO HALVES, AND THEY GO ON OPPOSITE SIDES. ~/.local/bin leads, because that
+# is where the harness binary is and finding it is the whole point; the tests
+# install their stub `claude` there and rely on it winning. The SYSTEM
+# directories trail, because they are a floor for an environment that has no
+# PATH worth the name, not a correction to one that does.
+#
+# They used to lead too, and the interpreter is what that cost. AGENTS.md sets
+# the floor at 3.11 for `tomllib`; /usr/bin/python3 is 3.9 on macOS. Measured
+# 2026-09-20: python3 on that machine is 3.12, /usr/bin/python3 is 3.9.6, and
+# with /usr/bin ahead of it bin/boards.py, bin/contract.py, starved.py and
+# reconcile.py all died at `import tomllib`. The watchdog logged "could not
+# list the declared boards" on every fire and never restarted a starving tick
+# -- a check that reads as "nothing is starved", which is the direction this
+# watchdog must never fail in.
+export PATH="$HOME/.local/bin:$PATH:/usr/local/bin:/usr/bin:/bin:/snap/bin"
 
 # A dead-threshold at or below the interval marks a healthy waiting agent as
 # dead and restarts it every pass, which looks like a crash loop and never ticks.

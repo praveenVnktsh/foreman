@@ -52,14 +52,14 @@ fi
 export FOREMAN_HOME
 # These come from the loader ALONE, so they are unset first. Every other key in
 # this file is environment-wins, and these cannot be: they say what foreman is,
-# and the environment is not allowed to answer that. `INSTALLATION=other` in
-# the environment would compose every agent name, worktree and branch under a
-# segment that nothing else on the machine answers to.
+# and the environment is not allowed to answer that. `HARNESS=codex` in the
+# environment would spawn every agent through an adapter this foreman never
+# declared.
 #
 # FOREMAN_HOME above is deliberately NOT in this list. An explicit home is how
 # every test in tests/ points a whole foreman at a temporary directory, and it
 # selects a home rather than contradicting what that home declares.
-unset INSTALLATION IS_DEFAULT HARNESS FOREMAN_ROOT LEGACY_NAMES
+unset HARNESS FOREMAN_ROOT
 if ! _foreman_load_pairs "foreman's declaration" "$_foreman_install_root/bin/installation.py"; then
   if [[ $- == *i* ]]; then return 1; else exit 1; fi
 fi
@@ -81,7 +81,7 @@ fi
 #   $REPO/.claude/worktrees/foreman-<board>-<ticket>
 #   foreman/<board>/<ticket>                (branch)
 #   refs/foreman/<board>/evidence/<n>
-export FOREMAN_HOME FOREMAN_ROOT INSTALLATION HARNESS IS_DEFAULT LEGACY_NAMES
+export FOREMAN_HOME FOREMAN_ROOT HARNESS
 
 # The adapter for this installation's harness: Claude Code, Codex or OpenCode.
 # Every script that ran `claude` itself runs this instead, so one file knows
@@ -147,12 +147,12 @@ if [[ -z "$INSTANCE" ]]; then
   if [[ $- == *i* ]]; then return 1; else exit 1; fi
 fi
 # No hyphen, no slash. worktree_path and every worktree/scratch glob in
-# sweep.sh join the installation, the instance and the ticket with a HYPHEN
-# (foreman-<installation>-<instance>-<ticket>), which an unconstrained instance
-# name can absorb: INSTANCE=alpha-x makes "foreman-claude-alpha-x-PRA-1" match
-# the glob "foreman-claude-alpha-*", so alpha's sweep would reap alpha-x's
-# worktrees on a shared REPO. bin/installation.py applies this same rule to the
-# installation segment, for this same reason.
+# sweep.sh join the board and the ticket with a HYPHEN
+# (foreman-<board>-<ticket>), which an unconstrained board name can absorb:
+# INSTANCE=alpha_x is fine, but INSTANCE=alpha-x makes "foreman-alpha-x-PRA-1"
+# match the glob "foreman-alpha-*", so alpha's sweep would reap alpha-x's
+# worktrees on a shared REPO. bin/boards.py applies this same rule to every
+# name it reads, for this same reason.
 # agent_name/branch_name/evidence_ref are `/`-delimited and safe
 # regardless, but the name is constrained here rather than changing the
 # worktree delimiter -- any separator can be absorbed by an unconstrained
@@ -343,20 +343,19 @@ MAX_BUDGET_USD="${MAX_BUDGET_USD:-}"
 # "disabled" reading of an empty attempt count, only a nonsensical one.
 MAX_PLAN_ATTEMPTS="${MAX_PLAN_ATTEMPTS:-2}"
 
-# The MACHINE's ceiling, across every instance of every installation sharing it
-# -- not this repository's `MAX_CONCURRENT`, which is a per-instance limit
-# declared in board.toml and has no idea another instance's cards exist. Two
-# instances each dispatching up to their own MAX_CONCURRENT can still jointly
-# exceed what one machine's RAM and /tmp can sustain, which is the same class of
-# failure PROBE_TMP_MB/MIN_FREE_TMP_MB guard against for a single instance. A
-# second installation is that same arithmetic again, on a harness this one
-# cannot see.
+# The MACHINE's ceiling, across every board this foreman serves -- not a
+# repository's own `MAX_CONCURRENT`, which is declared in board.toml and has no
+# idea another board's cards exist. Two boards each dispatching up to their own
+# MAX_CONCURRENT can jointly exceed what one machine's RAM and /tmp can
+# sustain, which is the same class of failure PROBE_TMP_MB/MIN_FREE_TMP_MB
+# guard against for a single board.
 #
-# `reconcile.py --host-slots` does the counting, across every sibling's
-# `instances/*/cards/` under $FOREMAN_ROOT, and nothing here counts anything:
-# one number stays one number for the machine, and the file that can see every
-# installation is the one that adds them up. This is the ceiling it is checked
-# against before a dispatch, in addition to the instance's own MAX_CONCURRENT.
+# `reconcile.py --host-slots` does the counting, across every declared board's
+# `instances/<board>/cards/` under $FOREMAN_HOME, and nothing here counts
+# anything: one number stays one number for the machine, and the file that can
+# see every board is the one that adds them up. This is the ceiling it is
+# checked against before a dispatch, in addition to the board's own
+# MAX_CONCURRENT.
 HOST_MAX_CONCURRENT="${HOST_MAX_CONCURRENT:-4}"
 
 # How stale a card's LAST history.jsonl entry may be before --host-slots stops

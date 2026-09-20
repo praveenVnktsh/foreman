@@ -44,10 +44,10 @@ BOARDS_TABLE = "boards"
 
 # What a board may say about itself. `repo` is required. `key` is optional and
 # names a credential for a board that lives in a DIFFERENT Linear workspace;
-# every board in the usual single-workspace installation shares
-# $FOREMAN_ROOT/linear.key -- the MACHINE root, one level above an
-# installation's home, so every installation on the machine reads one key --
-# which is why the per-instance copy of that same secret is gone.
+# every board in the usual single-workspace setup shares
+# $FOREMAN_ROOT/linear.key -- foreman's home, which is also the machine root,
+# so one key answers for every board -- which is why the per-instance copy of
+# that same secret is gone.
 BOARD_KEYS = {"repo", "key", "priority"}
 
 # How this MACHINE divides its own capacity between repositories when they

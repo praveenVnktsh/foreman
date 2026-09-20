@@ -48,10 +48,10 @@ die() { printf 'boardctl: %s\n' "$*" >&2; exit 1; }
 load_foreman_home() {
   # Only the home is wanted here, and the reader lets the environment win for
   # every key it reads, so the rest are cleared first: boardctl must never take
-  # an INSTALLATION or a HARNESS from a stray export in an operator's shell.
+  # a HARNESS from a stray export in an operator's shell.
   # FOREMAN_HOME itself is left alone -- installation.py reads it to find the
   # home to answer for, and clearing it would point this at another one.
-  unset INSTALLATION IS_DEFAULT HARNESS FOREMAN_ROOT
+  unset HARNESS FOREMAN_ROOT
   # installation.py has already named what it could not make sense of.
   _foreman_load_pairs "foreman's declaration" "$installation_py" \
     || die "bin/installation.py refused; cannot tell which home this clone belongs to"

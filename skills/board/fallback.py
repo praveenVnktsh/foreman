@@ -22,7 +22,7 @@ high-risk path, and exporting them is how a previous change parked for an
 operator. FOREMAN_HOME is already exported; FALLBACK_TIERS,
 FALLBACK_COOLDOWN_MINUTES, each stage's *_MODEL and *_FLOOR, and CLEANUP_MODEL
 are not. bin/installation.py is the one reader of the [fallback] table in
-installation.toml. A second parser here would be a copy that drifts. The
+foreman.toml. A second parser here would be a copy that drifts. The
 cleanup stage pairs CLEANUP_MODEL with PLAN_FLOOR, because a cleanup pass is
 the plan's work in miniature; config.sh defaults CLEANUP_MODEL for that reason.
 
@@ -39,8 +39,8 @@ THE STATE. One file per limited model, `$FOREMAN_HOME/rate-limits/<model>`,
 holding one line: the UTC moment the limit expires, as `%Y-%m-%dT%H:%M:%SZ`.
 It is a file because the tick that sees an agent die and the dispatch that picks
 the next model are different processes, often in different passes. It lives in
-the installation's home and not the machine root: each installation spends its
-own subscription, so a limit on one says nothing about a sibling.
+foreman's home, which is also the machine root: one foreman spends one
+subscription, so one stamp answers for every board on it.
 
 A STAMP EXPIRES BY ITSELF. That is the cooldown: once the moment passes, the
 stage tries its first choice again, and nobody has to remember to clear
@@ -51,8 +51,8 @@ every stage over one bad file.
 
 DOWN ONLY, AND NEVER PAST THE FLOOR. The walk starts at the stage's first choice
 and moves only toward weaker models. Walking up would spend a stronger model
-than the installation chose for that stage. The floor is the weakest model an
-installation accepts for a stage: a plan drawn by a model too weak for it costs
+than foreman.toml chose for that stage. The floor is the weakest model foreman
+accepts for a stage: a plan drawn by a model too weak for it costs
 every build that follows, so the card waits instead. When every allowed tier is
 limited, the answer is the lowest allowed tier with `floor_reached` true. The
 dispatch still spawns on it, so the board voids exactly as it did before this

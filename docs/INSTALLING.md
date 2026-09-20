@@ -90,8 +90,14 @@ is why it no longer does.
   fall all the way to the bottom of `tiers`. A floor must name a model in
   `tiers`, and it must sit at or below the stage's own model in that list;
   fallback only walks down, so a floor above the stage's model would never be
-  reached and `install.sh` refuses it. The cleanup stage shares the plan
-  stage's floor, because it shares its model.
+  reached and foreman refuses to load a `foreman.toml` that declares one. The
+  cleanup stage shares the plan stage's floor, because it shares its model.
+
+`install.sh` writes neither `tiers` nor `[fallback.floor]` — it takes only
+`--harness` and the four `--model-<stage>` flags. Both tables are hand-edited
+into `foreman.toml`, and every rule above is checked when that file is READ, so
+a floor nothing could reach stops the next command that loads the declaration
+rather than waiting for a rate limit to expose it.
 
 While a model is rate-limited, the stage runs on the strongest tier below it
 that is not, and the card's history and its Linear comment say which model was
