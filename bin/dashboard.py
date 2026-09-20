@@ -139,7 +139,7 @@ def _broken(detail: str) -> dict:
         "at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
         "tick": {"running": False, "name": "?"},
         "machine": {"foreman_home": HOME, "rate_limits": []},
-        "boards": [], "agents": [], "registry_ok": False,
+        "boards": [], "agents": [], "agents_finished": 0, "registry_ok": False,
         "inbox": {"waiting": [], "done_count": 0},
         "problems": [{"severity": "critical", "kind": "dashboard-blind",
                       "detail": detail,
@@ -368,7 +368,8 @@ function render(d) {
     <div class="stat"><span class="dim">credentials</span><b style="color:${m.linear_key && m.mcp_config ? "var(--ok)" : "var(--crit)"}">
       ${m.linear_key ? "key" : "no key"} · ${m.mcp_config ? "mcp" : "no mcp"}</b></div>
     <div class="stat"><span class="dim">rate limited</span><b style="color:${limited.length ? "var(--warn)" : "var(--ok)"}">
-      ${limited.length ? limited.map((r) => esc(r.model)).join(", ") : "none"}</b></div>`;
+      ${limited.length ? limited.map((r) => esc(r.model)).join(", ") : "none"}</b></div>
+    <div class="stat"><span class="dim">agents live / finished</span><b>${(d.agents || []).length} / ${d.agents_finished || 0}</b></div>`;
 }
 
 async function tick() {

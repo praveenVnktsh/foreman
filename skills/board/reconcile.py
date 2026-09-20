@@ -2574,8 +2574,27 @@ def overview(with_remote: bool = False) -> dict:
     agents_raw = load_agents()
     registry_ok = agents_raw is not None
     mine = [a for a in (agents_raw or []) if _is_foreman_agent(a)]
-    agents = [_agent_view(a) for a in mine]
+    # THE TICK IS PICKED FROM EVERY ROW, including stopped ones: _tick_view
+    # needs the stopped corpses to tell a live tick from a newer dead one.
     tick = _tick_view(mine)
+    everything = [_agent_view(a) for a in mine]
+    # "NOW" MEANS NOW. A terminal agent is a stopped process -- history that
+    # sweep.sh reaps -- and on a machine that has been building for a while it
+    # is almost all of the registry: measured 2026-09-20, 111 of 228 rows were
+    # terminal and the picture was 106KB, re-fetched every twenty seconds for a
+    # page that renders a handful of lines.
+    #
+    # They also carry names from layouts that no longer exist. That same
+    # machine still held agents named `foreman/grok/...` from an installation
+    # that has not existed since the single-foreman change, and every one of
+    # them rendered as a BOARD called `grok` beside the four real ones. Reading
+    # the live list is what showed it; no test would have.
+    #
+    # The count survives, because a registry full of finished agents is itself
+    # a signal -- it means sweep.sh is not reaping -- and a number says that
+    # where 111 rows only bury it.
+    agents = [a for a in everything if a["phase"] != "terminal"]
+    finished = len(everything) - len(agents)
     machine = _machine_view()
 
     boards: list[dict] = []
@@ -2628,6 +2647,7 @@ def overview(with_remote: bool = False) -> dict:
         "machine": machine,
         "boards": boards,
         "agents": agents,
+        "agents_finished": finished,
         "registry_ok": registry_ok,
         "roster_error": roster_error,
         "inbox": _inbox_view(),
