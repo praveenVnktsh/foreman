@@ -125,6 +125,41 @@ else
 fi
 
 # =============================================================================
+# Case: "now" means now -- a stopped agent is history, and is counted not listed
+#
+# On a machine that has been building for a while the registry is mostly
+# finished work: measured 2026-09-20, 111 of 228 rows were terminal and the
+# picture was 106KB, re-fetched every twenty seconds. Those rows also carry
+# names from layouts that no longer exist -- that machine still held agents
+# named `foreman/grok/...` from an installation removed by the single-foreman
+# change, and each one rendered as a BOARD called `grok`.
+# =============================================================================
+home1b="$(new_home)"
+out1b="$(run_overview "$home1b" '[
+  {"name":"foreman/demo/PRA-1/build-1","state":"working","startedAt":1,"id":"a"},
+  {"name":"foreman/demo/PRA-2/review-1a","state":"blocked","startedAt":2,"id":"b"},
+  {"name":"foreman/demo/PRA-3/build-1","state":"stopped","startedAt":3,"id":"c"},
+  {"name":"foreman/gone/PRA-9/build-1","state":"stopped","startedAt":4,"id":"d"}
+]')"
+if [[ "$(field "$out1b" 'sorted(a["ticket"] for a in v["agents"])')" == "['PRA-1', 'PRA-2']" ]]; then
+  ok "a stopped agent is not in the agent list"
+else
+  not_ok "a stopped agent is not listed: $(field "$out1b" '[(a["ticket"],a["phase"]) for a in v["agents"]]')"
+fi
+
+if [[ "$(field "$out1b" 'v["agents_finished"]')" == "2" ]]; then
+  ok "finished agents are counted, so a registry sweep.sh is not reaping still shows"
+else
+  not_ok "finished agents are counted: $(field "$out1b" 'v.get("agents_finished")')"
+fi
+
+if [[ "$(field "$out1b" '[a["board"] for a in v["agents"] if a["board"]=="gone"]')" == "[]" ]]; then
+  ok "a board name surviving only in a stopped agent's name is not rendered as a board"
+else
+  not_ok "a dead layout's board name leaked into the agent list"
+fi
+
+# =============================================================================
 # Case: a roster that will not load is an error field, never an empty machine
 # =============================================================================
 # config.sh loads this board's own declaration before reconcile.py has a main()
