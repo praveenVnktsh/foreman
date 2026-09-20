@@ -76,6 +76,18 @@ After=network-online.target
 
 [Service]
 Type=simple
+# THE HARNESS BINARY IS IN ~/.local/bin, and a systemd user unit is given
+# /usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin and nothing
+# else. Without this the page renders "the agent registry could not be read"
+# forever, because `$HARNESS_SH list` shells out to a CLI that is not on its
+# PATH -- measured 2026-09-20, where the first install of this unit did
+# exactly that while the tick beside it was healthy.
+#
+# ~/.local/bin LEADS and the system directories TRAIL, the same order
+# skills/board/supervise.sh carries and for the same two reasons: the harness
+# binary is what has to be found first, and putting /usr/bin ahead of the
+# operator's own PATH shadows their python3 with one too old for `tomllib`.
+Environment=PATH=%h/.local/bin:%h/bin:/usr/local/bin:/usr/bin:/bin
 # The installed clone, never a working tree -- the same pin the tick runs on,
 # for the same reason: a dashboard reading uncommitted code would report a
 # machine that does not exist.
@@ -97,7 +109,14 @@ fi
 mkdir -p "$UNIT_DIR"
 printf '%s\n' "$UNIT_TEXT" >"$UNIT"
 systemctl --user daemon-reload
-systemctl --user enable --now foreman-dashboard.service
+systemctl --user enable foreman-dashboard.service
+# RESTART, not `enable --now`. `--now` only STARTS, and a unit that is already
+# active is left exactly as it is -- so re-running this after an upgrade
+# rewrote the unit file and kept serving the old process, from the old path,
+# on the same port. Measured 2026-09-20, replacing the pre-repository
+# dashboard: the unit said what was wanted and the socket answered with what
+# was there before.
+systemctl --user restart foreman-dashboard.service
 
 printf 'install-dashboard: foreman-dashboard.service is serving http://127.0.0.1:%s\n' "$PORT"
 printf '\npublish it to your tailnet (optional, and yours to choose):\n'
