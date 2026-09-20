@@ -91,6 +91,34 @@ else
   ok "the installer does not rely on 'enable --now' to replace a running service"
 fi
 
+# =============================================================================
+# Case: the unit heredoc expands only what it means to
+#
+# The delimiter is unquoted, because $DASHBOARD and $FOREMAN_HOME have to reach
+# the unit. That makes the COMMENTS in it live shell too: a `$name` in one is
+# expanded to nothing and a backtick pair is executed. The first version of
+# this block wrote "$HARNESS_SH list" and "too old for `tomllib`" in its own
+# prose; installing printed "HARNESS_SH: unbound variable" and
+# "tomllib: command not found", and wrote a unit whose explanation stopped
+# mid-sentence twice.
+heredoc="$(awk '/^read -r -d/,/^UNIT_EOF$/' "$installer")"
+
+if ! printf '%s' "$heredoc" | grep -q '`'; then
+  ok "no backticks inside the unit heredoc, so no comment can run a command"
+else
+  not_ok "a backtick inside the unit heredoc will be executed at install time"
+fi
+
+# Every unescaped $NAME is expanded. Only the three the unit actually needs may
+# be there; anything else is prose that will silently become empty.
+live="$(printf '%s' "$heredoc" | grep -oE '(^|[^\\])\$[A-Za-z_][A-Za-z0-9_]*' \
+  | grep -oE '\$[A-Za-z_][A-Za-z0-9_]*' | sort -u | tr '\n' ' ')"
+if [[ "$live" == "\$DASHBOARD \$FOREMAN_HOME \$PORT " ]]; then
+  ok "the heredoc expands exactly the three values the unit needs"
+else
+  not_ok "the heredoc expands more than it means to: $live"
+fi
+
 if [[ $fail -eq 0 ]]; then
   printf '\nPASS\n'
 else
