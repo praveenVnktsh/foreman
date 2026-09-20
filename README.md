@@ -103,7 +103,13 @@ use launchd or cron):
 ```bash
 ~/.foreman/install/bin/install-service.sh
 ~/.foreman/install/bin/install-self-update.sh
+~/.foreman/install/bin/install-dashboard.sh
 ```
+
+The dashboard is one page saying what the machine is doing — what is stuck, what
+is running, whether the host is fit — plus a box for sending a message the tick
+reads on its next pass. It binds loopback; `tailscale serve --bg --set-path
+/foreman 8429` puts it on your tailnet and nowhere else.
 
 The clone goes at `~/.foreman/install` and nowhere else: foreman derives its
 home from where the clone sits, so a clone one directory deeper puts the home
