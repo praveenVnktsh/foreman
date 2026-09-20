@@ -2604,6 +2604,41 @@ def _machine_view() -> dict:
     }
 
 
+def _spawn_facts(entries: list[dict]) -> dict:
+    """Agent name -> what it was dispatched ON, from the card's own history.
+
+    WHY HISTORY AND NOT THE REGISTRY. The registry does not say which harness
+    or model an agent runs on -- `detached.sh`'s record holds neither, and
+    `registry.sh` merges Codex and OpenCode out of ONE shared registry, so
+    "which adapter answered" would label an OpenCode agent `codex` whenever
+    codex happened to be read first. dispatch.sh already writes the truth into
+    the card's spawn entry, at the moment it resolves the candidate:
+    `harness`, the `model` it actually spawned on, and the `first_choice` it
+    wanted. That is the one place any of it is known for certain.
+
+    The NEWEST spawn of each name wins. A card that was resumed after a
+    fallback has two spawns for one agent, and the later one is what is
+    running.
+
+    Empty for history written before dispatch.sh recorded these, which is why
+    every field is read with `or ""` rather than assumed present.
+    """
+    out: dict = {}
+    for entry in entries:
+        event = entry.get("event") or {}
+        if event.get("action") != "spawn":
+            continue
+        name = event.get("name")
+        if not name:
+            continue
+        out[name] = {
+            "harness": event.get("harness") or "",
+            "model": event.get("model") or "",
+            "first_choice": event.get("first_choice") or "",
+        }
+    return out
+
+
 def _card_view(board: str, ticket: str, agents: list[dict], now: datetime) -> dict:
     """One card's position, from its own history.jsonl and the registry.
 
@@ -2616,7 +2651,26 @@ def _card_view(board: str, ticket: str, agents: list[dict], now: datetime) -> di
     entries = _read_jsonl(os.path.join(home, "history.jsonl"))
     last = entries[-1] if entries else None
     stamp = _entry_stamp(last) if last else None
-    mine = [a for a in _board_agents(agents, board) if _ticket_of_agent(a["name"]) == ticket]
+    facts = _spawn_facts(entries)
+    mine = []
+    for agent in _board_agents(agents, board):
+        if _ticket_of_agent(agent["name"]) != ticket:
+            continue
+        # A COPY, because the same view object is in the machine-wide `agents`
+        # list and these facts are the card's own reading of it.
+        row = dict(agent)
+        spawned = facts.get(agent["name"]) or {}
+        row["harness"] = spawned.get("harness", "")
+        row["model"] = spawned.get("model", "")
+        row["first_choice"] = spawned.get("first_choice", "")
+        # THE SIGNAL, not just the label. A stage running on anything but the
+        # model it asked for is running on a fallback tier, which means its
+        # first choice was rate-limited when this was dispatched. That is the
+        # thing worth seeing on a card at a glance; the harness alone does not
+        # say it, because a fallback can stay on the same harness.
+        row["fell_back"] = bool(
+            row["model"] and row["first_choice"] and row["model"] != row["first_choice"])
+        mine.append(row)
     return {
         "ticket": ticket,
         "board": board,

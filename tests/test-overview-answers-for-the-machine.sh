@@ -160,6 +160,51 @@ else
 fi
 
 # =============================================================================
+# Case: each active agent says what it is dispatched ON
+#
+# From the CARD'S OWN SPAWN ENTRY, never from which adapter answered the
+# registry: registry.sh merges Codex and OpenCode out of one shared registry,
+# so the answering adapter would label an OpenCode agent `codex` whenever codex
+# was read first. dispatch.sh writes harness, model and first_choice at the
+# moment it resolves the candidate, which is the one place any of it is known.
+# =============================================================================
+home1d="$(new_home)"
+mkdir -p "$home1d/instances/demo/cards/PRA-FB" "$home1d/instances/demo/cards/PRA-OLD"
+now_stamp="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+# Dispatched onto a fallback tier: its model is not the model it asked for.
+printf '{"at":"%s","event":{"action":"spawn","name":"foreman/demo/PRA-FB/build-1","role":"build","attempt":"1","model":"opencode:sol","first_choice":"claude:opus","harness":"opencode"}}\n' \
+  "$now_stamp" >"$home1d/instances/demo/cards/PRA-FB/history.jsonl"
+# History written before dispatch.sh recorded any of this. It must read as
+# blank, never as a guess.
+printf '{"at":"%s","event":{"action":"spawn","name":"foreman/demo/PRA-OLD/build-1","role":"build","attempt":"1"}}\n' \
+  "$now_stamp" >"$home1d/instances/demo/cards/PRA-OLD/history.jsonl"
+
+out1d="$(run_overview "$home1d" '[
+  {"name":"foreman/demo/PRA-FB/build-1","state":"working","startedAt":1,"id":"fb"},
+  {"name":"foreman/demo/PRA-OLD/build-1","state":"working","startedAt":2,"id":"old"}
+]')"
+agent_of() { field "$out1d" "[a for b in v[\"boards\"] for c in b[\"cards\"] for a in c[\"agents\"] if c[\"ticket\"]==\"$1\"][0][\"$2\"]"; }
+
+if [[ "$(agent_of PRA-FB harness)" == "opencode" ]] \
+   && [[ "$(agent_of PRA-FB model)" == "opencode:sol" ]]; then
+  ok "an active agent carries the harness and model it was dispatched on"
+else
+  not_ok "the dispatched harness/model: $(agent_of PRA-FB harness) / $(agent_of PRA-FB model)"
+fi
+
+if [[ "$(agent_of PRA-FB fell_back)" == "True" ]]; then
+  ok "a stage running on anything but its first choice is marked as fallen back"
+else
+  not_ok "a fallback is marked: $(agent_of PRA-FB fell_back)"
+fi
+
+if [[ "$(agent_of PRA-OLD harness)" == "" ]] && [[ "$(agent_of PRA-OLD fell_back)" == "False" ]]; then
+  ok "history written before dispatch.sh recorded this reads blank, not guessed"
+else
+  not_ok "old history: harness=$(agent_of PRA-OLD harness) fell_back=$(agent_of PRA-OLD fell_back)"
+fi
+
+# =============================================================================
 # Case: a blocked agent is a problem only while its card still needs it
 #
 # Measured 2026-09-20 on the first machine this page watched: five blocked

@@ -252,6 +252,10 @@ PAGE = r"""<!doctype html>
   th { color: var(--dim); font-weight: 600; font-size: 11px;
        letter-spacing: .08em; text-transform: uppercase; }
   .wrap { overflow-x: auto; }
+  .on {
+    color: var(--info); font-size: 12px;
+  }
+  .fb { color: var(--warn); font-weight: 700; cursor: help; }
   .pill {
     display: inline-block; padding: 1px 7px; border-radius: 10px;
     border: 1px solid var(--line); font-size: 12px;
@@ -341,7 +345,16 @@ function render(d) {
   for (const b of boards) {
     const rows = [];
     for (const c of (b.cards || [])) {
-      const who = (c.agents || []).map((a) => `${esc(a.role)} <span class="dim">${esc(a.phase)}</span>`).join(", ");
+      const who = (c.agents || []).map((a) => {
+        // What it is dispatched ON, from the card's own spawn entry. The model
+        // already carries its harness when dispatch resolved one
+        // ("claude:opus"), so showing both would read "claude claude:opus".
+        const on = a.model || a.harness;
+        const fell = a.fell_back
+          ? ` <span class="fb" title="first choice ${esc(a.first_choice)} was rate-limited">↓</span>` : "";
+        return `${esc(a.role)}${on ? ` <span class="on">${esc(on)}</span>${fell}` : ""}`
+             + ` <span class="dim">${esc(a.phase)}</span>`;
+      }).join(", ");
       rows.push(`<tr><td>${esc(c.ticket)}</td><td>${who || '<span class="dim">no agent</span>'}</td>
         <td>${esc(c.last_action || "—")}</td><td>${ago(c.idle_seconds)}</td></tr>`);
     }
