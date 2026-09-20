@@ -125,6 +125,25 @@ print("yes" if ticket in held else "")
 This is NOT a failure of ticket $TICKET and must not consume its attempt budget."
 
 if [[ -z "$ALREADY_HOLDS" ]]; then
+  # SAY THAT THIS BOARD WANTS A SLOT, before asking whether it may have one.
+  # `--may-dispatch` reserves a floor only for boards that are asking, so a
+  # board that never records the ask is read as idle and reserves nothing --
+  # it would win its own dispatches and lose every slot it is owed to whichever
+  # board asked most recently.
+  #
+  # Here, and not at the top of the script: a card that ALREADY holds a slot is
+  # not asking for a new one, and stamping for it would keep a board's floor
+  # reserved on the strength of resumes and fix-dispatches alone.
+  #
+  # A failed stamp WARNS rather than dies. It costs this board its share until
+  # the next pass, which is unfairness and not a wrong dispatch, and every
+  # cause of it -- an unwritable FOREMAN_HOME, a boards.toml that will not load
+  # -- makes the two gates below die with a message that names the real fault.
+  # Killing the card here would spend an attempt on a machine fault instead.
+  if ! "$SKILL_DIR/reconcile.py" --wants-slot "$INSTANCE"; then
+    printf 'foreman: could not record that %s wants a slot; it reserves nothing until the next pass\n' \
+      "$INSTANCE" >&2
+  fi
   # This board's own ceiling first, then the machine's.
   OWN="$(printf '%s' "$HELD" | python3 -c '
 import json, sys

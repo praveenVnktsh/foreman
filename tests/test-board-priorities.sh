@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Claim: boards share the machine ceiling by priority, and no declared board is
+# Claim: boards share the machine ceiling by priority, a board reserves its floor
+# only while it is asking for work, and no declared board that is asking is
 # starved.
 #
 # HOST_MAX_CONCURRENT bounds cards in flight across every board sharing a
@@ -9,9 +10,16 @@
 # which looks exactly like a board with no work.
 #
 # The rule: each board earns a floor, never below 1, and may use capacity nobody
-# else is owed.
+# else is owed. A floor is reserved only for a board with FRESH DEMAND -- one
+# that asked for a slot within DEMAND_STALE_MINUTES.
 #     floor(b)     = max(1, host_max * priority(b) / sum of priorities)
-#     available(b) = host_max - total_held - sum of other boards' unmet floors
+#     available(b) = host_max - total_held
+#                    - sum of other DEMANDING boards' unmet floors
+#
+# Measured 2026-09-20 on a machine serving four boards at priority 2 with
+# host_max 10: every board had a floor of 2, so the one board with a full Todo
+# column could never exceed 4 of 10 while the other three sat idle with nothing
+# to build. An idle board now reserves nothing.
 set -uo pipefail
 
 root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -60,8 +68,32 @@ may() {  # $1 board, $2 host_max -> prints the refusal, empty if allowed
     "$root/skills/board/reconcile.py" --may-dispatch "$1" 2>/dev/null
 }
 
+# The real verb dispatch.sh calls when a board has a card it wants to start.
+want() {  # $1 board
+  env FOREMAN_HOME="$fh" FOREMAN_INSTANCE="$1" \
+    "$root/skills/board/reconcile.py" --wants-slot "$1"
+}
+
+# Demand as it reads once it has aged out. Written through the same stamp file
+# the real verb writes, because the claim is about the stamp going stale and not
+# about any second way of recording one.
+want_stale() {  # $1 board, $2 minutes ago
+  mkdir -p "$fh/instances/$1"
+  python3 - "$fh/instances/$1/wants-slot" "$2" <<'EOF'
+import sys
+from datetime import datetime, timedelta, timezone
+path, minutes = sys.argv[1], float(sys.argv[2])
+when = datetime.now(timezone.utc) - timedelta(minutes=minutes)
+open(path, "w").write(when.strftime("%Y-%m-%dT%H:%M:%SZ") + "\n")
+EOF
+}
+
+reset() { rm -rf "$fh/instances"; mkdir -p "$fh/instances"; }
+
 # --- the worked example: host_max 4, alpha 3, beta 1 -> floors 3 and 1 -------
+#     beta asks for work throughout, so its floor is reserved.
 declare_boards alpha:3 beta:1
+want beta
 
 [[ -z "$(may alpha 4)" ]] && ok "with nothing held, the high-priority board may dispatch" \
   || bad "alpha refused on an empty machine: $(may alpha 4)"
@@ -85,21 +117,73 @@ r="$(may beta 4)"
 case "$r" in *"4 of 4"*) ok "with the machine full, the next ask names the ceiling" ;;
   *) bad "machine full -> $r" ;; esac
 
+# --- THE POINT OF DEMAND-GATING: an idle board reserves nothing --------------
+#     Same boards, same floors, same holdings as the worked example above. The
+#     only difference is that beta never asked, so alpha may have the machine.
+reset
+declare_boards alpha:3 beta:1
+hold alpha A-1; hold alpha A-2; hold alpha A-3
+[[ -z "$(may alpha 4)" ]] \
+  && ok "a board that is not asking for work reserves nothing" \
+  || bad "an idle beta still reserved a slot: $(may alpha 4)"
+
+# --- demand arrives, and the floor comes back with it ------------------------
+want beta
+r="$(may alpha 4)"
+case "$r" in *beta*) ok "once beta asks, its floor is reserved again" ;;
+  *) bad "beta asked and was owed nothing: ${r:-allowed}" ;; esac
+
+# --- demand goes stale, and the floor goes with it ---------------------------
+#     A board whose last ask predates DEMAND_STALE_MINUTES reads as idle. This
+#     is what stops a board that stopped asking from holding capacity forever.
+reset
+declare_boards alpha:3 beta:1
+hold alpha A-1; hold alpha A-2; hold alpha A-3
+want_stale beta 10000
+[[ -z "$(may alpha 4)" ]] \
+  && ok "a stale ask reads as idle, so its floor is released" \
+  || bad "a stale ask still reserved a slot: $(may alpha 4)"
+
+# --- a board's own floor never depends on its own demand ---------------------
+#     alpha holds everything and beta has never asked through the verb. beta's
+#     first ask must still be answered, or the demand marker becomes a
+#     chicken-and-egg gate no board can ever pass.
+reset
+declare_boards alpha:3 beta:1
+hold alpha A-1; hold alpha A-2
+[[ -z "$(may beta 4)" ]] \
+  && ok "a board that has never asked may still take a free slot" \
+  || bad "beta refused its first ask: $(may beta 4)"
+
+# --- an undeclared board is refused rather than stamped ----------------------
+reset
+declare_boards alpha:3 beta:1
+if env FOREMAN_HOME="$fh" FOREMAN_INSTANCE=alpha \
+  "$root/skills/board/reconcile.py" --wants-slot gamma >/dev/null 2>&1; then
+  bad "--wants-slot stamped a board boards.toml does not declare"
+else
+  [[ -e "$fh/instances/gamma/wants-slot" ]] \
+    && bad "--wants-slot created instances/gamma/ for an undeclared board" \
+    || ok "--wants-slot refuses a board that is not declared"
+fi
+
 # --- an undeclared priority defaults to 1, so nothing changes underneath an
 #     operator who never asked for priorities ------------------------------
-rm -rf "$fh/instances"; mkdir -p "$fh/instances"
+reset
 declare_boards alpha beta
+want beta
 hold alpha A-1; hold alpha A-2; hold alpha A-3
 r="$(may alpha 4)"
 case "$r" in *beta*) ok "boards with no declared priority divide evenly" ;;
   *) bad "even split -> ${r:-allowed}" ;; esac
 
 # --- priority 0 has no floor: it takes surplus and reserves nothing ----------
-rm -rf "$fh/instances"; mkdir -p "$fh/instances"
+reset
 declare_boards alpha:3 beta:0
+want beta
 hold alpha A-1; hold alpha A-2; hold alpha A-3
 [[ -z "$(may alpha 4)" ]] \
-  && ok "a priority-0 board reserves nothing, so the fourth slot is free" \
+  && ok "a priority-0 board reserves nothing even while asking" \
   || bad "a priority-0 board reserved a slot: $(may alpha 4)"
 
 # --- a malformed priority is refused, not guessed at ------------------------
