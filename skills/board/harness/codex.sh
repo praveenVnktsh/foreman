@@ -580,9 +580,11 @@ skill_prompt_text() { # <name>
   # be for claude.sh.
   #
   # The second clause carries the same weight as opencode.sh's: a prompt that
-  # only invokes a skill may end at the invocation, with no pass run. See the
-  # measurement recorded there.
-  printf '$%s, then carry out one full pass exactly as the skill instructs\n' "$1"
+  # only invokes a skill may end at the invocation, with no pass run, and it
+  # asks for the LOOP rather than for one pass. See the two measurements
+  # recorded there -- the one-pass wording was taken by a tick as its limit,
+  # and SKILL.md's own budget knobs then bounded nothing.
+  printf '$%s, then run its loop exactly as the skill instructs: pass after pass, stopping only when a whole pass changes nothing or the budget is spent\n' "$1"
 }
 
 detached_main "$@"

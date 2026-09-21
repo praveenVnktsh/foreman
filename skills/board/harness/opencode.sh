@@ -433,8 +433,24 @@ skill_prompt_text() { # <name>
   # so a prompt that asks only to load produces no board pass at all and the
   # board silently stops moving. Measured on the same host and model: the
   # minimal prompt gave 1 tool call per session, this one gave 26. Ask for the
-  # pass in the same breath as the load.
-  printf 'use skill tool to load %s, then carry out one full pass exactly as the skill instructs\n' "$1"
+  # work in the same breath as the load.
+  #
+  # IT ASKS FOR THE LOOP, NOT FOR ONE PASS. It used to say "carry out one full
+  # pass", and a tick took that as its limit: measured 2026-09-21, a session
+  # ended its own report with "this was exactly one pass as you asked... the
+  # skill's loop would run a second pass... I stopped here." SKILL.md says the
+  # opposite -- "a tick runs until it stops making progress, not once" -- and
+  # TICK_BUDGET_MINUTES and TICK_MAX_PASSES exist to bound that loop, so a
+  # one-pass tick never reaches either.
+  #
+  # What it cost: a slice ends at the first card it moves, so a board that
+  # reconciles anything never reaches step 6 and never reads its Todo. One
+  # pass per session, one session per TICK_INTERVAL_MINUTES, is one card
+  # movement per board every twenty minutes -- against a queue of twelve, on a
+  # machine holding three of ten slots. The stop conditions are named here
+  # because "until the skill says to stop" was what the old wording already
+  # meant and did not achieve.
+  printf 'use skill tool to load %s, then run its loop exactly as the skill instructs: pass after pass, stopping only when a whole pass changes nothing or the budget is spent\n' "$1"
 }
 
 detached_main "$@"

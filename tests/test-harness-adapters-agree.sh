@@ -584,9 +584,35 @@ for harness in claude codex opencode; do
   # (`/loop` loops inside one session), so this pins the two harnesses whose
   # wrapper re-invokes the CLI once per pass.
   if [[ "$harness" != "claude" ]]; then
-    case "$(run_adapter skill-prompt board)" in
+    prompt_text="$(run_adapter skill-prompt board)"
+    case "$prompt_text" in
       *pass*) ok "$harness skill-prompt asks for a pass, not only an invocation" ;;
-      *) bad "$harness skill-prompt stops at the invocation and would run no pass: $(run_adapter skill-prompt board)" ;;
+      *) bad "$harness skill-prompt stops at the invocation and would run no pass: $prompt_text" ;;
+    esac
+
+    # AND IT MUST NOT CAP THE TICK AT ONE PASS. The clause above used to read
+    # "carry out one full pass", which satisfies `*pass*` -- so this test
+    # passed while the tick was stopping after a single pass. Measured
+    # 2026-09-21: a session ended its own report with "this was exactly one
+    # pass as you asked... the skill's loop would run a second pass... I
+    # stopped here", on a board with twelve cards in Todo and seven of ten
+    # host slots free.
+    #
+    # SKILL.md is the contract -- "a tick runs until it stops making progress,
+    # not once" -- and TICK_BUDGET_MINUTES and TICK_MAX_PASSES bound that loop.
+    # A prompt that asks for one pass reaches neither.
+    case "$prompt_text" in
+      *"one full pass"*|*"one pass"*|*"a single pass"*)
+        bad "$harness skill-prompt caps the tick at one pass, which SKILL.md's loop and budget knobs then bound nothing of: $prompt_text" ;;
+      *) ok "$harness skill-prompt does not cap the tick at a single pass" ;;
+    esac
+
+    # The stop conditions are the skill's, so the prompt has to name work that
+    # REPEATS rather than work that happens once.
+    case "$prompt_text" in
+      *"pass after pass"*|*passes*|*loop*)
+        ok "$harness skill-prompt asks for repeated passes" ;;
+      *) bad "$harness skill-prompt names no repetition, so one pass is a fair reading: $prompt_text" ;;
     esac
   fi
 
