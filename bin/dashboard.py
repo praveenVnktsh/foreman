@@ -305,6 +305,23 @@ PAGE = r"""<!doctype html>
 </form>
 
 <script>
+// WHERE THIS PAGE'S ENDPOINTS ARE, worked out from where the page itself is.
+//
+// A bare relative "api" is resolved against the DIRECTORY of the current URL,
+// not against the URL. At /foreman/ that is /foreman/api and correct; at
+// /foreman -- no trailing slash, which is what an operator types and what a
+// link gives them -- it is /api, at the proxy's root, where something else
+// entirely answers. Measured 2026-09-20: the page rendered
+// "SyntaxError: Unexpected token 'o', \"not found\" is not valid JSON",
+// because the site published at that tailnet root replied "not found" to /api
+// and the page tried to parse it. Under a deeper mount it is worse and
+// quieter: /boards/foreman asks /boards/api.
+//
+// So the base is the pathname with a trailing slash guaranteed. The server
+// routes on the LAST segment, so this is right for every mount, with or
+// without the slash, and for /index.html too.
+const BASE = location.pathname.endsWith("/") ? location.pathname : location.pathname + "/";
+
 const $ = (id) => document.getElementById(id);
 const esc = (s) => String(s == null ? "" : s).replace(/[&<>"']/g,
   (c) => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
@@ -387,10 +404,8 @@ function render(d) {
 
 async function tick() {
   try {
-    // RELATIVE, never "/api": this page is mounted behind `tailscale serve`
-    // under a path prefix, so an absolute URL asks the proxy's root and gets
-    // whatever else is published there.
-    const r = await fetch("api", {cache: "no-store"});
+    // BASE + "api", never a bare "api" and never "/api" -- see BASE above.
+    const r = await fetch(BASE + "api", {cache: "no-store"});
     render(await r.json());
   } catch (e) {
     $("problems").innerHTML =
@@ -405,7 +420,7 @@ $("msg").addEventListener("submit", async (ev) => {
   const button = ev.target.querySelector("button");
   button.disabled = true;
   try {
-    const r = await fetch("message", {method: "POST", body: text});
+    const r = await fetch(BASE + "message", {method: "POST", body: text});
     const out = await r.json();
     if (out.error) { $("sent").textContent = out.error; $("sent").style.color = "var(--crit)"; }
     else { $("text").value = ""; $("sent").textContent = "queued " + out.queued; $("sent").style.color = ""; tick(); }
