@@ -109,12 +109,47 @@ else
   not_ok "the api serves the overview: $(body "/api" | head -c 400)"
 fi
 
-# The page must ask RELATIVELY, or a mounted deployment asks the proxy's root.
-if grep -q 'fetch("api"' "$dashboard" && ! grep -q 'fetch("/api"' "$dashboard"; then
-  ok "the page asks for 'api', never '/api'"
+# =============================================================================
+# Case: the page's endpoints resolve from where the page IS
+#
+# THE BUG THIS REPLACES A TEST FOR. A bare relative "api" resolves against the
+# DIRECTORY of the current URL. At /foreman/ that is /foreman/api; at /foreman
+# -- no trailing slash, which is what an operator types -- it is /api, at the
+# proxy root, where another site answered "not found" and the page rendered
+# "SyntaxError: Unexpected token 'o'". The old assertion here required exactly
+# the bare form, so it passed while the page was broken, and every mount case
+# below used a trailing slash and never exercised it.
+#
+# Resolution itself happens in a browser, which this file has no way to run.
+# What it can pin is that the page builds a base ending in "/" from
+# location.pathname and uses it for both endpoints -- the three things whose
+# absence caused the failure.
+# =============================================================================
+if grep -q 'location.pathname.endsWith("/") ? location.pathname : location.pathname + "/"' "$dashboard"; then
+  ok "the page derives its endpoint base from location.pathname, slash guaranteed"
 else
-  not_ok "the page asks with an absolute URL, which breaks behind a path prefix"
+  not_ok "the page does not derive a trailing-slash base; a mount without one asks the proxy root"
 fi
+
+if ! grep -qE 'fetch\("(/?)(api|message)"' "$dashboard"; then
+  ok "no endpoint is fetched bare or absolute; both go through the base"
+else
+  not_ok "an endpoint is fetched without the base: $(grep -oE 'fetch\("[^"]*"' "$dashboard" | tr "\n" " ")"
+fi
+
+if [[ "$(grep -c 'fetch(BASE + "' "$dashboard")" == "2" ]]; then
+  ok "both the api and the message endpoint use the base"
+else
+  not_ok "not both endpoints use the base: $(grep -c 'fetch(BASE + "' "$dashboard") of 2"
+fi
+
+# The server half: it routes on the LAST segment, so a base that appends a
+# slash cannot produce a path it refuses -- including the /index.html case,
+# where the base becomes /index.html/ and the endpoint /index.html/api.
+for path in "/api" "/foreman/api" "/boards/foreman/api" "/index.html/api"; do
+  [[ "$(code "$path")" == "200" ]] || not_ok "the server refused $path, which a computed base can produce"
+done
+ok "every path a computed base can produce is answered"
 
 # =============================================================================
 # Case: a message reaches the tick's inbox
