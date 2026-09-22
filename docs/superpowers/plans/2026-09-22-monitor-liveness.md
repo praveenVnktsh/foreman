@@ -628,7 +628,9 @@ else
 fi
 
 # A stale stamp: refuse.
-touch -t "$(date -u -r "$(( $(date +%s) - 300 ))" +%Y%m%d%H%M.%S 2>/dev/null || date -u -d @"$(( $(date +%s) - 300 ))" +%Y%m%d%H%M.%S)" "$stamp"
+# BSD `touch -t` reads its argument as LOCAL time and GNU touch does not, so a
+# UTC-computed stamp lands hours off. os.utime takes an epoch and is portable.
+python3 -c 'import os,sys,time; t=time.time()-300; os.utime(sys.argv[1], (t, t))' "$stamp"
 if attempt >/dev/null 2>&1; then
   echo "FAIL dispatched with a stale monitor stamp" >&2; fail=1
 fi
@@ -735,12 +737,11 @@ Then the deltas that make it this test. The stamp lives at `$FOREMAN_HOME/instan
 stamp="$work/home/.foreman/instances/demo/monitor.stamp"
 mkdir -p "$(dirname "$stamp")"
 
+# BSD `touch -t` reads its argument as LOCAL time and GNU touch does not, so a
+# UTC-computed stamp lands hours off. os.utime takes an epoch and is portable.
 age_stamp() { # <seconds old>
-  local t
-  t="$(date -u -r "$(( $(date +%s) - $1 ))" +%Y%m%d%H%M.%S 2>/dev/null \
-       || date -u -d @"$(( $(date +%s) - $1 ))" +%Y%m%d%H%M.%S)"
   date -u +%Y-%m-%dT%H:%M:%SZ >"$stamp"
-  touch -t "$t" "$stamp"
+  python3 -c 'import os,sys,time; t=time.time()-float(sys.argv[2]); os.utime(sys.argv[1], (t, t))' "$stamp" "$1"
 }
 
 # 1. A live tick past the grace, with a stale stamp: halt, and say which board.
