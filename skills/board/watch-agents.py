@@ -69,6 +69,40 @@ HARNESS_SH = reconcile.HARNESS_SH
 # it. See _dispatched() for how a captured name is held against it.
 BOARD_NAME_PREFIX = reconcile.BOARD_NAME_PREFIX
 
+# PROOF THAT A MONITOR IS ARMED. This process runs only while one is alive, so
+# its own execution is the fact worth recording. The tick cannot report this:
+# asked whether it armed a Monitor it reports intent, and a call rejected by a
+# newer harness reports armed just as readily. The harness cannot report it
+# either -- a Monitor lives inside the session and nothing persists it.
+#
+# Read by reconcile.py --monitor-stamps, and through it by dispatch.sh,
+# supervise.sh and bin/dashboard.py. The mtime is what those read; the contents
+# are for a human who opens the file.
+STAMP_PATH = os.path.join(reconcile.BOARD_HOME, "monitor.stamp")
+
+
+def stamp() -> None:
+    """Refresh STAMP_PATH. Called on every poll, including the seeding one.
+
+    WRITTEN VIA A TEMPORARY AND RENAMED, so a reader never sees a half-written
+    file and mistakes a truncated stamp for a corrupt one. os.replace is atomic
+    within a directory.
+
+    A FAILURE HERE IS SWALLOWED, and that is not the same as ignored. The watch
+    must keep emitting: its wakeups are useful even when the stamp is not
+    writable. The gates then halt foreman on the stale stamp, which is the
+    correct outcome -- a board whose runtime directory cannot be written is not
+    a board that should be dispatching.
+    """
+    try:
+        tmp = f"{STAMP_PATH}.tmp"
+        with open(tmp, "w") as fh:
+            fh.write(time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()) + "\n")
+        os.replace(tmp, STAMP_PATH)
+    except OSError:
+        pass
+
+
 # foreman/[<installation>/]<instance>/<TICKET>/<role>-<attempt>. The
 # installation segment is optional because the legacy installation's names
 # have none. The tick is foreman/[<installation>/]tick, which has no ticket
@@ -160,9 +194,17 @@ def poll() -> dict[str, str]:
 
 
 def main() -> int:
+    stamp()
     seen = poll()          # seed silently
     while True:
         time.sleep(POLL_SECONDS)
+        # BEFORE the poll and BEFORE the empty-poll skip below, for two
+        # reasons. A board with no dispatched agents polls empty and `continue`s
+        # -- stamping after that would read an idle board as an unarmed one and
+        # stop the machine. And a registry read that hangs takes up to its own
+        # 30s timeout, so stamping first bounds the gap between stamps at
+        # WATCH_POLL_SECONDS + 30 = 45s, inside MONITOR_STALE_SECONDS of 60.
+        stamp()
         now = poll()
         if not now:
             continue
