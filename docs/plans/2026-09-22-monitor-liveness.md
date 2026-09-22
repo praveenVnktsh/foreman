@@ -805,8 +805,9 @@ import json, sys
 d = json.load(sys.stdin)
 if d["ok"]:
     sys.exit(0)
-print("no live agent Monitor on: " + ", ".join(d["stale"])
-      + f" (stamp older than {d[\"stale_seconds\"]:.0f}s)")
+stale = ", ".join(d["stale"])
+secs = d["stale_seconds"]
+print(f"no live agent Monitor on: {stale} (stamp older than {secs:.0f}s)")
 ')"
   [[ -n "$MONITOR_STALE_REASON" ]]
 }
