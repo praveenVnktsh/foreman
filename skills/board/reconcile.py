@@ -48,6 +48,7 @@ def _load_config() -> dict[str, str]:
         "DEPLOY_WORKFLOW", "DEPLOY_STEP", "DEPLOY_SELECTION_STEP", "CI_WORKFLOW",
         "INSTANCE",
         "FOREMAN_HOME", "HOST_SLOT_STALE_MINUTES", "DEMAND_STALE_MINUTES",
+        "MONITOR_STALE_SECONDS", "MONITOR_GRACE_SECONDS",
         "HARNESS_SH", "TICK_AGENT_NAME",
         "FOREMAN_DEFAULT_HARNESS", "FOREMAN_HARNESSES",
         "BOARD_NAME_PREFIX", "BOARD_WORKTREE_PREFIX",
@@ -1323,6 +1324,50 @@ def cards_holding_slots(cards_dir: str, stale_minutes: float | None) -> list[str
         return []
     return [t for t in tickets
             if card_holds_slot(os.path.join(cards_dir, t, "history.jsonl"), stale_minutes)]
+
+
+MONITOR_STALE_SECONDS = float(_CFG.get("MONITOR_STALE_SECONDS") or 60)
+
+
+def monitor_stamps(foreman_home: str = FOREMAN_HOME) -> dict:
+    """Is every declared board's agent Monitor alive right now?
+
+    ONE DERIVATION, THREE READERS. dispatch.sh refuses on a stale stamp,
+    supervise.sh stops the tick on one, and bin/dashboard.py shows it. Spelling
+    the rule once is why `--host-slots` exists in this file rather than in each
+    caller, and this answers the same shape of question over the same local
+    files.
+
+    A MISSING STAMP IS STALE, never absent. A board that never armed a Monitor
+    is the fault this exists to catch; reporting it as "no answer" would let a
+    caller skip the gate, which is how the slot ceilings were once disabled with
+    nothing on stderr.
+
+    RAISES BoardsUnreadable when boards.toml will not load, exactly as
+    host_slots() does. A roster nobody can read must never read as a machine
+    with nothing to check.
+    """
+    now = time.time()
+    boards = {}
+    for board in declared_boards(foreman_home):
+        path = os.path.join(foreman_home, "instances", board, "monitor.stamp")
+        try:
+            age = now - os.path.getmtime(path)
+        except OSError:
+            boards[board] = {"age_seconds": None, "stale": True, "present": False}
+            continue
+        boards[board] = {
+            "age_seconds": round(age, 1),
+            "stale": age > MONITOR_STALE_SECONDS,
+            "present": True,
+        }
+    stale = sorted(n for n, b in boards.items() if b["stale"])
+    return {
+        "boards": boards,
+        "stale": stale,
+        "ok": not stale,
+        "stale_seconds": MONITOR_STALE_SECONDS,
+    }
 
 
 def host_slots(stale_minutes: float | None = HOST_SLOT_STALE_MINUTES) -> dict:
@@ -2977,6 +3022,7 @@ def main(argv: list[str]) -> int:
         print("usage: reconcile.py <TICKET> [TICKET...]\n"
               "       reconcile.py --main-ci [BRANCH]\n"
               "       reconcile.py --host-slots\n"
+              "       reconcile.py --monitor-stamps\n"
               "       reconcile.py --board-order\n"
               "       reconcile.py --overview [--with-remote]\n"
               "       reconcile.py --served <board>\n"
@@ -3135,6 +3181,16 @@ def main(argv: list[str]) -> int:
         # whole machine, over local files only, and must not require the
         # agent registry (which is per-process, not per-instance) to answer it.
         json.dump(host_slots(), sys.stdout, indent=2)
+        print()
+        return 0
+    if argv[0] == "--monitor-stamps":
+        # Local files only, like --host-slots: a gate that needed the network to
+        # answer would fail open on every rate limit.
+        try:
+            json.dump(monitor_stamps(), sys.stdout, indent=2)
+        except BoardsUnreadable as exc:
+            print(f"reconcile: {exc}", file=sys.stderr)
+            return 2
         print()
         return 0
     agents = load_agents()

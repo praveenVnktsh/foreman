@@ -449,6 +449,32 @@ TICK_INTERVAL_MINUTES="${TICK_INTERVAL_MINUTES:-20}"
 # therefore widens this too, instead of silently breaking every floor.
 DEMAND_STALE_MINUTES="${DEMAND_STALE_MINUTES:-$((TICK_INTERVAL_MINUTES * 3))}"
 
+# How long a board's monitor.stamp may go unrefreshed before its Monitor counts
+# as not armed. watch-agents.py stamps it every WATCH_POLL_SECONDS, and that
+# process runs only while a Monitor is alive.
+#
+# DERIVED FROM THE POLL, not stated, for the reason DEMAND_STALE_MINUTES is
+# derived from TICK_INTERVAL_MINUTES: an operator who slows the poll widens
+# this with it, instead of silently breaking every gate that reads it.
+#
+# FOUR POLLS. The gap between two stamps is at most WATCH_POLL_SECONDS plus the
+# 30s timeout on the registry read the loop makes between them -- 45s with the
+# default poll of 15. Four polls is 60s, which clears that without calling a
+# live Monitor dead, and is short enough that a dead one is caught inside a
+# minute.
+MONITOR_STALE_SECONDS="${MONITOR_STALE_SECONDS:-$(( ${WATCH_POLL_SECONDS:-15} * 4 ))}"
+
+# How long after a tick starts before supervise.sh acts on a stale stamp.
+#
+# Nothing is armed in the first seconds of a fresh tick, by definition. 120s is
+# longer than a tick needs to read its inbox, list its boards and arm one
+# Monitor each, and far shorter than TICK_BUDGET_MINUTES.
+#
+# ONLY supervise.sh reads this. dispatch.sh needs no grace: arming happens at
+# the top of a tick and a dispatch happens later in the same pass, so a stamp is
+# already fresh by the time dispatch.sh runs.
+MONITOR_GRACE_SECONDS="${MONITOR_GRACE_SECONDS:-120}"
+
 # Wedged: mid-turn and silent. A tick genuinely working is never quiet this long.
 TICK_STALL_MINUTES="${TICK_STALL_MINUTES:-45}"
 # Loop dead: idle between ticks for longer than the interval can explain, which
