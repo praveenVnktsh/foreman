@@ -152,6 +152,10 @@ PY
 
   DISPATCH_HOME="$work_dir/home"
   fixture_add_instance "$DISPATCH_HOME" demo "$target"
+  # A fresh monitor.stamp. dispatch.sh (Task 4) refuses to dispatch while any
+  # board's Monitor stamp is stale or missing, and none of the probes this
+  # fixture drives are testing that gate.
+  fixture_arm_monitor "$DISPATCH_HOME/.foreman" demo
 
   DISPATCH_ARGV_LOG="$work_dir/argv.log"
   DISPATCH_SUBAGENT_MODEL_LOG="$work_dir/subagent-model.log"
@@ -264,6 +268,12 @@ dispatch_fixture_show_run_log() {
 # `claude --bg`", which names nothing; the log is where the reason is, and
 # dispatch_fixture_show_run_log is how a test prints it.
 dispatch_fixture_run() {
+  # Re-armed on every call, not only at setup. dispatch.sh (Task 4) reads the
+  # stamp's age at the moment it runs, with no grace period, and a fixture
+  # that armed it once at setup goes stale under a caller that dispatches
+  # several real (non-dry-run) cards in a row -- each one cuts a git worktree,
+  # and four of those can outrun MONITOR_STALE_SECONDS on a loaded machine.
+  fixture_arm_monitor "$DISPATCH_HOME/.foreman" demo
   : >"$DISPATCH_ARGV_LOG"
   : >"$DISPATCH_SUBAGENT_MODEL_LOG"
   # Truncated with the other two. A name left over from the previous dispatch

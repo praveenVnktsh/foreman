@@ -34,6 +34,10 @@ git -C "$target" -c user.email=t@e -c user.name=t commit -qm seed
 git -C "$target" remote add origin "$origin"
 git -C "$target" push -q origin main
 fixture_add_board "$home" demo "$target"
+# A fresh monitor.stamp. dispatch.sh (Task 4) refuses to dispatch while any
+# board's Monitor stamp is stale or missing, and this file is testing the
+# concurrency ceilings, not that gate.
+fixture_arm_monitor "$home/.foreman" demo
 
 stub="$work/bin"; mkdir -p "$stub"
 printf '#!/usr/bin/env bash\nexit 0\n' > "$stub/claude"; chmod +x "$stub/claude"
@@ -101,11 +105,17 @@ esac
 # and the machine over-dispatched on top of its builds -- the 2026-09-01
 # failure one level up. A count the gate cannot read is now a refusal that
 # names itself and spends no attempt.
+#
+# reconcile.py backs the monitor-stamps gate too, and that gate runs BEFORE
+# this one (Task 4), so hiding the whole file is caught there first -- by name,
+# and still with no attempt spent. That is still "an unreadable count refuses",
+# just at the earlier gate reconcile.py now backs as well.
 mv "$root/skills/board/reconcile.py" "$work/reconcile.hidden" 2>/dev/null || true
 out="$(dispatch 1 4 ABC-77)"
 mv "$work/reconcile.hidden" "$root/skills/board/reconcile.py" 2>/dev/null || true
 case "$out" in
-  *"could not count the machine's slots"*) ok "a count it cannot read refuses the dispatch by name" ;;
+  *"could not count the machine's slots"*|*"could not read the machine's monitor stamps"*)
+    ok "a count it cannot read refuses the dispatch by name" ;;
   *) bad "an unreadable slot count did not refuse by name: $out" ;;
 esac
 

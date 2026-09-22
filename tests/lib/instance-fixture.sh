@@ -97,6 +97,21 @@ fixture_add_board_in() {
   printf '[boards.%s]\nrepo = "%s"\n' "$name" "$repo_dir" >> "$fh/boards.toml"
 }
 
+# fixture_arm_monitor <foreman_home> <name>
+# Writes a fresh monitor.stamp for board <name>, so it reads as having a live
+# agent Monitor. dispatch.sh (Task 4) refuses to dispatch while any board's
+# stamp is stale or missing, so a test that drives dispatch.sh for a reason
+# other than that gate calls this after fixture_add_board/fixture_add_instance.
+# NOT folded into fixture_add_board_in itself: test-monitor-stamp.sh and
+# test-monitor-stamps-reader.sh assert that a freshly declared board starts
+# with no stamp at all, and a default write here would falsify that fixture out
+# from under them.
+fixture_arm_monitor() {
+  local fh="$1" name="$2"
+  mkdir -p "$fh/instances/$name"
+  date -u +%Y-%m-%dT%H:%M:%SZ > "$fh/instances/$name/monitor.stamp"
+}
+
 # fixture_linear_key <dir>
 # One credential per workspace, at the machine root. It used to be copied into
 # every instance directory.

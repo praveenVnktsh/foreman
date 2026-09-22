@@ -63,6 +63,37 @@ This is NOT a failure of ticket $TICKET and must not consume its attempt budget.
 Repair the machine, then dispatch again at the same attempt number."
 fi
 
+# THE EDGE-TRIGGER MUST BE ALIVE BEFORE ANYTHING IS DISPATCHED.
+#
+# A board whose Monitor is not armed still works: it dispatches, reviews and
+# merges. It is slower by up to one TICK_INTERVAL_MINUTES on every finished
+# agent, and no surface says so -- waiting looks exactly like running. Measured
+# 2026-09-22 across five cards, dispatch to first commit ran from 38 minutes to
+# 33 hours, against about five minutes for a hand-driven pull request in the
+# same window.
+#
+# HELD HERE AND NOT ONLY IN SKILL.md, for the reason the preflight above is: a
+# tick asked in prose to stop when a Monitor fails to arm may carry on instead,
+# and that is the failure this gate exists to remove.
+#
+# MACHINE-WIDE, not this board alone. A rejected Monitor call is evidence about
+# the harness contract, and every board on this machine shares one harness.
+if ! STAMPS="$("$SKILL_DIR/reconcile.py" --monitor-stamps)"; then
+  die "could not read the machine's monitor stamps; refusing to dispatch $NAME.
+reconcile.py's own message is above: a boards.toml that will not load, or
+foreman's own scripts being unrunnable.
+This is NOT a failure of ticket $TICKET and must not consume its attempt budget.
+Repair the machine, then dispatch again at the same attempt number."
+fi
+if ! printf '%s' "$STAMPS" | python3 -c 'import json,sys; sys.exit(0 if json.load(sys.stdin)["ok"] else 1)'; then
+  die "no board on this machine has a live agent Monitor; refusing to dispatch $NAME.
+Stale or missing: $(printf '%s' "$STAMPS" | python3 -c 'import json,sys; print(" ".join(json.load(sys.stdin)["stale"]))')
+A board whose Monitor is not armed runs at heartbeat speed and says nothing.
+Arm it as skills/board/SKILL.md describes, then dispatch again at the same
+attempt number.
+This is NOT a failure of ticket $TICKET and must not consume its attempt budget."
+fi
+
 # The concurrency ceilings, held here rather than only in SKILL.md.
 #
 # SKILL.md states the arithmetic exactly -- a board's free slots are its

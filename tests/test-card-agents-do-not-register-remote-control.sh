@@ -121,6 +121,10 @@ mkdir -p "$target"
 git -C "$target" init -q -b main
 fixture_board_toml "$target"
 fixture_add_board "$home" demo "$target"
+# A fresh monitor.stamp. dispatch.sh (Task 4) refuses to dispatch while any
+# board's Monitor stamp is stale or missing, and this file is testing Remote
+# Control registration, not that gate.
+fixture_arm_monitor "$home/.foreman" demo
 tick_argv="$work/tick-argv"; registry="$work/registry.json"
 printf '[]\n' >"$registry"
 mkdir -p "$home/.local/bin"
