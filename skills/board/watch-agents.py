@@ -6,7 +6,12 @@ back wakes the board immediately instead of the board discovering it on a poll
 several minutes later.
 
     Monitor(command="~/.foreman/install/skills/board/watch-agents.py",
-            persistent=True, description="board agents finishing")
+            persistent=True, timeout_ms=1800000,
+            description="board agents finishing")
+
+`timeout_ms` is required even when `persistent` is true, and `persistent`
+itself exists only up to Claude Code 2.1.228 -- 2.1.275 removed it. SKILL.md
+carries the version note; this is the copy a reader of this file sees.
 
 TWO RULES MAKE THIS SAFE.
 

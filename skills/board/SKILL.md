@@ -532,8 +532,27 @@ one of that board's dispatched agents comes back:
 
 ```bash
 Monitor(command="FOREMAN_INSTANCE=<board> ~/.foreman/install/skills/board/watch-agents.py",
-        persistent=True, description="board agents finishing: <board>")
+        persistent=True, timeout_ms=1800000,
+        description="board agents finishing: <board>")
 ```
+
+**`timeout_ms` is required even when `persistent` is true.** `sdk-tools.d.ts`
+declares it non-optional, and the call here shipped without it. `persistent`
+makes it moot at runtime; leaving it out risks the call being rejected, which
+arms nothing.
+
+**The argument list is version-bound, and the boundary is a date.** Claude Code
+2.1.228 requires `persistent` and documents it as "Run for the lifetime of the
+session (no timeout)". 2.1.275 removed `persistent`, sets
+`additionalProperties: false`, and caps every monitor at 30 minutes. No single
+call works on both. On a harness that rejects `persistent`, drop it and keep
+`timeout_ms` — the tick re-arms at the top of every tick anyway, which is what
+a capped monitor needs.
+
+**If the call is rejected, stop.** Do not carry on without a Monitor. The
+board would keep merging cards one interval slower on every finished agent,
+and every surface would read healthy. `dispatch.sh` and `supervise.sh` enforce
+this with the stamp below, because prose cannot.
 
 One per board, and the board named in the description, because
 `watch-agents.py` reports only the agents of the board in its own environment —
