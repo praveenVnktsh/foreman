@@ -106,16 +106,46 @@ esac
 # failure one level up. A count the gate cannot read is now a refusal that
 # names itself and spends no attempt.
 #
-# reconcile.py backs the monitor-stamps gate too, and that gate runs BEFORE
-# this one (Task 4), so hiding the whole file is caught there first -- by name,
-# and still with no attempt spent. That is still "an unreadable count refuses",
-# just at the earlier gate reconcile.py now backs as well.
-mv "$root/skills/board/reconcile.py" "$work/reconcile.hidden" 2>/dev/null || true
+# reconcile.py backs the monitor-stamps gate too (Task 4), and that gate runs
+# BEFORE this one, so hiding the WHOLE file would be caught there first and
+# this assertion could never observe the host-slots gate at all -- widening it
+# to accept either message made that failure mode undetectable, which is
+# exactly the class of regression this case exists to catch. So this case
+# breaks ONLY --host-slots: a stub reconcile.py that still runs the real
+# --monitor-stamps (so that gate passes and falls through) but fails
+# --host-slots outright, the way a boards.toml that will not load would.
+# Renamed WITHIN skills/board, not out to $work: reconcile.py inserts its own
+# directory onto sys.path to import its sibling `fallback` module, so moving it
+# to a different directory would break the real --monitor-stamps call too and
+# defeat the point of this stub.
+#
+# THE REAL FILE COMES BACK HOWEVER THIS TEST EXITS. The stub lives inside the
+# checkout, so a crash, a `set -e` abort or a Ctrl-C between the rename and the
+# restore would leave a live repository with a stubbed reconcile.py. The trap
+# below composes with the $work cleanup this file already installed rather than
+# replacing it, and the restore is idempotent so running it twice is harmless.
+restore_reconcile() {
+  [[ -e "$root/skills/board/reconcile.real.py" ]] \
+    && mv -f "$root/skills/board/reconcile.real.py" "$root/skills/board/reconcile.py"
+  return 0
+}
+trap 'restore_reconcile; rm -rf "$work"' EXIT
+mv "$root/skills/board/reconcile.py" "$root/skills/board/reconcile.real.py"
+cat > "$root/skills/board/reconcile.py" <<'PY'
+#!/usr/bin/env python3
+import os, sys, subprocess
+if sys.argv[1:2] == ["--host-slots"]:
+    sys.stderr.write("stubbed: --host-slots is unreadable\n")
+    sys.exit(1)
+real = os.path.join(os.path.dirname(os.path.abspath(__file__)), "reconcile.real.py")
+sys.exit(subprocess.call([sys.executable, real] + sys.argv[1:]))
+PY
+chmod +x "$root/skills/board/reconcile.py"
 out="$(dispatch 1 4 ABC-77)"
-mv "$work/reconcile.hidden" "$root/skills/board/reconcile.py" 2>/dev/null || true
+restore_reconcile
+trap 'rm -rf "$work"' EXIT
 case "$out" in
-  *"could not count the machine's slots"*|*"could not read the machine's monitor stamps"*)
-    ok "a count it cannot read refuses the dispatch by name" ;;
+  *"could not count the machine's slots"*) ok "a count it cannot read refuses the dispatch by name" ;;
   *) bad "an unreadable slot count did not refuse by name: $out" ;;
 esac
 

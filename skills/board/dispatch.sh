@@ -85,13 +85,67 @@ foreman's own scripts being unrunnable.
 This is NOT a failure of ticket $TICKET and must not consume its attempt budget.
 Repair the machine, then dispatch again at the same attempt number."
 fi
-if ! printf '%s' "$STAMPS" | python3 -c 'import json,sys; sys.exit(0 if json.load(sys.stdin)["ok"] else 1)'; then
+# "reconcile.py ran and printed a verdict this gate cannot read" is NOT "the
+# verdict is stale". A bare `if ! ... | python3 -c '...json.load...'` used to
+# conflate the two: ANY exception in that inline script -- garbage on stdout,
+# truncated output, a changed key name -- made the pipeline exit non-zero,
+# which this gate read the same as "not ok" and answered with "no board...has
+# a live agent Monitor", a raw Python traceback on stderr, and an empty
+# "Stale or missing:" list. That sends the operator to arm a Monitor that is
+# already armed, for a fault that is actually an unreadable reader. The inline
+# python below catches its own parse errors and reports the distinction on
+# stdout instead, so this gate can route on it without a traceback ever
+# reaching the operator.
+#
+# THE CAPTURE ITSELF MUST NOT BE ABLE TO END THE SCRIPT OR TO PASS. It runs as
+# the condition of an `if`, so a python3 that is off PATH, not executable or
+# killed exits 127 or 137 here instead of tripping `set -e` into a bare,
+# messageless exit. The verdict is then blanked, and the blank falls through to
+# the "could not read" refusal below.
+STAMPS_VERDICT=""
+if ! STAMPS_VERDICT="$(printf '%s' "$STAMPS" | python3 -c '
+import json, sys
+try:
+    d = json.loads(sys.stdin.read())
+    ok = bool(d["ok"])
+except Exception as exc:
+    print("UNREADABLE")
+    print("%s: %s" % (type(exc).__name__, exc))
+    sys.exit(0)
+if ok:
+    print("OK")
+else:
+    print("STALE")
+    print(" ".join(d.get("stale") or []))
+')"; then
+  STAMPS_VERDICT=""
+fi
+STAMPS_STATUS="${STAMPS_VERDICT%%$'\n'*}"
+STAMPS_DETAIL="${STAMPS_VERDICT#*$'\n'}"
+# An empty verdict carries no detail either, and the branch below supplies its
+# own wording for that case.
+[[ "$STAMPS_VERDICT" == *$'\n'* ]] || STAMPS_DETAIL=""
+# ONLY THE LITERAL VERDICT `OK` LETS A DISPATCH THROUGH, and every other value
+# refuses. A command substitution hands back an empty string when python3 never
+# ran -- off PATH, not executable, killed by the OOM reaper -- so a gate that
+# routed only on the two named verdicts would fall through all of them and
+# dispatch. The `if ! ... | python3 ...` form this replaced failed closed on
+# exactly that, and the slot ceilings above record what the other way costs: a
+# ceiling that could not read its own input silently stopped holding. A gate
+# that cannot read its input refuses.
+if [[ "$STAMPS_STATUS" == "STALE" ]]; then
   die "no board on this machine has a live agent Monitor; refusing to dispatch $NAME.
-Stale or missing: $(printf '%s' "$STAMPS" | python3 -c 'import json,sys; print(" ".join(json.load(sys.stdin)["stale"]))')
+Stale or missing: $STAMPS_DETAIL
 A board whose Monitor is not armed runs at heartbeat speed and says nothing.
 Arm it as skills/board/SKILL.md describes, then dispatch again at the same
 attempt number.
 This is NOT a failure of ticket $TICKET and must not consume its attempt budget."
+elif [[ "$STAMPS_STATUS" != "OK" ]]; then
+  die "could not read the machine's monitor stamps; refusing to dispatch $NAME.
+This gate could not parse reconcile.py --monitor-stamps against its own JSON
+contract: ${STAMPS_DETAIL:-the reader printed no verdict at all, so python3 itself is missing or unrunnable}
+This is NOT a failure of ticket $TICKET and must not consume its attempt budget.
+Repair the machine, then dispatch again at the same attempt number."
 fi
 
 # The concurrency ceilings, held here rather than only in SKILL.md.
