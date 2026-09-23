@@ -888,6 +888,72 @@ find_starved_board() {
   [[ -n "$STARVED_REASON" ]]
 }
 
+# Is any declared board's agent Monitor not alive? Sets MONITOR_STALE_REASON.
+#
+# reconcile.py owns the staleness rule; this only asks. Two readers of one
+# setting is the drift config.sh warns about throughout.
+monitor_stale_board() {
+  local out rc=0
+  MONITOR_STALE_REASON=""
+  if ! out="$("$SKILL_DIR/reconcile.py" --monitor-stamps 2>/dev/null)"; then
+    # Unreadable is not the same as stale. A boards.toml that will not load is
+    # already the corpse/starved branches' problem, and halting the machine on
+    # a failed read would stop it for a fault it cannot name.
+    log "monitor: could not read the monitor stamps; leaving the tick alone"
+    return 1
+  fi
+  # THE PARSER'S EXIT CODE DECIDES, not whether it printed. A bare command
+  # substitution whose python3 cannot run yields an empty string, and an empty
+  # string is indistinguishable from the "every stamp is fresh" answer -- so a
+  # machine with no usable interpreter would read as healthy forever. Exit 0
+  # means fresh, a printed reason means stale, and any other exit is a read
+  # this branch cannot act on.
+  MONITOR_STALE_REASON="$(printf '%s' "$out" | python3 -c '
+import json, sys
+d = json.load(sys.stdin)
+if d["ok"]:
+    sys.exit(0)
+stale = ", ".join(d["stale"])
+secs = d["stale_seconds"]
+print(f"no live agent Monitor on: {stale} (stamp older than {secs:.0f}s)")
+')" || rc=$?
+  if [[ "$rc" -ne 0 ]]; then
+    MONITOR_STALE_REASON=""
+    log "monitor: could not parse the monitor stamps; leaving the tick alone"
+    return 1
+  fi
+  [[ -n "$MONITOR_STALE_REASON" ]]
+}
+
+# Has this tick been running long enough to have armed its Monitors?
+#
+# Nothing is armed in the first seconds of a fresh tick, by definition. AGE is
+# in hours, from inspect(); MONITOR_GRACE_SECONDS is in seconds.
+tick_outlived_monitor_grace() {
+  [[ "$AGE" != "None" ]] || return 1
+  awk "BEGIN{exit !($AGE * 3600 > $MONITOR_GRACE_SECONDS)}"
+}
+
+# Stop every tick and start nothing. THE ONE BRANCH THAT DOES NOT RESTART.
+#
+# A tick restarted against a harness that rejects the Monitor call arms nothing
+# again, and the next fire does it again: a slow machine turned into a thrashing
+# one. The trigger is a changed tool contract, which no restart repairs.
+#
+# What an operator does next is in docs/specs/2026-09-22-monitor-liveness-design.md:
+# correct the call in SKILL.md, then start the tick again.
+halt_foreman() {
+  log "HALTING foreman: $MONITOR_STALE_REASON"
+  log "a board with no armed Monitor runs at heartbeat speed and says nothing;"
+  log "this does NOT restart, because a restart would arm nothing again."
+  log "correct the Monitor call in skills/board/SKILL.md, then start the tick."
+  # A stop that will not land is reported, not died on. Under `set -e` a failing
+  # last command in this branch would abort the script before anything said why,
+  # and the operator would read a halt that printed no outcome at all.
+  stop_ticks \
+    || log "ERROR: $TICK_AGENT_NAME is still live as: $(surviving_tick_ids), ${TICK_STOP_TIMEOUT_SECONDS}s after being asked to stop. Stop it by id; foreman is meant to be down."
+}
+
 # Reasons to (re)start, most specific first. Each prints why, because a watchdog
 # that restarts silently is indistinguishable from one that does nothing.
 #
@@ -915,6 +981,12 @@ elif [[ "$STATE" == "working" && "$IDLE" != "None" ]] \
 elif [[ "$IDLE" != "None" ]] && awk "BEGIN{exit !($IDLE > $TICK_DEAD_MINUTES)}"; then
   log "$TICK_AGENT_NAME loop stopped rescheduling: idle ${IDLE}m (> ${TICK_DEAD_MINUTES}m)"
   repair_tick
+# AFTER the liveness branches above: a tick that is not running cannot have
+# armed anything, and halting for that would hide the real fault. BEFORE the
+# starved and recycle branches, because both of those restart, and a machine
+# whose edge-trigger is gone must stop rather than cycle.
+elif tick_outlived_monitor_grace && monitor_stale_board; then
+  halt_foreman
 # After the liveness checks, because those need no network call and a tick they
 # replace is judged afresh next fire. Before the age recycle, so the log names
 # the starved board rather than calling the restart routine.
