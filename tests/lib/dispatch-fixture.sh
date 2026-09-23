@@ -278,7 +278,9 @@ dispatch_fixture_run() {
   : >"$DISPATCH_SUBAGENT_MODEL_LOG"
   # Truncated with the other two. A name left over from the previous dispatch
   # would let the stubbed registry answer for an agent this one never spawned.
-  : >"$_DISPATCH_AGENT_NAME_LOG"
+  # dispatch_fixture_resume keeps it, because answering for that agent is the
+  # point of a resume.
+  [[ -n "${_DISPATCH_KEEP_AGENT:-}" ]] || : >"$_DISPATCH_AGENT_NAME_LOG"
   # The one hole: a model or fallback knob a test set deliberately after
   # dispatch_fixture_setup cleared the operator's. `+` and not `:-`, because
   # `PLAN_MODEL=` empty is itself a value under test and must reach the CLI as
@@ -303,7 +305,15 @@ dispatch_fixture_run() {
   # their argv, so with the gate real (reconcile.py linked above) the second
   # dispatch would refuse at the ceiling. The gate itself is
   # test-dispatch-holds-the-cap.sh's claim, on its own fixture.
+  #
+  # DISPATCH_INHERITED_ENV, when a caller sets it, is a second deliberate hole:
+  # NAME=value words standing for a shell that already configured another board,
+  # which is what test-card-agents-carry-their-own-board.sh asserts against. It
+  # goes FIRST, so the four base names below still win: FOREMAN_INSTANCE is the
+  # board this dispatch was told to serve, and a stale one would only make it
+  # serve that board instead.
   env -i \
+    ${DISPATCH_INHERITED_ENV[@]+"${DISPATCH_INHERITED_ENV[@]}"} \
     HOME="$DISPATCH_HOME" \
     FOREMAN_INSTANCE=demo \
     FOREMAN_HOME="$DISPATCH_HOME/.foreman" \
@@ -312,6 +322,16 @@ dispatch_fixture_run() {
     ${toolchain[@]+"${toolchain[@]}"} \
     ${models[@]+"${models[@]}"} \
     "$DISPATCH" "$@" --prompt-file "$DISPATCH_PROMPT" >"$DISPATCH_RUN_LOG" 2>&1 || true
+}
+
+# dispatch_fixture_resume <dispatch.sh args...>
+# dispatch_fixture_run with `--resume`, against the agent the previous
+# dispatch_fixture_run spawned: the stubbed registry still answers for its name,
+# so the adapter's lookup finds it and the resume's argv is captured.
+dispatch_fixture_resume() {
+  _DISPATCH_KEEP_AGENT=1
+  dispatch_fixture_run "$@" --resume
+  _DISPATCH_KEEP_AGENT=""
 }
 
 # dispatch_fixture_model — the value `--model` was given in the captured argv,

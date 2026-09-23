@@ -379,6 +379,35 @@ if [[ -n "$BOARD_DRY_RUN" ]]; then
   exit 0
 fi
 
+# This dispatch's board, pinned in the agent's own settings. A `claude --bg`
+# session is not started from this process: it is handed to a pre-warmed
+# `claude bg-spare`, whose environment was captured when an EARLIER spawn
+# started it -- the same mechanism the TMPDIR note below records. Measured
+# 2026-09-22 on a foreman cleanup agent: its environment and its 51-minute-old
+# parent spare both held FOREMAN_INSTANCE, FOREMAN_CONFIG_INSTANCE and REPO of
+# another board, and its first evidence.sh answered from that board's
+# repository. config.sh's cross-board guard cannot catch it, because both
+# markers named the same wrong board. Settings `env` travels in this spawn's
+# argv, so the spare cannot overwrite it.
+#
+# The names come from FOREMAN_BOARD_EXPORTS, never a second list here, plus the
+# two markers config.sh keys its guard on. Built with json.dumps because a path
+# can hold a quote. A name that is not in this process's environment is a
+# config.sh that no longer exports it, and an agent pinned to half a board is
+# the bug this exists to close, so that refuses.
+# shellcheck disable=SC2086 # split on purpose: one name per word
+AGENT_SETTINGS="$(python3 - "$CARD_AGENT_SETTINGS" \
+  FOREMAN_INSTANCE FOREMAN_CONFIG_INSTANCE $FOREMAN_BOARD_EXPORTS <<'PY'
+import json, os, sys
+settings = json.loads(sys.argv[1])
+missing = [n for n in sys.argv[2:] if n not in os.environ]
+if missing:
+    sys.exit("foreman: cannot pin the agent's board; not exported: " + " ".join(missing))
+settings["env"] = {n: os.environ[n] for n in sys.argv[2:]}
+print(json.dumps(settings))
+PY
+)" || die "could not build $NAME's settings; refusing to dispatch it"
+
 if [[ -n "$RESUME" ]]; then
   # Resuming into a deleted working directory produces a silent failure, so
   # this refuses instead. The caller's fallback is a FRESH dispatch at the
@@ -390,10 +419,11 @@ Dispatch fresh (drop --resume, use the next attempt number) instead."
   # the lookup rule (newest startedAt wins). A failed resolve or resume is the
   # adapter's own refusal, so its non-zero exit is this script's non-zero exit.
   #
-  # `--settings` carries CARD_AGENT_SETTINGS on the resume path too: a resumed
-  # build is a card agent, and config.sh records why every card agent needs it.
+  # `--settings` carries AGENT_SETTINGS on the resume path too: a resumed
+  # build is a card agent, and a resume is handed to a spare the same way a
+  # spawn is. config.sh records why every card agent needs CARD_AGENT_SETTINGS.
   SESSION="$("$HARNESS_SH" resume --name "$NAME" --cwd "$WORKTREE" \
-    --prompt-file "$PROMPT_FILE" --settings "$CARD_AGENT_SETTINGS" \
+    --prompt-file "$PROMPT_FILE" --settings "$AGENT_SETTINGS" \
     "${BUDGET[@]+"${BUDGET[@]}"}" \
     "${SKIP_PERMISSIONS[@]+"${SKIP_PERMISSIONS[@]}"}")"
   card_log "$TICKET" "$(printf '{"action":"resume","name":"%s","session":"%s"}' "$NAME" "$SESSION")"
@@ -465,15 +495,18 @@ fi
 # and an unrelated ticket's build both reported the same ticket and role in
 # their environment. A target's own TEST_COMMAND asks the same bin/tmp-dir.sh
 # this does, keyed on the worktree it is running in — the one per-agent fact
-# that cannot go stale. sweep.sh reaps it.
+# that cannot go stale. sweep.sh reaps it. The board's own identity cannot be
+# keyed on the worktree, so it rides in AGENT_SETTINGS' `env` instead (above the
+# resume path, measured 2026-09-22).
 mkdir -p "$(agent_tmp_for "$WORKTREE")"
 
 # The adapter resolves and prints the session id itself -- see its header --
 # so a "never registered" failure surfaces as ITS non-zero exit, not a second
 # lookup here.
 #
-# `--settings` is CARD_AGENT_SETTINGS, on every card agent and never the tick;
-# config.sh records why.
+# `--settings` is CARD_AGENT_SETTINGS plus this board's `env`, on every card
+# agent and never the tick; config.sh records why the first, and the note above
+# the resume path why the second.
 #
 # bash 3.2 + `set -u`: "${arr[@]}" on an EMPTY array is an unbound-variable
 # error, not an empty expansion. The `+` form below is the portable way to say
@@ -481,7 +514,7 @@ mkdir -p "$(agent_tmp_for "$WORKTREE")"
 # ordinary dispatch.
 SESSION="$("$SPAWN_ADAPTER" spawn --name "$NAME" --cwd "$WORKTREE" --model "$SPAWN_MODEL" \
   --prompt-file "$PROMPT_FILE" --add-dir "$BOARD_HOME" \
-  --settings "$CARD_AGENT_SETTINGS" "${BUDGET[@]+"${BUDGET[@]}"}" \
+  --settings "$AGENT_SETTINGS" "${BUDGET[@]+"${BUDGET[@]}"}" \
   "${SKIP_PERMISSIONS[@]+"${SKIP_PERMISSIONS[@]}"}")" \
   || die "spawned $NAME but the adapter never reported a session id"
 
