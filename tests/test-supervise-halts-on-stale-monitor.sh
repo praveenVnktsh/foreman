@@ -40,7 +40,8 @@ bad() { printf 'FAIL %s\n' "$1" >&2; fail=1; }
 unset REPO KEY_FILE BOARD_HOME INSTANCE INSTANCE_HOME BOARD_NAME_PREFIX \
   BOARD_WORKTREE_PREFIX FOREMAN_ROOT MAX_CONCURRENT HOST_MAX_CONCURRENT \
   HOST_SLOT_STALE_MINUTES TICK_STARVED_MINUTES TICK_INTERVAL_MINUTES \
-  TICK_MAX_AGE_HOURS STARVED_API_URL MONITOR_STALE_SECONDS MONITOR_GRACE_SECONDS
+  TICK_MAX_AGE_HOURS STARVED_API_URL MONITOR_STALE_SECONDS MONITOR_HALT_SECONDS \
+  MONITOR_GRACE_SECONDS TICK_BUDGET_MINUTES MONITOR_TIMEOUT_SECONDS
 for name in $(compgen -e); do
   case "$name" in STATE_*|LABEL_*|LINEAR_*) unset "$name" ;; esac
 done
@@ -81,7 +82,12 @@ json.dump([{"id": "tick-old", "name": "foreman/tick", "state": "idle", "pid": 43
 PY
   : >"$transcripts/sid-old.jsonl"
 }
-reset() { rm -f "$registry"; : >"$stopped"; : >"$started"; tick "${1:-3}"; }
+# A fresh machine for the next case, INCLUDING the halt marker halt_foreman
+# leaves on disk. The marker outliving a case is the whole point of section 2b,
+# and every case after it asks a question about a machine that is not halted.
+reset() {
+  rm -f "$registry" "$fh/HALT"; : >"$stopped"; : >"$started"; tick "${1:-3}"
+}
 
 mkdir -p "$home/.local/bin"
 cat >"$home/.local/bin/claude" <<STUB
@@ -152,6 +158,19 @@ run_supervise() { # [VAR=value...] -- run mode, with extra environment
       "$supervise" 2>&1
 }
 
+# The same fire, in one of supervise.sh's operator modes. run_supervise's
+# arguments land in `env`, before the script, so a mode flag cannot go through
+# it -- env would read `--restart` as an option of its own.
+run_supervise_mode() { # <mode>
+  env HOME="$home" FOREMAN_HOME="$fh" FOREMAN_INSTANCE=demo \
+      SUPERVISE_LOCK="$work/supervise.lock" \
+      STARVED_API_URL="$api_url" \
+      TICK_STARVED_MINUTES=100000 \
+      TICK_DRAIN_SECONDS=1 TICK_START_TIMEOUT_SECONDS=1 TICK_STOP_TIMEOUT_SECONDS=2 \
+      TICK_LOCK_WAIT_SECONDS=2 \
+      "$supervise" "$1" 2>&1
+}
+
 # --- 1: a live tick past the grace, with a stale stamp ------------------------
 reset 3
 age_stamp 600
@@ -173,6 +192,39 @@ printf '%s' "$out" | grep -qi 'started .*tick' \
 [[ ! -s "$started" ]] \
   && ok "and the harness was never asked to spawn one" \
   || bad "the harness was asked to spawn a replacement: $(cat "$started")"
+
+# --- 2b: AND IT MUST NOT COME BACK ON THE NEXT CRON FIRE ----------------------
+# supervise.sh is a cron entry point, so "does not restart" is a claim about the
+# NEXT fire and not about this one. The first fire leaves a stopped tick behind;
+# the branches that ask "is a tick running?" sit above the halt branch, so
+# without a marker on disk the second fire reads "not running" and starts one --
+# the halt/restart thrash this branch exists to prevent, one tick session per
+# cycle. A single fire cannot see that, which is why this test fires twice.
+second="$(run_supervise 2>&1)"
+printf '%s' "$second" | grep -q 'HALTED' \
+  && ok "the second fire sees the halt and stands down" \
+  || bad "the second fire did not see a halt: $second"
+[[ ! -s "$started" ]] \
+  && ok "and still nothing was spawned after a second fire" \
+  || bad "the second fire spawned a replacement: $(cat "$started")"
+
+# --- 2c: an operator clears it, and only an operator --------------------------
+# --restart is the gesture reached for out of habit. Honouring it would undo the
+# halt without anyone reading why the machine stopped.
+restart_out="$(run_supervise_mode --restart 2>&1)"
+printf '%s' "$restart_out" | grep -q 'HALTED' \
+  && ok "--restart refuses while foreman is halted" \
+  || bad "--restart ran against a halted machine: $restart_out"
+[[ ! -s "$started" ]] \
+  || bad "--restart spawned a tick against a halted machine: $(cat "$started")"
+
+resume_out="$(run_supervise_mode --resume 2>&1)"
+printf '%s' "$resume_out" | grep -q 'cleared the halt' \
+  && ok "--resume clears the halt" \
+  || bad "--resume did not clear the halt: $resume_out"
+grep -q 'foreman/tick' "$started" \
+  && ok "and starts ticking again" \
+  || bad "--resume cleared the halt but started nothing: $resume_out"
 
 # --- 3: a fresh stamp leaves the tick alone -----------------------------------
 reset 3
