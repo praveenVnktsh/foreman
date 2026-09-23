@@ -152,10 +152,13 @@ PY
 
   DISPATCH_HOME="$work_dir/home"
   fixture_add_instance "$DISPATCH_HOME" demo "$target"
-  # A fresh monitor.stamp. dispatch.sh (Task 4) refuses to dispatch while any
-  # board's Monitor stamp is stale or missing, and none of the probes this
-  # fixture drives are testing that gate.
-  fixture_arm_monitor "$DISPATCH_HOME/.foreman" demo
+  # A fresh monitor.stamp for every board this fixture will end up declaring,
+  # not only "demo": dispatch.sh (Task 4) refuses to dispatch while ANY
+  # declared board's Monitor stamp is stale or missing, and none of the probes
+  # this fixture drives are testing that gate. A caller that declares a second
+  # board after this call re-arms through dispatch_fixture_run below, which
+  # reads the board list again at that point.
+  fixture_arm_every_monitor "$DISPATCH_HOME/.foreman"
 
   DISPATCH_ARGV_LOG="$work_dir/argv.log"
   DISPATCH_SUBAGENT_MODEL_LOG="$work_dir/subagent-model.log"
@@ -273,7 +276,11 @@ dispatch_fixture_run() {
   # that armed it once at setup goes stale under a caller that dispatches
   # several real (non-dry-run) cards in a row -- each one cuts a git worktree,
   # and four of those can outrun MONITOR_STALE_SECONDS on a loaded machine.
-  fixture_arm_monitor "$DISPATCH_HOME/.foreman" demo
+  # Every declared board, not only "demo": a caller that declares a second
+  # board between setup and this call (test-card-agents-carry-their-own-board.sh
+  # does) needs that board's stamp fresh too, or the machine-wide gate refuses
+  # on a board no assertion here is even about.
+  fixture_arm_every_monitor "$DISPATCH_HOME/.foreman"
   : >"$DISPATCH_ARGV_LOG"
   : >"$DISPATCH_SUBAGENT_MODEL_LOG"
   # Truncated with the other two. A name left over from the previous dispatch

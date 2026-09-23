@@ -112,6 +112,32 @@ fixture_arm_monitor() {
   date -u +%Y-%m-%dT%H:%M:%SZ > "$fh/instances/$name/monitor.stamp"
 }
 
+# fixture_arm_every_monitor <foreman_home>
+# Arms fixture_arm_monitor for every board <foreman_home>/boards.toml declares,
+# not just one name the caller happens to know. dispatch.sh's stamp gate is
+# machine-wide -- it refuses while ANY declared board's stamp is stale or
+# missing -- so a fixture that arms only the board under test leaves every
+# other board a test later declares failing that gate, silently, the moment
+# the second declaration lands.
+#
+# Reads the list through a FILE, not `$(...)`: bash 3.2 drops the NUL
+# separators `boards.py --list` emits when a command substitution captures
+# them (bin/load-pairs.sh has the measurement), so a file is what keeps the
+# read loop from seeing nothing.
+fixture_arm_every_monitor() {
+  local fh="$1"
+  local repo_root
+  repo_root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd)"
+  local list_file name
+  list_file="$(mktemp)" || return 1
+  FOREMAN_HOME="$fh" "$repo_root/bin/boards.py" --list >"$list_file" 2>/dev/null
+  while IFS= read -r -d '' name; do
+    [[ -n "$name" ]] || continue
+    fixture_arm_monitor "$fh" "$name"
+  done <"$list_file"
+  rm -f "$list_file"
+}
+
 # fixture_linear_key <dir>
 # One credential per workspace, at the machine root. It used to be copied into
 # every instance directory.
