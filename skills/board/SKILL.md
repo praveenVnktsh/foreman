@@ -2396,30 +2396,58 @@ repository without reaping each other's live work, so never sweep for a board
 other than the one whose slice you are in, and never with `FOREMAN_INSTANCE`
 left over from the previous board.
 
-`--orphans` protects any worktree whose agent is not positively `stopped`, and
-refuses to run at all if it cannot read the agent list — "no agents are alive"
-and "I could not tell" must never look the same. Deleting a live agent's working
-directory destroys unpushed work and kills it with no diagnosable error, while
-leaving a dead tree costs disk until the next tick. Those are not comparable
-costs, so the tie goes to leaving it.
+**An agent is FINISHED when `state == "stopped"`, or when its state is one the
+caller treats as idle and it reports no `pid`.** Every other agent — `working`,
+or any state this rule does not know — protects its worktree. The `pid` is
+corroboration for a state that already says the turn is over; it is never the
+test on its own, because a live agent can be listed without one and that must
+not read as dead. Ticket mode treats `done` and `blocked` as idle, because it
+has just judged the card terminal and asked those agents to stop. `--orphans`
+treats nothing as idle beyond `stopped` itself: a card that is not terminal is
+resumed into its worktree, and `done` is exactly where a build agent waits
+between turns, so reaping it there would delete an in-flight card's tree.
+`--orphans` refuses to run at all if it cannot read the agent list — "no agents
+are alive" and "I could not tell" must never look the same. Deleting a live
+agent's working directory destroys unpushed work and kills it with no
+diagnosable error, while leaving a dead tree costs disk until the next tick.
+Those are not comparable costs, so the tie goes to leaving it.
+
+**`--orphans` also reaps pre-single-foreman worktrees** —
+`foreman-<installation>-<board>-<ticket>`, cut while every name still carried an
+installation segment. Three guards decide whether a candidate is one of these,
+not a live board's own tree: exactly one installation segment with no hyphen in
+it, so a glob can never span a board name it does not own; never a path that
+already matches a declared board's current `foreman-<board>-*` shape, which a
+legacy installation named like that board would otherwise collide with; and the
+same finished-agent check every other candidate gets, so a legacy tree a live
+agent is still working in is protected like any other. Ticket mode never reaps
+one of these — a card only ever names its own board's current worktree.
 
 **Ticket mode also stops and forgets the card's sessions.** A background agent
 idles at `done` when its turn ends, and nothing else ever stops it. So a sweep
 for a terminal card first asks `"$HARNESS_SH" stop` of every agent named
-`foreman/<board>/<T>/…` that is `done` or `blocked`, and waits up
-to `AGENT_STOP_TIMEOUT_SECONDS` for the adapter's `list` to agree. On a Claude
-card it then removes every stopped session's record under
-`~/.claude/jobs/` — what `claude agents --all` and the operator's session list
-keep showing a stopped agent from — and the transcript directory of each one
-that ran in the card's own worktree. On codex and opencode the records are the
-adapter's own, and `"$HARNESS_SH" reap` ages them out on the orphan pass. A
-`working` agent is never stopped, and its session is left and named on stderr
-the same way its worktree is: the judgment that the card is terminal may be
-stale. `--orphans` never stops or forgets a session, because a card that is
-not terminal may still be diagnosed from its transcript (`reconcile.py` →
-`death`) or resumed into it. The card's history records `forgot` with the
-count, before `released`. A stop that does not land in time leaves the session
-in place and makes the sweep exit non-zero, so report it on the tick.
+`foreman/<board>/<T>/…` that is `done` or `blocked`. `claude stop <id>` exits 0
+and rewrites nothing in the record (measured 2026-09-22): it never turns `done`
+into `stopped`, so the sweep does not wait for the state to agree. It waits up
+to `AGENT_STOP_TIMEOUT_SECONDS` for the agent's `pid` to disappear instead —
+the one part of the record a landed stop actually changes, once the process
+behind it has exited. On a Claude card it then forgets every session the
+finished-agent predicate accepts — `stopped`, or `done`/`blocked` reporting no
+`pid` — deleting its record under `~/.claude/jobs/` — what `claude agents
+--all` and the operator's session list keep showing a finished agent from —
+and the transcript directory of each one that ran in the card's own worktree.
+On codex and opencode the records are the adapter's own, and
+`"$HARNESS_SH" reap` ages them out on the orphan pass; the Claude adapter now
+reaps there too, but only records named `foreman/…` — `~/.claude/jobs` is
+otherwise the operator's own directory, shared with every `claude --bg` session
+they started by hand, and this sweep takes none of those. A `working` agent is
+never stopped, and its session is left and named on stderr the same way its
+worktree is: the judgment that the card is terminal may be stale. `--orphans`
+never stops or forgets a session, because a card that is not terminal may
+still be diagnosed from its transcript (`reconcile.py` → `death`) or resumed
+into it. The card's history records `forgot` with the count, before
+`released`. An agent whose `pid` has not gone by the timeout is left in place
+and makes the sweep exit non-zero, so report it on the tick.
 
 Either form also reaps `refs/foreman/<board>/evidence/<pid>`
 refs left by an `evidence.sh` that was killed between its fetch and its
