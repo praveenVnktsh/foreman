@@ -214,7 +214,7 @@ def main() -> int:
         # -- stamping after that would read an idle board as an unarmed one and
         # stop the machine. And a registry read that hangs takes up to its own
         # 30s timeout, so stamping first bounds the gap between stamps at
-        # WATCH_POLL_SECONDS + 30 = 45s, inside MONITOR_STALE_SECONDS of 60.
+        # WATCH_POLL_SECONDS + 30 = 45s, inside MONITOR_STALE_SECONDS of 75.
         stamp()
         now = poll()
         if not now:

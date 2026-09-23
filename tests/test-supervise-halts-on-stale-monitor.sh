@@ -173,7 +173,12 @@ run_supervise_mode() { # <mode>
 
 # --- 1: a live tick past the grace, with a stale stamp ------------------------
 reset 3
-age_stamp 600
+# PAST THE DERIVED WINDOW, which the fixture deliberately does not pin: this
+# test unsets MONITOR_HALT_SECONDS so the real derivation in config.sh answers.
+# That derivation covers the `/loop` pacing ceiling, so it is 795s on the
+# defaults -- a stamp aged 600s is a HEALTHY machine and must not halt. 3600s
+# is a watcher that has genuinely stopped under any default.
+age_stamp 3600
 out="$(run_supervise 2>&1)"
 printf '%s' "$out" | grep -q 'HALTING foreman' \
   && printf '%s' "$out" | grep -q 'demo' \

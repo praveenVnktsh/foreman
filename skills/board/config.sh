@@ -599,20 +599,41 @@ TICK_MAX_PASSES="${TICK_MAX_PASSES:-6}"
 #
 # THE ARITHMETIC. The tick arms at the top of every pass, so the worst gap
 # between two arms is one pass, which the tick's own budget bounds at
-# TICK_BUDGET_MINUTES, plus the heartbeat wait, which SKILL.md bounds at
-# TICK_INTERVAL_MINUTES. A stamp goes stale MONITOR_TIMEOUT_SECONDS after an
-# arm, so its worst age on a healthy machine is
-# (TICK_BUDGET_MINUTES + TICK_INTERVAL_MINUTES) * 60 - MONITOR_TIMEOUT_SECONDS,
-# and MONITOR_STALE_SECONDS on top covers the stamp's own granularity. On the
-# defaults that is (12 + 20) * 60 - 1800 + 75 = 195s. An operator who raises
-# TICK_INTERVAL_MINUTES to 60 gets (12 + 60) * 60 - 1800 + 75 = 2595s, so the
-# halt window widens with the knob instead of halting a healthy machine.
+# TICK_BUDGET_MINUTES, plus the heartbeat wait. A stamp goes stale
+# MONITOR_TIMEOUT_SECONDS after an arm, so its worst age on a healthy machine is
+# TICK_BUDGET_MINUTES * 60 + <the heartbeat wait> - MONITOR_TIMEOUT_SECONDS,
+# and MONITOR_STALE_SECONDS on top covers the stamp's own granularity.
+#
+# THE HEARTBEAT WAIT IS NOT TICK_INTERVAL_MINUTES ALONE. SKILL.md asks the tick
+# to keep the wait at or under TICK_INTERVAL_MINUTES, but that is PROSE AND
+# NOTHING ENFORCES IT: on the default harness the tick prompt is `/loop /<board>`
+# with no interval (skills/board/harness/claude.sh, skill_prompt), so the number
+# never reaches the prompt text at all and the pace is the `/loop` skill's own
+# dynamic-pacing default. Deriving the window from TICK_INTERVAL_MINUTES alone
+# therefore halted a perfectly healthy machine on stock settings. The window is
+# derived from whichever of the two is larger instead.
+MONITOR_LOOP_PACING_CEILING_SECONDS="${MONITOR_LOOP_PACING_CEILING_SECONDS:-1800}"
+# ^ THE HARNESS'S NUMBER, NOT FOREMAN'S. The upper end of the `/loop` skill's
+# dynamic-pacing range (1200-1800s), which is what paces the tick when the
+# prompt carries no interval. It is not ours to set, and a `/loop` that changes
+# its range is this one number to change.
 #
 # NEVER BELOW MONITOR_STALE_SECONDS. A fast heartbeat makes the expression
 # negative, and a halt window under dispatch.sh's would stop the machine for a
 # stamp dispatch.sh still accepts.
+#
+# ON THE DEFAULTS: the wait is max(20 * 60, 1800) = 1800, so the window is
+# 12 * 60 + 1800 - 1800 + 75 = 795s, against a worst real staleness of
+# 12 * 60 + 1800 - 1800 = 720s. An operator who raises TICK_INTERVAL_MINUTES to
+# 60 gets max(3600, 1800) = 3600 and 12 * 60 + 3600 - 1800 + 75 = 2595s, so the
+# window still widens with the knob. A watcher that has genuinely stopped
+# refreshes nothing at all, so its stamp passes 795s and the machine halts.
 MONITOR_HALT_SECONDS="${MONITOR_HALT_SECONDS:-$(
-  gap=$(( (TICK_BUDGET_MINUTES + TICK_INTERVAL_MINUTES) * 60 - MONITOR_TIMEOUT_SECONDS + MONITOR_STALE_SECONDS ))
+  wait_s=$(( TICK_INTERVAL_MINUTES * 60 ))
+  if [[ "$MONITOR_LOOP_PACING_CEILING_SECONDS" -gt "$wait_s" ]]; then
+    wait_s="$MONITOR_LOOP_PACING_CEILING_SECONDS"
+  fi
+  gap=$(( TICK_BUDGET_MINUTES * 60 + wait_s - MONITOR_TIMEOUT_SECONDS + MONITOR_STALE_SECONDS ))
   if [[ "$gap" -gt "$MONITOR_STALE_SECONDS" ]]; then printf '%s' "$gap"; else printf '%s' "$MONITOR_STALE_SECONDS"; fi
 )}"
 

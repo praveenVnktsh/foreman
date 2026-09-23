@@ -558,9 +558,12 @@ call works on both. On a harness that rejects `persistent`, drop it and keep
 `timeout_ms` — the tick re-arms at the top of every tick anyway, which is what
 a capped monitor needs.
 
-**ARM AT THE TOP OF EVERY PASS, not once per tick, and keep the heartbeat
-wait at or under `TICK_INTERVAL_MINUTES`.** Both halves are arithmetic, and
-`config.sh` derives `MONITOR_HALT_SECONDS` from exactly these numbers.
+**ARM AT THE TOP OF EVERY PASS, not once per tick.** That half is arithmetic,
+and `config.sh` derives `MONITOR_HALT_SECONDS` from it. A shorter heartbeat wait
+is still better, but `MONITOR_HALT_SECONDS` no longer depends on one: nothing
+enforces the wait on this harness, because `/loop /<board>` carries no interval
+at all, so the window is derived from the `/loop` skill's own pacing ceiling
+whenever that exceeds `TICK_INTERVAL_MINUTES`.
 
 A Monitor on 2.1.275 dies `MONITOR_TIMEOUT_SECONDS` (1800s) after it is armed,
 and only the next arm brings it back — so the gap between two arms is what
@@ -569,11 +572,12 @@ makes that gap the whole tick plus the wait after it: with
 `TICK_BUDGET_MINUTES=12` and a `/loop` pacing itself at its own 1200–1800s
 default, 12 + 30 = 42 minutes against a 30-minute Monitor, so the edge-trigger
 is dead for 12 minutes of every cycle **on the defaults**. Arming per pass caps
-the in-tick half at one pass, and the bound on the wait caps the other half at
-`TICK_INTERVAL_MINUTES`: 12 + 20 = 32 minutes, of which the supervisor tolerates
-32 × 60 − 1800 = 120 seconds of stale stamp, plus a margin. Raise
-`TICK_INTERVAL_MINUTES` and the halt window widens with it, because it is
-derived from the same two numbers.
+the in-tick half at one pass; the other half is the wait itself, which
+`config.sh` takes as the larger of `TICK_INTERVAL_MINUTES` and the `/loop`
+pacing ceiling: 12 + 30 = 42 minutes, of which the supervisor tolerates
+42 × 60 − 1800 = 720 seconds of stale stamp, plus a margin. Raise
+`TICK_INTERVAL_MINUTES` past the ceiling and the halt window widens with it,
+because it is derived from the same numbers.
 
 Re-arming a Monitor that is still alive is free and idempotent: `watch-agents.py`
 seeds its state silently on its first poll, so a replacement emits nothing about
@@ -631,10 +635,10 @@ frequent — do not tighten a working pace back down without a reason as
 concrete as that one.
 
 **Its upper bound is `TICK_INTERVAL_MINUTES`, and that is not a preference.**
-`supervise.sh` already assumes it — `TICK_DEAD_MINUTES` must exceed it — and
-`MONITOR_HALT_SECONDS` is derived from it. A wait longer than it leaves the
-Monitor expired for longer than the supervisor tolerates, and the machine halts
-while it is perfectly healthy.
+`supervise.sh` already assumes it — `TICK_DEAD_MINUTES` must exceed it.
+`MONITOR_HALT_SECONDS` no longer assumes it alone: it covers the `/loop` pacing
+ceiling too, because on this harness the prompt carries no interval and nothing
+can hold a tick to this number.
 
 This is a *fallback*, not a cadence. Nothing waits on it that the Monitor
 reports: an agent finishing wakes the board instantly whatever this is set to.
