@@ -2915,6 +2915,13 @@ def overview(with_remote: bool = False) -> dict:
         priorities = board_priorities(FOREMAN_HOME)
     except BoardsUnreadable:
         pass
+    # TOLERANT, like every other field here: a roster that will not load is
+    # reported, never raised. bin/dashboard.py renders a failed --overview as a
+    # problem, and a crash would render as nothing at all.
+    try:
+        monitors = monitor_stamps()["boards"]
+    except BoardsUnreadable:
+        monitors = {}
 
     for name in names:
         cards_dir = os.path.join(FOREMAN_HOME, "instances", name, "cards")
@@ -2929,6 +2936,11 @@ def overview(with_remote: bool = False) -> dict:
         boards.append({
             "name": name,
             "halted": board_is_halted(FOREMAN_HOME, name),
+            # A board missing from monitors defaults to stale, not absent: a
+            # board that armed nothing is the fault this feature exists to catch.
+            "monitor": monitors.get(
+                name, {"present": False, "stale": True, "age_seconds": None}
+            ),
             "priority": priorities.get(name),
             "slots_held": slots.get(name, 0),
             "last_served": served.strftime(CARD_LOG_STAMP) if served else None,

@@ -379,6 +379,12 @@ function render(d) {
       <b>${esc(b.name)}</b>
       <span class="pill">${b.slots_held || 0} in flight</span>
       ${b.halted ? '<span class="pill" style="color:var(--warn)">halted</span>' : ""}
+      ${(() => {
+        const mon = b.monitor || {};
+        if (!mon.stale) return "";
+        const age = mon.present ? `${Math.round(mon.age_seconds)}s stale` : "never";
+        return `<span class="pill" style="color:var(--crit)">no live Monitor (${esc(age)})</span>`;
+      })()}
       <span class="dim"> · served ${ago(b.last_served_seconds)} ago · ${b.cards_total || 0} cards on disk</span>
       ${rows.length ? `<div class="wrap"><table>
         <tr><th>card</th><th>agent</th><th>last</th><th>idle</th></tr>
