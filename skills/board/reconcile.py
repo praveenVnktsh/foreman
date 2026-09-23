@@ -1700,6 +1700,37 @@ def board_is_halted(foreman_home: str, board: str) -> bool:
     return os.path.exists(os.path.join(foreman_home, "instances", board, "HALT"))
 
 
+def machine_halt(foreman_home: str = FOREMAN_HOME) -> dict:
+    """Whether `supervise.sh` has halted the WHOLE machine, and what it said.
+
+    A file check on `$FOREMAN_HOME/HALT`, in this process, exactly as
+    `board_is_halted()` checks a board's own marker. Nothing is sourced: a
+    halted machine's config is the last thing a watcher should run.
+
+    `machine_halted` and not `halted`, because every board row already carries
+    a `halted` of its own and a reader who confused the two would read one
+    parked board as a stopped machine.
+
+    TOLERANT, like every other field in the picture. A home that cannot be
+    reached reports not halted, and a marker that cannot be read reports halted
+    with no reason: "I could not read why" is still a stopped machine, and
+    raising here would render as a blank page.
+    """
+    path = os.path.join(foreman_home, "HALT")
+    try:
+        halted = os.path.exists(path)
+    except OSError:
+        return {"halted": False, "marker": path, "reason": ""}
+    if not halted:
+        return {"halted": False, "marker": path, "reason": ""}
+    try:
+        with open(path, encoding="utf-8", errors="replace") as handle:
+            reason = handle.read().strip()
+    except OSError:
+        reason = ""
+    return {"halted": True, "marker": path, "reason": reason}
+
+
 # A cleanup agent is not a card, so it is dispatched under the ticket
 # `cleanup` -- `dispatch.sh --ticket cleanup --role cleanup` names it
 # `<BOARD_NAME_PREFIX>/cleanup/cleanup-<attempt>`. That is why the liveness
@@ -3052,6 +3083,11 @@ def overview(with_remote: bool = False) -> dict:
         "at": now.strftime(CARD_LOG_STAMP),
         "tick": tick,
         "machine": machine,
+        # TOP-LEVEL, beside the tick and not inside a board, because a halted
+        # machine stops every board and the page has to say so once and above
+        # them all. Without it a halted machine reads "no tick running" here,
+        # which is the same invisible state the halt exists to report.
+        "machine_halt": machine_halt(FOREMAN_HOME),
         "boards": boards,
         "agents": agents,
         "agents_finished": finished,

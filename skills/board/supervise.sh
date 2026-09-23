@@ -719,6 +719,49 @@ card_state() { # <card_agents listing> <agent name>
   printf '%s' "${found:-gone}"
 }
 
+# The registry JSON, with the machine-wide halt added to it.
+#
+# --STATUS MUST REPORT THE HALT, because it returns above the marker block and
+# would otherwise answer a halted machine with "no tick is running" and no
+# reason. That is the silent state this whole feature exists to remove, and it
+# is the only report left when the marker could not be written at all.
+#
+# THE FIELDS ARE ADDED, never substituted. Something parses this shape, so a
+# reader that knows nothing of a halt still reads every field it came for.
+#
+# The marker's own text rides along, because it is what says why the machine
+# halted and when. It is read here rather than re-derived: halt_foreman() wrote
+# it and no other reader has to agree with it.
+#
+# A marker that exists but cannot be read still reports halted. "I could not
+# read why" is a halted machine; treating it as a running one is the one answer
+# that must never be given.
+status_json() {
+  local marker=""
+  if [[ -e "$FOREMAN_HALT" ]]; then
+    marker="$(cat "$FOREMAN_HALT" 2>/dev/null || printf 'the marker is unreadable')"
+  fi
+  local merged
+  # Falling back to the untouched registry JSON, because a python3 that will
+  # not run is not a reason for --status to answer with nothing.
+  merged="$(FOREMAN_HALT_PATH="$FOREMAN_HALT" FOREMAN_HALT_TEXT="$marker" \
+            python3 -c '
+import json, os, sys
+info = json.loads(sys.argv[1])
+path = os.environ["FOREMAN_HALT_PATH"]
+halted = os.path.exists(path)
+info["machine_halted"] = halted
+info["machine_halt_marker"] = path if halted else None
+info["machine_halt_reason"] = os.environ["FOREMAN_HALT_TEXT"] if halted else ""
+sys.stdout.write(json.dumps(info))
+' "$INFO" 2>/dev/null)" || merged=""
+  if [[ -n "$merged" ]]; then
+    printf '%s' "$merged"
+  else
+    printf '%s' "$INFO"
+  fi
+}
+
 # --status is the ONE mode that reads the registry without the lock, because it
 # changes nothing. Making it queue would make the gesture an operator reaches
 # for during an incident the one that hangs behind a running start.
@@ -730,7 +773,7 @@ if [[ "$MODE" == "--status" ]]; then
     printf '{"error":"could not read the agent registry"}\n'
     exit 1
   fi
-  printf '%s\n' "$INFO"
+  printf '%s\n' "$(status_json)"
   exit 0
 fi
 

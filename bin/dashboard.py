@@ -288,6 +288,8 @@ PAGE = r"""<!doctype html>
   <span class="dim" id="at"></span>
 </header>
 
+<div id="halt"></div>
+
 <h2>Stuck</h2>
 <div id="problems"></div>
 
@@ -343,6 +345,18 @@ function render(d) {
   $("tick").className = t.running ? "dim" : "";
   $("tick").style.color = t.running ? "" : "var(--crit)";
   $("at").textContent = d.at || "";
+
+  // ABOVE EVERY BOARD ROW, because a machine halt stops all of them at once
+  // and is worse news than any one board being parked. Rendered from
+  // --overview's own machine_halt; this file derives nothing.
+  const halt = d.machine_halt || {};
+  $("halt").innerHTML = halt.halted
+    ? `<div class="row crit"><span class="tag">halted</span>
+        foreman is HALTED by ${esc(halt.marker || "a marker")}; no tick runs and
+        no board dispatches
+        <code class="fix">${esc(halt.reason || "the marker is unreadable")}</code>
+        <code class="fix">skills/board/supervise.sh --resume</code></div>`
+    : "";
 
   const probs = d.problems || [];
   $("problems").innerHTML = probs.length

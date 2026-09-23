@@ -171,6 +171,17 @@ run_supervise_mode() { # <mode>
       "$supervise" "$1" 2>&1
 }
 
+# --status, with stderr kept OUT of the capture. Every other helper here folds
+# it in; this one must not, because the thing under test is the JSON on stdout
+# and one log line would stop it parsing.
+run_status() {
+  env HOME="$home" FOREMAN_HOME="$fh" FOREMAN_INSTANCE=demo \
+      SUPERVISE_LOCK="$work/supervise.lock" \
+      STARVED_API_URL="$api_url" \
+      TICK_STARVED_MINUTES=100000 \
+      "$supervise" --status 2>/dev/null
+}
+
 # --- 1: a live tick past the grace, with a stale stamp ------------------------
 reset 3
 # PAST THE DERIVED WINDOW, which the fixture deliberately does not pin: this
@@ -213,6 +224,23 @@ printf '%s' "$second" | grep -q 'HALTED' \
   && ok "and still nothing was spawned after a second fire" \
   || bad "the second fire spawned a replacement: $(cat "$started")"
 
+# --- 2b2: --status must SAY the machine is halted -----------------------------
+# --status returns above the halt branch, so without a field of its own it
+# answers a halted machine with the same JSON as a machine whose tick merely
+# died -- "no tick", no reason. That is the invisible state this whole feature
+# exists to remove, and --status is the first place an operator looks.
+status_out="$(run_status)"
+printf '%s' "$status_out" | python3 -c '
+import json, sys
+d = json.load(sys.stdin)
+assert d["machine_halted"] is True, d
+assert d["machine_halt_marker"], d
+assert "Monitor" in d["machine_halt_reason"], d
+assert "state" in d, "the existing shape was replaced, not added to"
+' \
+  && ok "--status reports the halt, its marker and the marker text" \
+  || bad "--status did not report the halt: $status_out"
+
 # --- 2c: an operator clears it, and only an operator --------------------------
 # --restart is the gesture reached for out of habit. Honouring it would undo the
 # halt without anyone reading why the machine stopped.
@@ -234,6 +262,20 @@ grep -q 'foreman/tick' "$started" \
 # --- 3: a fresh stamp leaves the tick alone -----------------------------------
 reset 3
 age_stamp 0
+
+# A machine that is NOT halted must not claim to be. A field that is always
+# true reports nothing, and this is the half of the claim that catches it.
+status_out="$(run_status)"
+printf '%s' "$status_out" | python3 -c '
+import json, sys
+d = json.load(sys.stdin)
+assert d["machine_halted"] is False, d
+assert d["machine_halt_marker"] is None, d
+assert d["machine_halt_reason"] == "", d
+' \
+  && ok "--status reports no halt when there is no marker" \
+  || bad "--status claimed a halt on a running machine: $status_out"
+
 out="$(run_supervise 2>&1)"
 printf '%s' "$out" | grep -q 'HALTING foreman' \
   && bad "a fresh stamp halted foreman: $out" \
