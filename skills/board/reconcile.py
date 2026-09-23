@@ -48,7 +48,7 @@ def _load_config() -> dict[str, str]:
         "DEPLOY_WORKFLOW", "DEPLOY_STEP", "DEPLOY_SELECTION_STEP", "CI_WORKFLOW",
         "INSTANCE",
         "FOREMAN_HOME", "HOST_SLOT_STALE_MINUTES", "DEMAND_STALE_MINUTES",
-        "MONITOR_STALE_SECONDS", "MONITOR_GRACE_SECONDS",
+        "MONITOR_STALE_SECONDS", "MONITOR_HALT_SECONDS", "MONITOR_GRACE_SECONDS",
         "HARNESS_SH", "TICK_AGENT_NAME",
         "FOREMAN_DEFAULT_HARNESS", "FOREMAN_HARNESSES",
         "BOARD_NAME_PREFIX", "BOARD_WORKTREE_PREFIX",
@@ -1326,7 +1326,68 @@ def cards_holding_slots(cards_dir: str, stale_minutes: float | None) -> list[str
             if card_holds_slot(os.path.join(cards_dir, t, "history.jsonl"), stale_minutes)]
 
 
-MONITOR_STALE_SECONDS = float(_CFG.get("MONITOR_STALE_SECONDS") or 60)
+# THE TWO WINDOWS, AND WHY THERE ARE TWO. config.sh derives both and states the
+# arithmetic; this file only applies them. MONITOR_STALE_SECONDS is
+# dispatch.sh's, which runs inside a pass moments after the tick armed that
+# pass's Monitors. MONITOR_HALT_SECONDS is supervise.sh's, which fires from cron
+# at an arbitrary moment -- including the heartbeat wait, where a capped Monitor
+# has already expired on a perfectly healthy machine.
+#
+# A MISSING VALUE IS A BROKEN CONFIG, not a default to invent. A literal fallback
+# here was silently wrong the moment an operator changed WATCH_POLL_SECONDS: the
+# reader would hold 60 while the watcher stamped every 240, and every board on
+# the machine would read dead forever. config.sh always prints both, so an empty
+# one means _load_config's contract broke and that is worth saying out loud.
+def _monitor_window(key: str) -> float:
+    raw = _CFG.get(key) or ""
+    try:
+        return float(raw)
+    except ValueError:
+        raise SystemExit(
+            f"reconcile: config.sh gave no usable {key} ({raw!r}); "
+            "the monitor gates cannot be evaluated"
+        )
+
+
+MONITOR_STALE_SECONDS = _monitor_window("MONITOR_STALE_SECONDS")
+MONITOR_HALT_SECONDS = _monitor_window("MONITOR_HALT_SECONDS")
+
+
+def _stamp_window(path: str, default: float) -> float:
+    """The staleness window the process that wrote `path` was actually polling at.
+
+    TWO PROCESSES, ONE POLL, AND NOTHING MADE THEM AGREE. watch-agents.py reads
+    WATCH_POLL_SECONDS from the tick session's environment; config.sh derives
+    this window from whatever environment its reader happens to have, which for
+    supervise.sh is cron's -- no profile, no exports. An operator who set
+    WATCH_POLL_SECONDS=60 in a shell profile got a watcher stamping every 60s
+    and a supervisor demanding one every 60s, which is a permanent halt of a
+    healthy machine.
+
+    THE STAMP CARRIES THE ANSWER. watch-agents.py writes the poll it is using
+    into the file, so the window is derived from the writer's own value and the
+    two cannot disagree. A stamp without the line is one an older
+    watch-agents.py wrote, and it falls back to the caller's window.
+
+    The clamp is config.sh's, spelled the same way and for the same reason: four
+    polls is narrower than the worst case of one poll plus the 30s registry-read
+    timeout whenever the poll is 10s or less.
+    """
+    try:
+        with open(path) as fh:
+            body = fh.read()
+    except OSError:
+        return default
+    for line in body.splitlines():
+        if line.startswith("poll="):
+            try:
+                poll = float(line[len("poll="):].strip())
+            except ValueError:
+                return default
+            if poll <= 0:
+                return default
+            return max(poll * 4, poll + 60)
+    return default
 
 
 def monitor_stamps(foreman_home: str = FOREMAN_HOME) -> dict:
@@ -1343,6 +1404,21 @@ def monitor_stamps(foreman_home: str = FOREMAN_HOME) -> dict:
     caller skip the gate, which is how the slot ceilings were once disabled with
     nothing on stderr.
 
+    A HALTED BOARD IS REPORTED AND NEVER COUNTED. SKILL.md tells the tick to arm
+    one Monitor for every board that is NOT halted, so a halted board's stamp
+    goes stale within minutes of `boardctl halt` -- by design. Counting it made
+    `ok` false, and `ok` is machine-wide: halting one board refused every
+    dispatch on every other board and then halted foreman itself. The board
+    stays in `boards` with `halted: true` so the dashboard can still show it.
+
+    AN EMPTY ROSTER READS ok, DELIBERATELY. `ok = not stale` over zero
+    unhalted boards is True, and that is the right answer rather than an
+    oversight: a machine with no unhalted board has no Monitor to arm and no
+    board to dispatch to, and failing this gate closed would stop a tick that is
+    idle exactly as the operator asked. What it does NOT cover is dispatching to
+    a halted board -- nothing here would catch that, and nothing here should:
+    the tick skips a halted board before it sources anything of that board's.
+
     RAISES BoardsUnreadable when boards.toml will not load, exactly as
     host_slots() does. A roster nobody can read must never read as a machine
     with nothing to check.
@@ -1351,22 +1427,37 @@ def monitor_stamps(foreman_home: str = FOREMAN_HOME) -> dict:
     boards = {}
     for board in declared_boards(foreman_home):
         path = os.path.join(foreman_home, "instances", board, "monitor.stamp")
+        halted = board_is_halted(foreman_home, board)
+        stale_window = _stamp_window(path, MONITOR_STALE_SECONDS)
+        halt_window = max(stale_window, MONITOR_HALT_SECONDS)
         try:
             age = now - os.path.getmtime(path)
         except OSError:
-            boards[board] = {"age_seconds": None, "stale": True, "present": False}
+            boards[board] = {
+                "age_seconds": None, "stale": not halted, "halt": not halted,
+                "present": False, "halted": halted,
+                "stale_seconds": stale_window, "halt_seconds": halt_window,
+            }
             continue
         boards[board] = {
             "age_seconds": round(age, 1),
-            "stale": age > MONITOR_STALE_SECONDS,
+            "stale": (not halted) and age > stale_window,
+            "halt": (not halted) and age > halt_window,
             "present": True,
+            "halted": halted,
+            "stale_seconds": stale_window,
+            "halt_seconds": halt_window,
         }
     stale = sorted(n for n, b in boards.items() if b["stale"])
+    halt = sorted(n for n, b in boards.items() if b["halt"])
     return {
         "boards": boards,
         "stale": stale,
         "ok": not stale,
         "stale_seconds": MONITOR_STALE_SECONDS,
+        "halt": halt,
+        "halt_ok": not halt,
+        "halt_seconds": MONITOR_HALT_SECONDS,
     }
 
 
@@ -2939,7 +3030,9 @@ def overview(with_remote: bool = False) -> dict:
             # A board missing from monitors defaults to stale, not absent: a
             # board that armed nothing is the fault this feature exists to catch.
             "monitor": monitors.get(
-                name, {"present": False, "stale": True, "age_seconds": None}
+                name,
+                {"present": False, "stale": True, "halt": True,
+                 "halted": False, "age_seconds": None},
             ),
             "priority": priorities.get(name),
             "slots_held": slots.get(name, 0),

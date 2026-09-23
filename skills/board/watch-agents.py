@@ -76,8 +76,9 @@ BOARD_NAME_PREFIX = reconcile.BOARD_NAME_PREFIX
 # either -- a Monitor lives inside the session and nothing persists it.
 #
 # Read by reconcile.py --monitor-stamps, and through it by dispatch.sh,
-# supervise.sh and bin/dashboard.py. The mtime is what those read; the contents
-# are for a human who opens the file.
+# supervise.sh and bin/dashboard.py. The mtime is what those read; the first
+# line is for a human who opens the file, and the `poll=` line is the one fact
+# a reader cannot get any other way -- see stamp().
 STAMP_PATH = os.path.join(reconcile.BOARD_HOME, "monitor.stamp")
 
 
@@ -98,6 +99,16 @@ def stamp() -> None:
         tmp = f"{STAMP_PATH}.tmp"
         with open(tmp, "w") as fh:
             fh.write(time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()) + "\n")
+            # THE POLL TRAVELS WITH THE STAMP, because nothing else carries it
+            # between these two processes. This one reads WATCH_POLL_SECONDS
+            # from the tick session's environment; config.sh derives the
+            # staleness window from whatever environment ITS reader has, and
+            # supervise.sh's is cron's -- no profile, no exports. An operator
+            # who set WATCH_POLL_SECONDS=60 in a shell profile therefore got a
+            # watcher stamping every 60s and a supervisor demanding one every
+            # 60s: a permanent halt of a healthy machine. Written here, the
+            # window is derived from the value actually in use.
+            fh.write(f"poll={POLL_SECONDS}\n")
         os.replace(tmp, STAMP_PATH)
     except OSError:
         pass

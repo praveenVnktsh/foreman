@@ -457,12 +457,30 @@ DEMAND_STALE_MINUTES="${DEMAND_STALE_MINUTES:-$((TICK_INTERVAL_MINUTES * 3))}"
 # derived from TICK_INTERVAL_MINUTES: an operator who slows the poll widens
 # this with it, instead of silently breaking every gate that reads it.
 #
-# FOUR POLLS. The gap between two stamps is at most WATCH_POLL_SECONDS plus the
-# 30s timeout on the registry read the loop makes between them -- 45s with the
-# default poll of 15. Four polls is 60s, which clears that without calling a
-# live Monitor dead, and is short enough that a dead one is caught inside a
-# minute.
-MONITOR_STALE_SECONDS="${MONITOR_STALE_SECONDS:-$(( ${WATCH_POLL_SECONDS:-15} * 4 ))}"
+# FOUR POLLS, WITH A FLOOR OF ONE POLL PLUS 60s. The gap between two stamps is
+# at most WATCH_POLL_SECONDS plus the 30s timeout on the registry read the loop
+# makes between them: p + 30. Four polls is 4p, and 4p > p + 30 only when
+# p > 10. At WATCH_POLL_SECONDS=5 -- an operator asking the watcher to wake up
+# faster -- four polls is a 20s window against a 35s worst case, which reads
+# every healthy Monitor as dead and halts the machine permanently. The floor of
+# p + 60 covers the 30s read with 30s to spare at every poll value, and it is
+# below 4p for p > 20, so slowing the poll still widens the window. At the
+# default poll of 15 the window is 75s, against a 45s worst case.
+MONITOR_STALE_SECONDS="${MONITOR_STALE_SECONDS:-$(
+  p="${WATCH_POLL_SECONDS:-15}"
+  four=$(( p * 4 )); floor=$(( p + 60 ))
+  if [[ "$four" -gt "$floor" ]]; then printf '%s' "$four"; else printf '%s' "$floor"; fi
+)}"
+
+# How long the Monitor the tick arms stays alive, in seconds.
+#
+# SKILL.md's `timeout_ms` IS THIS NUMBER, in milliseconds, and
+# tests/test-monitor-arming-contract.sh holds the two together. 1800 is the hard
+# cap on Claude Code 2.1.275: that version removed `persistent`, so a Monitor
+# dies at its timeout and only the next arm brings it back. Everything below
+# derives from it, so a harness that raises the cap is one number to change.
+MONITOR_TIMEOUT_SECONDS="${MONITOR_TIMEOUT_SECONDS:-1800}"
+
 
 # How long after a tick starts before supervise.sh acts on a stale stamp.
 #
@@ -568,6 +586,36 @@ TICK_START_TIMEOUT_SECONDS="${TICK_START_TIMEOUT_SECONDS:-60}"
 # here may be hit without anything being wrong.
 TICK_BUDGET_MINUTES="${TICK_BUDGET_MINUTES:-12}"
 TICK_MAX_PASSES="${TICK_MAX_PASSES:-6}"
+
+# How long a stamp may be stale before supervise.sh HALTS THE MACHINE.
+#
+# WIDER THAN MONITOR_STALE_SECONDS, because the two gates stand in different
+# places. dispatch.sh runs inside a pass, moments after the tick armed that
+# pass's Monitors, so it may insist on a stamp refreshed within four polls.
+# supervise.sh fires from cron at an arbitrary moment, including the heartbeat
+# wait between two ticks -- and on a harness that caps a Monitor at
+# MONITOR_TIMEOUT_SECONDS, a healthy machine's stamp genuinely stops being
+# refreshed for whatever the re-arm gap exceeds that cap.
+#
+# THE ARITHMETIC. The tick arms at the top of every pass, so the worst gap
+# between two arms is one pass, which the tick's own budget bounds at
+# TICK_BUDGET_MINUTES, plus the heartbeat wait, which SKILL.md bounds at
+# TICK_INTERVAL_MINUTES. A stamp goes stale MONITOR_TIMEOUT_SECONDS after an
+# arm, so its worst age on a healthy machine is
+# (TICK_BUDGET_MINUTES + TICK_INTERVAL_MINUTES) * 60 - MONITOR_TIMEOUT_SECONDS,
+# and MONITOR_STALE_SECONDS on top covers the stamp's own granularity. On the
+# defaults that is (12 + 20) * 60 - 1800 + 75 = 195s. An operator who raises
+# TICK_INTERVAL_MINUTES to 60 gets (12 + 60) * 60 - 1800 + 75 = 2595s, so the
+# halt window widens with the knob instead of halting a healthy machine.
+#
+# NEVER BELOW MONITOR_STALE_SECONDS. A fast heartbeat makes the expression
+# negative, and a halt window under dispatch.sh's would stop the machine for a
+# stamp dispatch.sh still accepts.
+MONITOR_HALT_SECONDS="${MONITOR_HALT_SECONDS:-$(
+  gap=$(( (TICK_BUDGET_MINUTES + TICK_INTERVAL_MINUTES) * 60 - MONITOR_TIMEOUT_SECONDS + MONITOR_STALE_SECONDS ))
+  if [[ "$gap" -gt "$MONITOR_STALE_SECONDS" ]]; then printf '%s' "$gap"; else printf '%s' "$MONITOR_STALE_SECONDS"; fi
+)}"
+
 WAIT_REVIEW_SECONDS="${WAIT_REVIEW_SECONDS:-300}"
 WAIT_CHECKS_SECONDS="${WAIT_CHECKS_SECONDS:-900}"
 WAIT_DEPLOY_SECONDS="${WAIT_DEPLOY_SECONDS:-600}"

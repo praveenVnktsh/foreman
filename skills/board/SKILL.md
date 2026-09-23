@@ -157,6 +157,15 @@ all: a board the tick never reached reports exactly what a board with no work
 reports. Round-robin is what makes the difference visible — every board is
 either worked or named as skipped.
 
+**Arm the agent Monitors at the top of every pass**, before the order is asked
+for — one per board that is not halted, exactly as *How this is invoked*
+describes. Not once per tick: on Claude Code 2.1.275 a Monitor dies 30 minutes
+after it is armed, and a tick that armed only at its start leaves the gap
+`TICK_BUDGET_MINUTES` plus the heartbeat wait, which is longer than that on the
+default settings. Re-arming a live Monitor is free — it seeds silently and
+emits nothing about work the previous one already reported. On a harness with no
+Monitor tool there is nothing to arm and nothing here applies.
+
 **The order of a pass comes from `reconcile.py --board-order`**, never from the
 order `boards.py --list` printed:
 
@@ -527,8 +536,8 @@ Read `$HARNESS` — `config.sh` exports it — before following any of it:
 
 **The board is woken by events, with a slow heartbeat underneath it.** One
 `/loop /board` with *no interval* — dynamic pacing — works every board on this
-machine, and it arms a persistent Monitor **per board** that fires the moment
-one of that board's dispatched agents comes back:
+machine, and it arms a Monitor **per board** that fires the moment one of that
+board's dispatched agents comes back:
 
 ```bash
 Monitor(command="FOREMAN_INSTANCE=<board> ~/.foreman/install/skills/board/watch-agents.py",
@@ -549,6 +558,27 @@ call works on both. On a harness that rejects `persistent`, drop it and keep
 `timeout_ms` — the tick re-arms at the top of every tick anyway, which is what
 a capped monitor needs.
 
+**ARM AT THE TOP OF EVERY PASS, not once per tick, and keep the heartbeat
+wait at or under `TICK_INTERVAL_MINUTES`.** Both halves are arithmetic, and
+`config.sh` derives `MONITOR_HALT_SECONDS` from exactly these numbers.
+
+A Monitor on 2.1.275 dies `MONITOR_TIMEOUT_SECONDS` (1800s) after it is armed,
+and only the next arm brings it back — so the gap between two arms is what
+decides whether the edge-trigger is ever actually gone. Arming once per tick
+makes that gap the whole tick plus the wait after it: with
+`TICK_BUDGET_MINUTES=12` and a `/loop` pacing itself at its own 1200–1800s
+default, 12 + 30 = 42 minutes against a 30-minute Monitor, so the edge-trigger
+is dead for 12 minutes of every cycle **on the defaults**. Arming per pass caps
+the in-tick half at one pass, and the bound on the wait caps the other half at
+`TICK_INTERVAL_MINUTES`: 12 + 20 = 32 minutes, of which the supervisor tolerates
+32 × 60 − 1800 = 120 seconds of stale stamp, plus a margin. Raise
+`TICK_INTERVAL_MINUTES` and the halt window widens with it, because it is
+derived from the same two numbers.
+
+Re-arming a Monitor that is still alive is free and idempotent: `watch-agents.py`
+seeds its state silently on its first poll, so a replacement emits nothing about
+work the previous one already reported.
+
 **If the call is rejected, stop.** Do not carry on without a Monitor. The
 board would keep merging cards one interval slower on every finished agent,
 and every surface would read healthy. `dispatch.sh` and `supervise.sh` enforce
@@ -557,7 +587,9 @@ this with the stamp below, because prose cannot.
 One per board, and the board named in the description, because
 `watch-agents.py` reports only the agents of the board in its own environment —
 `foreman/<board>/<TICKET>/<role>-<attempt>` and nothing else. Arm
-one for every board that is not halted. Naming the board in the description is what lets a
+one for every board that is not halted — and only those, because
+`reconcile.py --monitor-stamps` excludes a halted board from its verdict for
+the same reason. Naming the board in the description is what lets a
 Monitor left over from a removed board be told from a live one.
 
 **It reports cleanup agents too.** A scheduled cleanup (step 8) has no card to
@@ -597,6 +629,12 @@ entering `Todo` is the one transition no agent completion can ever report.
 One operator settled on 7 minutes on 2026-08-02, after finding 2 minutes too
 frequent — do not tighten a working pace back down without a reason as
 concrete as that one.
+
+**Its upper bound is `TICK_INTERVAL_MINUTES`, and that is not a preference.**
+`supervise.sh` already assumes it — `TICK_DEAD_MINUTES` must exceed it — and
+`MONITOR_HALT_SECONDS` is derived from it. A wait longer than it leaves the
+Monitor expired for longer than the supervisor tolerates, and the machine halts
+while it is perfectly healthy.
 
 This is a *fallback*, not a cadence. Nothing waits on it that the Monitor
 reports: an agent finishing wakes the board instantly whatever this is set to.

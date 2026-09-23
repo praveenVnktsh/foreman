@@ -50,7 +50,17 @@ first = os.path.getmtime(stamp_path)
 
 body = open(stamp_path).read()
 assert body.endswith("\n"), f"stamp must end with a newline, got {body!r}"
-time.strptime(body.strip(), "%Y-%m-%dT%H:%M:%SZ")
+lines = body.splitlines()
+time.strptime(lines[0], "%Y-%m-%dT%H:%M:%SZ")
+
+# THE POLL TRAVELS WITH THE STAMP. watch-agents.py reads WATCH_POLL_SECONDS
+# from the tick session's environment and config.sh derives the staleness window
+# from supervise.sh's cron environment, which has no profile and no exports.
+# Nothing else carries the value between the two, so an operator who exported it
+# got a watcher stamping every 60s and a supervisor demanding one every 60s -- a
+# permanent halt of a healthy machine.
+assert f"poll={watch_agents.POLL_SECONDS}" in lines, \
+    f"stamp does not record the poll it was written at: {body!r}"
 
 # Every poll refreshes it. A stamp written once proves a process started; a
 # stamp refreshed every WATCH_POLL_SECONDS proves the Monitor is alive now.
@@ -58,6 +68,49 @@ time.sleep(1.1)
 watch_agents.stamp()
 second = os.path.getmtime(stamp_path)
 assert second > first, f"stamp not refreshed: {first} then {second}"
+
+# THE PLACEMENT IS THE CLAIM, AND ONLY main() CAN TEST IT. Calling stamp()
+# directly proves the function writes a file and nothing about WHERE it is
+# called: move the call below the empty-poll `continue` and every assertion
+# above still passes, while a board with no dispatched agents would stop
+# stamping and halt the machine. So drive the real main(), with poll() stubbed
+# to return nothing -- the idle board -- and one sleep allowed before the loop
+# is broken out of.
+class _Stop(Exception):
+    pass
+
+
+polls = []
+
+
+def _empty_poll():
+    polls.append(1)
+    # THE SEEDING STAMP IS REMOVED HERE, from inside the first poll, so that the
+    # file existing at the end can only be the work of the stamp() inside the
+    # loop. Removing it before main() would leave main()'s own pre-loop stamp()
+    # to satisfy the assertion, and the placement under test -- above the
+    # empty-poll `continue`, not below it -- would go unexercised again.
+    if len(polls) == 1:
+        os.remove(stamp_path)
+    return {}
+
+
+def _one_sleep(_seconds):
+    # Two sleeps means the loop went round twice and stamped at least once
+    # after the seeding poll, which is all this needs to observe.
+    if len(polls) >= 2:
+        raise _Stop
+
+
+watch_agents.poll = _empty_poll
+watch_agents.time.sleep = _one_sleep
+try:
+    watch_agents.main()
+except _Stop:
+    pass
+assert os.path.exists(stamp_path), \
+    "main() left no stamp: the call must sit above the empty-poll continue"
+assert len(polls) >= 2, f"main() did not reach a second poll: {polls}"
 
 print("ok   watch-agents.py stamps on every poll, empty or not")
 PY

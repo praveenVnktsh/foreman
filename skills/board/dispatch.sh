@@ -77,7 +77,17 @@ fi
 # and that is the failure this gate exists to remove.
 #
 # MACHINE-WIDE, not this board alone. A rejected Monitor call is evidence about
-# the harness contract, and every board on this machine shares one harness.
+# the harness contract, and every board on this machine shares one harness. A
+# HALTED board is excluded: SKILL.md tells the tick to arm one Monitor for every
+# board that is not halted, so counting a halted board's stale stamp made
+# `boardctl halt` refuse every dispatch on every other board.
+#
+# `ok`, NOT `halt_ok`. This gate reads the tight window, because it runs inside
+# a pass moments after the tick armed that pass's Monitors. supervise.sh reads
+# the wide one, because it fires from cron at any moment -- including the
+# heartbeat wait, where a Monitor capped at MONITOR_TIMEOUT_SECONDS has already
+# expired on a healthy machine. config.sh derives both and states the
+# arithmetic.
 if ! STAMPS="$("$SKILL_DIR/reconcile.py" --monitor-stamps)"; then
   die "could not read the machine's monitor stamps; refusing to dispatch $NAME.
 reconcile.py's own message is above: a boards.toml that will not load, or
