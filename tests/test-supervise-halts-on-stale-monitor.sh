@@ -15,12 +15,18 @@ set -uo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 supervise="$repo_root/skills/board/supervise.sh"
+stub="$repo_root/tests/lib/linear-stub.py"
 
 # shellcheck source=lib/instance-fixture.sh
 source "$repo_root/tests/lib/instance-fixture.sh"
 
 work="$(mktemp -d)"
-cleanup() { rm -rf "$work"; }
+STUB_PID=""
+cleanup() {
+  [[ -n "$STUB_PID" ]] && kill "$STUB_PID" >/dev/null 2>&1
+  [[ -n "$STUB_PID" ]] && wait "$STUB_PID" 2>/dev/null
+  rm -rf "$work"
+}
 trap cleanup EXIT
 fail=0
 ok()  { printf 'ok   %s\n' "$1"; }
@@ -122,12 +128,24 @@ age_stamp() { # <seconds old>
   python3 -c 'import os,sys,time; t=time.time()-float(sys.argv[2]); os.utime(sys.argv[1], (t, t))' "$stamp" "$1"
 }
 
+# Linear, stubbed AT THE BOUNDARY. starved.py queries through
+# `resolve_ids.query(args.api_url, ...)` and STARVED_API_URL is that seam; left
+# unset it defaults to the real endpoint and this fixture's credentials go at
+# the live API. An empty world is enough, because no board here is starving.
+printf '{"issues": []}\n' >"$work/scenario.json"
+exec 3< <(python3 "$stub" "$work/scenario.json")
+STUB_PID=$!
+read -r port <&3
+api_url="http://127.0.0.1:$port/graphql"
+
 # TICK_STARVED_MINUTES is pushed out of reach so the starved branch never runs.
-# Starvation is test-supervise-restarts-a-tick-starving-todo.sh's subject, and
-# leaving it armed here sends starved.py at the real Linear API on every run.
+# Starvation is test-supervise-restarts-a-tick-starving-todo.sh's subject. It
+# is a scoping pin and NOT the network defence: STARVED_API_URL above is, so
+# lowering this pin reaches the stub rather than Linear.
 run_supervise() { # [VAR=value...] -- run mode, with extra environment
   env HOME="$home" FOREMAN_HOME="$fh" FOREMAN_INSTANCE=demo \
       SUPERVISE_LOCK="$work/supervise.lock" \
+      STARVED_API_URL="$api_url" \
       TICK_STARVED_MINUTES=100000 \
       TICK_DRAIN_SECONDS=1 TICK_START_TIMEOUT_SECONDS=1 TICK_STOP_TIMEOUT_SECONDS=2 \
       TICK_LOCK_WAIT_SECONDS=2 "$@" \
