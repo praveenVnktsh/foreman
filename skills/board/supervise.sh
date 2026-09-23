@@ -758,6 +758,15 @@ sys.stdout.write(json.dumps(info))
   if [[ -n "$merged" ]]; then
     printf '%s' "$merged"
   else
+    # THE HALT STILL GETS SAID, on stderr, because the fallback would otherwise
+    # answer a halted machine with the same JSON a machine whose tick merely
+    # died gets. Losing the halt in the one path this function exists for is
+    # the exact defect it was written to remove.
+    #
+    # STDERR AND NOT STDOUT. Something parses stdout, so the JSON there stays
+    # byte-for-byte what it was before this function existed.
+    [[ -e "$FOREMAN_HALT" ]] \
+      && log "foreman is HALTED by $FOREMAN_HALT, and python3 could not add that to the JSON below" >&2
     printf '%s' "$INFO"
   fi
 }

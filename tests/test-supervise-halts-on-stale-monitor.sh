@@ -182,6 +182,16 @@ run_status() {
       "$supervise" --status 2>/dev/null
 }
 
+# The same call with stderr left to the caller, for the one case whose subject
+# is what --status says there.
+run_status_keeping_stderr() {
+  env HOME="$home" FOREMAN_HOME="$fh" FOREMAN_INSTANCE=demo \
+      SUPERVISE_LOCK="$work/supervise.lock" \
+      STARVED_API_URL="$api_url" \
+      TICK_STARVED_MINUTES=100000 \
+      "$supervise" --status
+}
+
 # --- 1: a live tick past the grace, with a stale stamp ------------------------
 reset 3
 # PAST THE DERIVED WINDOW, which the fixture deliberately does not pin: this
@@ -240,6 +250,39 @@ assert "state" in d, "the existing shape was replaced, not added to"
 ' \
   && ok "--status reports the halt, its marker and the marker text" \
   || bad "--status did not report the halt: $status_out"
+
+# --- 2b3: the python3 fallback must still SAY the machine is halted -----------
+# status_json() falls back to the untouched registry JSON when python3 will not
+# run. Falling back silently answered a halted machine exactly as it answers a
+# machine whose tick merely died -- losing the halt in the one path this
+# function exists for. The JSON on stdout must stay untouched, because
+# something parses it, so the halt goes to stderr.
+#
+# The stub fails ONLY the call that adds the halt, and is the real interpreter
+# for everything else: read_registry and the harness stub both need one to
+# reach the fallback at all.
+real_python3="$(command -v python3)"
+cat >"$home/.local/bin/python3" <<STUB
+#!/usr/bin/env bash
+for a in "\$@"; do
+  case "\$a" in *machine_halted*) exit 1 ;; esac
+done
+exec "$real_python3" "\$@"
+STUB
+chmod +x "$home/.local/bin/python3"
+fallback_out="$(run_status_keeping_stderr 2>"$work/fallback.err")"
+rm -f "$home/.local/bin/python3"
+grep -q 'HALTED' "$work/fallback.err" \
+  && ok "the fallback says on stderr that the machine is halted" \
+  || bad "the fallback lost the halt: $(cat "$work/fallback.err")"
+printf '%s' "$fallback_out" | python3 -c '
+import json, sys
+d = json.load(sys.stdin)
+assert "machine_halted" not in d, d
+assert "state" in d, d
+' \
+  && ok "and stdout is still the untouched registry JSON" \
+  || bad "the fallback did not print the registry JSON: $fallback_out"
 
 # --- 2c: an operator clears it, and only an operator --------------------------
 # --restart is the gesture reached for out of habit. Honouring it would undo the

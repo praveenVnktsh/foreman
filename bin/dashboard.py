@@ -354,7 +354,8 @@ function render(d) {
     ? `<div class="row crit"><span class="tag">halted</span>
         foreman is HALTED by ${esc(halt.marker || "a marker")}; no tick runs and
         no board dispatches
-        <code class="fix">${esc(halt.reason || "the marker is unreadable")}</code>
+        <code class="fix">${esc(halt.reason
+          || (halt.readable ? "no reason recorded" : "the marker is unreadable"))}</code>
         <code class="fix">skills/board/supervise.sh --resume</code></div>`
     : "";
 

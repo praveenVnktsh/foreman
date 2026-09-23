@@ -1720,15 +1720,19 @@ def machine_halt(foreman_home: str = FOREMAN_HOME) -> dict:
     try:
         halted = os.path.exists(path)
     except OSError:
-        return {"halted": False, "marker": path, "reason": ""}
+        return {"halted": False, "marker": path, "reason": "", "readable": False}
     if not halted:
-        return {"halted": False, "marker": path, "reason": ""}
+        return {"halted": False, "marker": path, "reason": "", "readable": False}
+    # UNREADABLE AND EMPTY ARE DIFFERENT ANSWERS, and the page says so. Folding
+    # them into one empty string made an empty-but-readable marker render as
+    # "the marker is unreadable", which sends the operator looking for a
+    # permissions fault that is not there.
     try:
         with open(path, encoding="utf-8", errors="replace") as handle:
             reason = handle.read().strip()
     except OSError:
-        reason = ""
-    return {"halted": True, "marker": path, "reason": reason}
+        return {"halted": True, "marker": path, "reason": "", "readable": False}
+    return {"halted": True, "marker": path, "reason": reason, "readable": True}
 
 
 # A cleanup agent is not a card, so it is dispatched under the ticket
@@ -2870,19 +2874,33 @@ STUCK_CARD_SECONDS = 4 * 3600
 STALE_TICK_SECONDS = 90 * 60
 
 
-def _problems(tick: dict, boards: list[dict], machine: dict) -> list[dict]:
+def _problems(tick: dict, boards: list[dict], machine: dict,
+              halt: dict | None = None) -> list[dict]:
     """The "is anything stuck" band: everything wrong, worst first.
 
     EVERY ENTRY NAMES WHAT TO DO. A dashboard that says "something is wrong"
     and stops is a dashboard that gets checked once. The fix is prose, not a
     button: this file reports and the operator acts, the same separation
     supervise.sh keeps between the watchdog and the dispatcher.
+
+    `halt` is the machine-wide halt, because a halted machine has no tick and
+    the fix for that is not the same command. More than the page reads these
+    entries, so the banner bin/dashboard.py draws is no substitute for getting
+    the string right here.
     """
     out = []
+    halted = bool((halt or {}).get("halted"))
     if not tick.get("running"):
+        # A HALTED MACHINE GETS THE COMMAND THAT WORKS. `supervise.sh` refuses
+        # while the marker exists, so offering it here sends the operator to a
+        # second dead end -- the machine says HALTED and they are no further on.
         out.append({"severity": "critical", "kind": "tick-down",
-                    "detail": "no tick is running; no board is being walked",
-                    "fix": "skills/board/supervise.sh"})
+                    "detail": ("foreman is halted, so no tick is running and no "
+                               "board is being walked")
+                              if halted else
+                              "no tick is running; no board is being walked",
+                    "fix": "skills/board/supervise.sh --resume" if halted
+                           else "skills/board/supervise.sh"})
     elif (tick.get("age_seconds") or 0) > STALE_TICK_SECONDS:
         out.append({"severity": "warning", "kind": "tick-stale",
                     "detail": f"the tick has been up {_ago(tick['age_seconds'])} "
@@ -3107,7 +3125,7 @@ def overview(with_remote: bool = False) -> dict:
             "fix": '"$HARNESS_SH" list',
         }]
         return picture
-    problems = _problems(tick, boards, machine)
+    problems = _problems(tick, boards, machine, picture["machine_halt"])
     if roster_error:
         problems.insert(0, {"severity": "critical", "kind": "roster-unreadable",
                             "detail": roster_error, "fix": "bin/boardctl list"})

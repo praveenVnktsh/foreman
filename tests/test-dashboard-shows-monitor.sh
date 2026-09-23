@@ -68,6 +68,22 @@ assert "Monitor is not armed" in mh["reason"], mh
 assert all(b["halted"] is False for b in d["boards"]), d["boards"]
 ' || { echo "FAIL --overview does not carry the machine halt" >&2; fail=1; }
 
+# AN EMPTY MARKER IS NOT AN UNREADABLE ONE. The page prints one sentence for
+# each, and folding them together sends the operator hunting a permissions
+# fault that does not exist.
+: >"$py_home/.foreman/HALT"
+empty_out="$(HOME="$py_home" FOREMAN_HOME="$py_home/.foreman" FOREMAN_INSTANCE=demo \
+             "$board_dir/reconcile.py" --overview)" \
+  || { echo "FAIL --overview did not answer with an empty marker" >&2; exit 1; }
+printf '%s' "$empty_out" | python3 -c '
+import json, sys
+mh = json.load(sys.stdin)["machine_halt"]
+assert mh["halted"] is True, mh
+assert mh["reason"] == "", mh
+assert mh["readable"] is True, mh
+' || { echo "FAIL an empty but readable marker is not distinguished" >&2; fail=1; }
+printf 'halted because the Monitor is not armed\n' >"$py_home/.foreman/HALT"
+
 # TOLERANT, even when the marker cannot be read. A halt nobody can explain is
 # still a halt, and raising here renders as a blank page rather than a problem.
 chmod 000 "$py_home/.foreman/HALT"
@@ -77,6 +93,7 @@ unreadable="$(HOME="$py_home" FOREMAN_HOME="$py_home/.foreman" FOREMAN_INSTANCE=
 import json, sys
 mh = json.load(sys.stdin)["machine_halt"]
 assert mh["halted"] is True, mh
+assert mh["readable"] is False, mh
 ' || { echo "FAIL an unreadable marker did not report a halt" >&2; fail=1; }
 chmod 644 "$py_home/.foreman/HALT"
 rm -f "$py_home/.foreman/HALT"
@@ -92,6 +109,8 @@ grep -q 'machine_halt' "$repo_root/bin/dashboard.py" \
   || { echo "FAIL dashboard.py does not read machine_halt" >&2; fail=1; }
 grep -q 'supervise.sh --resume' "$repo_root/bin/dashboard.py" \
   || { echo "FAIL dashboard.py does not say how to clear the halt" >&2; fail=1; }
+grep -q 'no reason recorded' "$repo_root/bin/dashboard.py" \
+  || { echo "FAIL dashboard.py calls an empty marker unreadable" >&2; fail=1; }
 python3 -c '
 import sys
 page = open(sys.argv[1]).read()
