@@ -22,16 +22,10 @@ ci_workflow = "CI"
 # than a test that mocks it.
 
 [risk]
-# Reversibility decides what belongs here. A bad change anywhere else is a
-# revert; these two are different in kind, not just severity:
-#   - skills/board/config.sh mis-deriving a path or a limit misdirects every
-#     tick that reads it, silently, for every card in flight.
-#   - bin/resolve-ids.py mis-resolving a name pins the wrong id into ids.env,
-#     and everything downstream trusts that id forever -- a board that
-#     mis-resolves its own ids moves cards in a project nobody is watching.
-# Neither failure is a revert-and-redeploy; both are worth a human's eyes
-# before they merge.
-paths = ["skills/board/config.sh", "bin/resolve-ids.py"]
+# The operator decided this repository parks nothing for a human. Every PR
+# goes through required checks and adversarial review and merges on its own.
+# AGENTS.md forbids re-adding paths here.
+paths = []
 
 [test]
 command = "tests/run-all.sh"
