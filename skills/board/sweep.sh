@@ -3,7 +3,9 @@
 #
 #   sweep.sh ABC-42 ABC-43        # tickets that are terminal; their idle agents
 #                                 # are stopped, and their trees and sessions go
-#   sweep.sh --orphans            # this board's trees with no live agent
+#   sweep.sh --orphans            # this board's trees with no live agent,
+#                                 # including the ones cut before every name
+#                                 # stopped carrying an installation segment
 #
 # Either way it also reaps `refs/$BOARD_NAME_PREFIX/evidence/<pid>` refs left behind by an
 # `evidence.sh` that was killed mid-read. Nothing else in the board touches that
@@ -58,6 +60,59 @@ if [[ -z "${_FOREMAN_SWEEP_LOCKED:-}" ]]; then
   exit "$status"
 fi
 
+# Every board this machine declares, one per line.
+#
+# Read on every sweep rather than only under --orphans, and read here rather
+# than at its one use, because it cannot fail here without having already
+# failed: config.sh has just loaded the SAME boards.toml through the same
+# script to derive this board's REPO. If it ever does fail, refusing is the
+# only safe answer -- legacy_agent_dir below uses this list to tell a dead
+# installation's worktree from a live board's own, and an empty list makes
+# every candidate look dead.
+DECLARED_BOARDS="$("$_foreman_install_root/bin/boards.py" --list | tr '\0' '\n')" \
+  || die "could not list this machine's boards; refusing to guess whose worktrees these are"
+
+# True when <basename> names a PRE-SINGLE-FOREMAN worktree or scratch directory
+# of this board: `foreman-<installation>-<board>-<ticket>`.
+#
+# docs/specs/2026-09-14-installations-per-harness-design.md scoped every name
+# to an installation, and that design was later unwound.
+# BOARD_WORKTREE_PREFIX is `foreman-<board>` again, so this board's globs
+# cannot match a tree cut while the segment existed, and the path guards below
+# refuse any path outside those globs. Measured 2026-09-22: five such trees,
+# 22G, on one machine, reapable by nothing at all. `--orphans` takes them now,
+# under three guards, because nothing else ever will.
+#
+# GUARD ONE: ONE installation segment, with NO hyphen in it. A `*` there would
+# span a board name this board does not own, so `foreman-a-b-<board>-X` is
+# refused. INSTANCE is `[A-Za-z0-9_]+` -- config.sh refuses anything else, for
+# this same class of reason -- so it carries no regex metacharacter here.
+#
+# GUARD TWO: never a live board's own tree. The current shape is
+# `foreman-<board>-<ticket>`, so for a board named like an old installation
+# segment the two shapes are indistinguishable by pattern alone. The design
+# spec names this exact hole: a legacy board `codex` sweeps `foreman-codex-*`,
+# "which is exactly where the scoped installation `codex` cuts its worktrees".
+# Any candidate starting with `foreman-<name>-` for a declared board <name>
+# belongs to that board, and is refused here whatever else it looks like.
+#
+# GUARD THREE is not in this function: it is LIVE_FILE, which every caller
+# checks first. LIVE_FILE holds every non-finished agent's cwd from the WHOLE
+# MACHINE, not just this board's, so a legacy tree that some live agent is
+# still working in is already protected by the read that protects the current
+# ones.
+legacy_agent_dir() { # <basename>
+  local board
+  [[ "$1" =~ ^foreman-[^-]+-${INSTANCE}- ]] || return 1
+  while IFS= read -r board; do
+    [[ -n "$board" ]] || continue
+    case "$1" in
+      "foreman-$board"-*) return 1 ;;
+    esac
+  done <<<"$DECLARED_BOARDS"
+  return 0
+}
+
 # Scratch lives beside the worktree and dies with it. It is reaped HERE, by the
 # sweep, and never by the agent itself: an agent only cleans up if it gets to
 # exit on its own terms, and the ones that most need cleaning are the ones
@@ -69,6 +124,13 @@ remove_agent_tmp() {
   [[ -d "$tmp" ]] || return 0
   case "$tmp" in
     "$AGENT_TMP_ROOT"/"$BOARD_WORKTREE_PREFIX"-*) ;;
+    # A SECOND arm for the pre-single-foreman shape, never a loosening of the
+    # one above into `foreman-*`: this glob matches whatever a `*` can span,
+    # so legacy_agent_dir re-checks the name here rather than trusting the
+    # caller that reached this line.
+    "$AGENT_TMP_ROOT"/foreman-*-"$INSTANCE"-*)
+      legacy_agent_dir "$(basename "$tmp")" \
+        || die "refusing to remove $tmp — not this board's scratch dir" ;;
     *) die "refusing to remove $tmp — not an agent scratch dir" ;;
   esac
   if [[ -n "$BOARD_DRY_RUN" ]]; then
@@ -85,6 +147,11 @@ remove_tree() {
   [[ -d "$path" ]] || return 0
   case "$path" in
     "$REPO"/.claude/worktrees/"$BOARD_WORKTREE_PREFIX"-*) ;;
+    # The pre-single-foreman shape, on the same terms remove_agent_tmp takes
+    # it: a second arm, and the name re-checked here.
+    "$REPO"/.claude/worktrees/foreman-*-"$INSTANCE"-*)
+      legacy_agent_dir "$(basename "$path")" \
+        || die "refusing to remove $path — not this board's worktree" ;;
     *) die "refusing to remove $path — not a foreman worktree" ;;
   esac
   remove_agent_tmp "$(agent_tmp_for "$path")"
@@ -95,6 +162,15 @@ remove_tree() {
   fi
   git -C "$REPO" worktree remove -f -f "$path" 2>/dev/null || rm -rf "$path"
   # Only ever delete a local branch this skill created.
+  #
+  # A legacy worktree's branch is `foreman/<installation>/<board>/<ticket>`,
+  # outside $BOARD_NAME_PREFIX, so this leaves it -- deliberately. That branch
+  # may still back an open pull request, which is the whole reason the
+  # pre-single-foreman names were kept when the installation segment was
+  # introduced: reconcile.py's `pr_for` runs `gh pr list --head <branch>`, and
+  # a card whose branch vanished reads "no agent, no PR" and gets built again
+  # on top of its own open pull request. The disk the tree held is the thing
+  # worth reclaiming; the ref costs nothing.
   case "$branch" in
     "$BOARD_NAME_PREFIX"/*) git -C "$REPO" branch -D "$branch" 2>/dev/null || true ;;
   esac
@@ -201,28 +277,208 @@ reap_evidence_refs() {
   return "$failed"
 }
 
+# The states a ticket-mode sweep asks to stop, and the states it may then reap.
+# ONE name, because "we asked this agent to die" and "we may now reap what it
+# left" drifting apart is exactly how a sweep stops an agent and then refuses
+# to clean up after it.
+#
+# `done` is a turn that finished, and a terminal card's turn has nothing left
+# to say; `blocked` is a prompt nobody will answer. A `working` agent is
+# neither, and neither is any state this code does not know.
+#
+# `--orphans` passes NONE of these, and that difference is the whole reason the
+# predicate below takes them as an argument rather than hardcoding them. A card
+# that is not terminal is RESUMED INTO its worktree (dispatch.sh: "worktree
+# $WORKTREE is gone; cannot resume"), and `done` is exactly where a build agent
+# waits between turns. Reaping there would delete an in-flight card's tree.
+AGENT_IDLE_STATES="done blocked"
+
+# The one place that decides whether an agent is FINISHED, as a python program
+# printed for `python3 -c`.
+#
+#   live    <idle states>                       the cwd of every agent that is
+#                                               NOT finished, one per line
+#   idle    <idle states> <name prefix...>      those cards' idle agents:
+#                                               verdict, id, name
+#   records <idle states> <jobs> <name prefix>  this card's Claude records: id,
+#                                               verdict, state, name, cwd,
+#                                               transcripts
+#
+# THREE snippets used to decide this -- one in live_worktrees, one in
+# stoppable_agents, one inside forget_sessions -- and they disagreed. The
+# disagreement IS the bug measured 2026-09-22: 72 worktrees and 261G on one
+# board, the disk at 96%, preflight's MIN_FREE_REPO_MB gate failing, and no
+# board on the machine able to dispatch. `live` and `records` both read
+# `state != "stopped"`, which on Claude Code is now never satisfied, so every
+# terminal card's tree and record survived every sweep that was meant to take
+# them. One program with one predicate is what stops the three from drifting
+# again. Two operations read the registry JSON on stdin and one reads
+# ~/.claude/jobs from disk; that is fine, because the question they ask is the
+# same one.
+#
+# Printed by a FUNCTION rather than held in a variable, the way detached.sh's
+# _detached_records_py is: bash 3.2 does not keep a here-document quoted inside
+# a command substitution, so `X=$(cat <<'PY' ... PY)` lets the first apostrophe
+# in a comment below end a string the parser thinks it is in, and `bash -n`
+# then names a function hundreds of lines away.
+_sweep_agents_py() {
+  cat <<'AGENTS_PY'
+import json, os, re, sys
+
+# Rows are \x1f-separated, never TAB-separated. A TAB is IFS whitespace, so
+# `IFS=$'\t' read` collapses a run of them into one separator and every field
+# after an empty one shifts left -- an agent listed with no id would then be
+# stopped by its NAME. \x1f is not whitespace, so `read` keeps each field where
+# it was written.
+SEP = "\x1f"
+
+# THE FINISHED-AGENT PREDICATE.
+#
+#   An agent is FINISHED when either
+#     - state == "stopped"                  -- the harness said so, or
+#     - its state is one the caller named idle AND it reports no pid
+#                                           -- the turn is over AND the process
+#                                              is gone.
+#   Every other agent protects its worktree: "working", and any state this code
+#   does not know.
+#
+# The pid is CORROBORATION for a state that already says the turn is over. It
+# is never the test on its own. See live_worktrees for what that distinction
+# is answering.
+def is_finished(state, pid, idle):
+    if state == "stopped":
+        return True
+    return state in idle and not pid
+
+
+def registry():
+    # An unreadable registry is not an empty one. Exit 3 rather than print
+    # nothing: the caller turns a non-zero exit into a refusal to sweep, and
+    # "no agents are alive" must not wear "I could not tell"'s clothes.
+    raw = sys.stdin.read()
+    if not raw.strip():
+        sys.exit(3)
+    try:
+        agents = json.loads(raw)
+    except ValueError:
+        sys.exit(3)
+    # A registry that is not a LIST is not an empty one either: iterating a
+    # future {"agents": [...]} wrapper walks its KEYS and matches nothing.
+    if not isinstance(agents, list):
+        sys.exit(3)
+    return [a for a in agents if isinstance(a, dict)]
+
+
+def live(idle):
+    for agent in registry():
+        if not is_finished(agent.get("state"), agent.get("pid"), idle):
+            print(agent.get("cwd") or "")
+
+
+def idle_agents(idle, prefixes):
+    for agent in registry():
+        name = agent.get("name") or ""
+        if not any(name.startswith(prefix) for prefix in prefixes):
+            continue
+        state = agent.get("state")
+        # A `stopped` agent needs no stop, and a `working` one is never asked
+        # for one here: only the idle states are.
+        if state not in idle:
+            continue
+        verdict = "finished" if is_finished(state, agent.get("pid"), idle) else "unfinished"
+        print(SEP.join([verdict, agent.get("id") or "", name]))
+
+
+def records(idle, jobs, prefix):
+    # Claude Code's own records, read from disk rather than from the registry:
+    # this is what `claude agents --all` lists a session from, and removing the
+    # directory is what clears it.
+    failed = 0
+    for short in sorted(os.listdir(jobs)):
+        if not os.path.isdir(os.path.join(jobs, short)):
+            # pins.json is a FILE in this directory, and it is not a session.
+            continue
+        path = os.path.join(jobs, short, "state.json")
+        try:
+            with open(path) as handle:
+                record = json.load(handle)
+        except (OSError, ValueError) as exc:
+            print("foreman: could not read %s (%s); leaving that session" % (path, exc), file=sys.stderr)
+            failed = 1
+            continue
+        if not isinstance(record, dict):
+            print("foreman: %s is not a JSON object; leaving that session" % path, file=sys.stderr)
+            failed = 1
+            continue
+        name = record.get("name") or ""
+        if not name.startswith(prefix):
+            continue
+        cwd = record.get("cwd") or ""
+        # Where Claude Code files the session's transcript: the cwd with every
+        # `/` and `.` replaced by `-`, the same rule reconcile.py's
+        # transcript_path applies.
+        transcripts = os.path.join(os.path.expanduser("~/.claude/projects"), re.sub(r"[/.]", "-", cwd)) if cwd else ""
+        state = record.get("state") or "?"
+        verdict = "finished" if is_finished(record.get("state"), record.get("pid"), idle) else "unfinished"
+        print(SEP.join([short, verdict, state, name, cwd, transcripts]))
+    return failed
+
+
+op = sys.argv[1] if len(sys.argv) > 1 else ""
+# One space-separated argument, so an operation that also takes a variadic list
+# of prefixes can still tell the two apart.
+states = set(sys.argv[2].split()) if len(sys.argv) > 2 else set()
+if op == "live":
+    if len(sys.argv) != 3:
+        sys.exit("foreman: live takes <idle states> and nothing else")
+    live(states)
+elif op == "idle":
+    if len(sys.argv) < 4:
+        sys.exit("foreman: idle takes <idle states> <name prefix...>")
+    idle_agents(states, sys.argv[3:])
+elif op == "records":
+    if len(sys.argv) != 5:
+        sys.exit("foreman: records takes <idle states> <jobs dir> <name prefix>")
+    sys.exit(records(states, sys.argv[3], sys.argv[4]))
+else:
+    sys.exit("foreman: %r is not an operation on agents" % op)
+AGENTS_PY
+}
+
+# The cwd of every agent that is NOT finished, one per line -- every worktree
+# this sweep must leave alone.
+#
 # Exits non-zero if the agent list could not be read at all. That distinction
 # matters: "no agents are alive" and "I could not tell" must not look the same.
-live_worktrees() {
-  "$HARNESS_SH" list 2>/dev/null | python3 -c '
-import json,sys
-raw=sys.stdin.read()
-if not raw.strip(): sys.exit(3)
-try: agents=json.loads(raw)
-except Exception: sys.exit(3)
-# Protect unless PROVABLY dead. Deleting a live agents working directory
-# destroys unpushed work and kills it with no diagnosable error; leaving a dead
-# tree costs disk until the next sweep. Those costs are nowhere near equal, so
-# anything not positively "stopped" is treated as live.
 #
-# Do NOT reintroduce a `pid` requirement here. A background agent reports a pid
-# only while it is running and drops it once stopped, so `pid and not stopped`
-# happens to be right today — but it makes absence of a field mean death, and
-# the day a live agent is listed without one this deletes the tree under it.
-for a in agents:
-    if a.get("state") != "stopped":
-        print(a.get("cwd",""))
-'
+# Protect unless PROVABLY finished. Deleting a live agent's working directory
+# destroys unpushed work and kills it with no diagnosable error; leaving a dead
+# tree costs disk until the next sweep. Those costs are nowhere near equal.
+#
+# <extra state...> is what THIS CALLER treats as idle, and the two callers
+# differ on purpose: ticket mode passes $AGENT_IDLE_STATES, `--orphans` passes
+# nothing. See AGENT_IDLE_STATES.
+#
+# This comment used to say "Do NOT reintroduce a `pid` requirement here ... it
+# makes absence of a field mean death, and the day a live agent is listed
+# without one this deletes the tree under it." That warning still stands, and
+# the rule above is not the thing it warned about. `pid` is never the test on
+# its own: an agent is reapable only when its state ALREADY says the turn is
+# over, and the missing pid then corroborates that the process is gone too. A
+# live agent listed without a pid is `working`, or a state this code does not
+# know, and both still protect their worktree.
+#
+# What forced it, measured 2026-09-22: a finished Claude background agent idles
+# at `state: "done"` with `pid: null` after its process exits, and `claude stop
+# <id>` prints "stopped <id>" and exits 0 WITHOUT rewriting
+# ~/.claude/jobs/<id>/state.json. The 2026-09-13 measurement recorded elsewhere
+# in this file -- "claude stop writes state: stopped into the record" -- is no
+# longer true of Claude Code. So `state != "stopped"` was permanent protection:
+# every terminal card's tree was left "for a later sweep" that failed
+# identically, 72 of them on one board, until the disk hit 96% and preflight
+# stopped every board on the machine from dispatching at all.
+live_worktrees() { # <extra state...>
+  "$HARNESS_SH" list 2>/dev/null | python3 -c "$(_sweep_agents_py)" live "$*"
 }
 
 # Release the card's concurrency slot, here rather than in prose.
@@ -251,80 +507,94 @@ release_slot() {
 
 # Stop a terminal card's idle agents, so the rest of the sweep can reap them.
 #
-# A background agent does not exit when its turn ends. It idles at `done` with
-# its pid intact (reconcile.py's PHASE table records the measurement), and
-# nothing in the board ever asked it to stop: the tick stops a stalled or a
-# blocked agent and no other. So a merged card's build agent sat at `done`
-# forever, its worktree protected by the liveness guard as "not (yet)
-# stopped", its row kept by `claude agents --all`, and the operator's session
-# list grew by a plan, a build and every reviewer per card.
+# A background agent does not exit when its turn ends. It idles at `done` --
+# with its pid while the process is still resident (reconcile.py's PHASE table
+# records that measurement), and with none once the process exits, which is the
+# distinction the stop loop below now turns on. Nothing in the board ever asked
+# one to stop: the tick stops a stalled or a blocked agent and no other. So a
+# merged card's build agent sat at `done` forever, its worktree protected by
+# the liveness guard as "not (yet) stopped", its row kept by `claude agents
+# --all`, and the operator's session list grew by a plan, a build and every
+# reviewer per card.
 #
-# Only `done` and `blocked`. `done` is a turn that finished, and a terminal
-# card's turn has nothing left to say; `blocked` is a prompt nobody will
-# answer. A `working` agent is left alone, on the reasoning ticket mode leaves a
-# working agent's worktree: the caller's judgment that the card is terminal may
-# be stale, raced or wrong, and a stop it did not need costs a build.
-# forget_sessions then names the working session and leaves it.
+# Only the states $AGENT_IDLE_STATES names, and it names them for both of the
+# things this sweep then does with them. A `working` agent is left alone, on
+# the reasoning ticket mode leaves a working agent's worktree: the caller's
+# judgment that the card is terminal may be stale, raced or wrong, and a stop
+# it did not need costs a build. forget_sessions then names the working session
+# and leaves it.
 #
-# A stop is asynchronous and can fail, so it is re-issued on every
-# poll and the registry, never the exit code, says when it landed -- the loop
-# supervise.sh runs for the tick, bounded by AGENT_STOP_TIMEOUT_SECONDS. An
-# agent still not stopped at the bound is left, named on stderr, and held in
-# `stop_status` for the exit code. "A session lingers" must not read as a clean
-# sweep.
+# WHAT COUNTS AS THE STOP LANDING. It used to be the state: the loop re-read
+# the registry until no agent of these cards was idle any more. On Claude Code
+# that list is NEVER empty, because `claude stop <id>` exits 0 and leaves the
+# record at `done` (measured 2026-09-22; see live_worktrees). So every ticket
+# sweep burned AGENT_STOP_TIMEOUT_SECONDS and then exited non-zero with "the
+# stop did not land", on agents whose processes had been gone for days.
+#
+# The registry still gives one real confirmation, and it is the pid: an idle
+# agent whose process is gone reports none. So the loop asks the finished-agent
+# predicate, not the state, and returns as soon as every listed agent answers
+# it. On a real machine these agents are already pid-null, so it returns on the
+# first pass and the thirty-second wait disappears.
+#
+# A stop is asynchronous and can fail, so it is re-issued on every poll and the
+# registry, never the exit code, says when it landed -- the loop supervise.sh
+# runs for the tick, bounded by AGENT_STOP_TIMEOUT_SECONDS. An agent still
+# unfinished at the bound is left, named on stderr, and held in `stop_status`
+# for the exit code: an agent whose process really is still up must still make
+# the sweep exit non-zero. "A session lingers" must not read as a clean sweep.
 stop_status=0
-# Every agent of these tickets that is safe to stop: "<id><TAB><name>" per
-# line. Exits non-zero when the registry cannot be read, which the caller must
-# not confuse with "nothing to stop".
-stoppable_agents() { # <name prefix...>
-  "$HARNESS_SH" list 2>/dev/null | python3 -c '
-import json,sys
-prefixes=sys.argv[1:]
-try: agents=json.loads(sys.stdin.read())
-except ValueError: sys.exit(3)
-if not isinstance(agents,list): sys.exit(3)
-for a in agents:
-    if not isinstance(a,dict): continue
-    name=a.get("name") or ""
-    if not any(name.startswith(p) for p in prefixes): continue
-    if a.get("state") not in ("done","blocked"): continue
-    print("%s\t%s"%(a.get("id") or "", name))
-' "$@"
+# Every idle agent of these tickets, one per line:
+#   <finished|unfinished><US><id><US><name>
+# Exits non-zero when the registry cannot be read, which the caller must not
+# confuse with "nothing to stop".
+idle_card_agents() { # <idle states> <name prefix...>
+  "$HARNESS_SH" list 2>/dev/null | python3 -c "$(_sweep_agents_py)" idle "$@"
 }
 
 stop_card_agents() { # <ticket...>
-  local prefixes=() ticket listing id name waited=0 asked="" poll_seconds=2
+  local prefixes=() ticket listing verdict id name pending waited=0 asked="" poll_seconds=2
   for ticket in "$@"; do prefixes+=("$(card_agents_prefix "$ticket")"); done
   while :; do
-    if ! listing="$(stoppable_agents ${prefixes[@]+"${prefixes[@]}"})"; then
+    if ! listing="$(idle_card_agents "$AGENT_IDLE_STATES" ${prefixes[@]+"${prefixes[@]}"})"; then
       printf 'foreman: could not read the agent registry; stopping no session\n' >&2
       stop_status=1
       return 0
     fi
     [[ -n "${listing//[[:space:]]/}" ]] || return 0
     if [[ -n "$BOARD_DRY_RUN" ]]; then
-      while IFS=$'\t' read -r id name; do
+      while IFS=$'\x1f' read -r verdict id name; do
         [[ -n "$id" ]] && printf 'DRY RUN: would stop session %s (%s)\n' "$name" "$id"
       done <<<"$listing"
       return 0
     fi
-    if [[ "$waited" -ge "$AGENT_STOP_TIMEOUT_SECONDS" ]]; then
-      while IFS=$'\t' read -r id name; do
-        [[ -n "$id" ]] && printf 'foreman: leaving session %s (%s) -- the stop did not land in %ss\n' \
-          "$name" "$id" "$AGENT_STOP_TIMEOUT_SECONDS" >&2
-      done <<<"$listing"
-      stop_status=1
-      return 0
-    fi
-    while IFS=$'\t' read -r id name; do
+    # Ask first, then read the verdict this same listing already carries. An
+    # agent that is finished is still asked once: the ask is what the operator
+    # sees in the log, and what a harness whose stop DOES land still needs.
+    while IFS=$'\x1f' read -r verdict id name; do
       [[ -n "$id" ]] || continue
       case " $asked " in
         *" $id "*) ;;
         *) printf 'stopping session %s (%s)\n' "$name" "$id"; asked="$asked $id" ;;
       esac
-      # The registry below decides whether this landed; the exit code cannot.
+      # The predicate below decides whether this landed; the exit code cannot.
       "$HARNESS_SH" stop "$id" >/dev/null 2>&1 || true
     done <<<"$listing"
+    pending=""
+    while IFS=$'\x1f' read -r verdict id name; do
+      [[ -n "$verdict" ]] || continue
+      [[ "$verdict" == "finished" ]] && continue
+      pending="$pending$name ($id)"$'\n'
+    done <<<"$listing"
+    [[ -n "$pending" ]] || return 0
+    if [[ "$waited" -ge "$AGENT_STOP_TIMEOUT_SECONDS" ]]; then
+      while IFS= read -r name; do
+        [[ -n "$name" ]] && printf 'foreman: leaving session %s -- the stop did not land in %ss\n' \
+          "$name" "$AGENT_STOP_TIMEOUT_SECONDS" >&2
+      done <<<"$pending"
+      stop_status=1
+      return 0
+    fi
     sleep "$poll_seconds"
     waited=$((waited + poll_seconds))
   done
@@ -332,15 +602,13 @@ stop_card_agents() { # <ticket...>
 
 # Forget a terminal card's finished sessions.
 #
-# A `claude --bg` agent that stops leaves two things behind that nothing here
-# reaped: its record under `~/.claude/jobs/<id>/`, which is what `claude agents
-# --all` lists a stopped agent from, and its transcripts under
-# `~/.claude/projects/`. Measured 2026-09-13 on Claude Code 2.1.228: `claude
-# stop` writes `state: stopped` into the record, no subcommand removes it, and
-# removing the directory is what clears the listing. The worktree went, the
-# scratch went, the branch went, and every plan, build and review session of
-# every card ever built stayed listed as a stopped agent -- and in the
-# operator's session list -- forever.
+# A `claude --bg` agent that finishes leaves two things behind that nothing
+# here reaped: its record under `~/.claude/jobs/<id>/`, which is what `claude
+# agents --all` lists it from, and its transcripts under `~/.claude/projects/`.
+# No subcommand removes either, and removing the directory is what clears the
+# listing. The worktree went, the scratch went, the branch went, and every
+# plan, build and review session of every card ever built stayed listed -- and
+# in the operator's session list -- forever.
 #
 # Ticket mode only, for the reason the slot is released here and nowhere else:
 # the caller has just judged the card terminal, and a terminal card is the one
@@ -351,8 +619,13 @@ stop_card_agents() { # <ticket...>
 # Scoped three ways, each a rule this file already applies to worktrees:
 # - by name prefix, so it is this instance's sessions for this ticket and never
 #   a sibling board's, the tick's, or ABC-10's when asked about ABC-1;
-# - only a session whose record says `stopped`, the tie-goes-to-leaving-it rule
-#   --orphans applies to a worktree;
+# - only a session the finished-agent predicate accepts, the
+#   tie-goes-to-leaving-it rule --orphans applies to a worktree. This read
+#   `state != "stopped"`, which on Claude Code is now never satisfied
+#   (2026-09-22; see live_worktrees), so every terminal card's record survived
+#   and the operator's session list grew without bound. It asks the ONE
+#   predicate now, with the same idle states ticket mode reaps by, so a card
+#   whose tree this sweep takes is a card whose record it takes too;
 # - a transcript directory goes only when the session ran in one of this
 #   instance's throwaway worktrees. A dispatch run by hand from the repository
 #   root shares that directory with whoever else worked there, so its record
@@ -365,51 +638,22 @@ stop_card_agents() { # <ticket...>
 forget_status=0
 forget_sessions() {
   local ticket="$1" jobs_dir="$HOME/.claude/jobs"
-  local listing id state name cwd transcripts forgotten=0
+  local listing id verdict state name cwd transcripts forgotten=0
   # Claude Code's own records. A codex or opencode agent's record belongs to
   # the adapter, under $FOREMAN_HOME/agents/, and `"$HARNESS_SH" reap` ages it
   # out on the orphan pass; there is no ~/.claude/jobs entry of this card's to
   # forget on those harnesses.
   [[ "$HARNESS" == claude ]] || return 0
   [[ -d "$jobs_dir" ]] || return 0
-  if ! listing="$(python3 - "$jobs_dir" "$(card_agents_prefix "$ticket")" <<'PY'
-import json, os, re, sys
-jobs, prefix = sys.argv[1], sys.argv[2]
-failed = 0
-for short in sorted(os.listdir(jobs)):
-    if not os.path.isdir(os.path.join(jobs, short)):
-        continue
-    path = os.path.join(jobs, short, "state.json")
-    try:
-        with open(path) as fh:
-            record = json.load(fh)
-    except (OSError, ValueError) as exc:
-        print(f"foreman: could not read {path} ({exc}); leaving that session", file=sys.stderr)
-        failed = 1
-        continue
-    if not isinstance(record, dict):
-        print(f"foreman: {path} is not a JSON object; leaving that session", file=sys.stderr)
-        failed = 1
-        continue
-    name = record.get("name") or ""
-    if not name.startswith(prefix):
-        continue
-    cwd = record.get("cwd") or ""
-    # Where Claude Code files the session's transcript: the cwd with every `/`
-    # and `.` replaced by `-`, the same rule reconcile.py's transcript_path
-    # applies.
-    transcripts = os.path.join(os.path.expanduser("~/.claude/projects"), re.sub(r"[/.]", "-", cwd)) if cwd else ""
-    print("\t".join([short, record.get("state") or "?", name, cwd, transcripts]))
-sys.exit(failed)
-PY
-  )"; then
+  if ! listing="$(python3 -c "$(_sweep_agents_py)" records \
+      "$AGENT_IDLE_STATES" "$jobs_dir" "$(card_agents_prefix "$ticket")")"; then
     forget_status=1
   fi
-  while IFS=$'\t' read -r id state name cwd transcripts; do
+  while IFS=$'\x1f' read -r id verdict state name cwd transcripts; do
     [[ -n "$id" ]] || continue
     [[ "$id" != */* && "$id" != .* ]] || die "refusing to remove $jobs_dir/$id -- not a session id"
-    if [[ "$state" != "stopped" ]]; then
-      printf 'foreman: leaving session %s (%s) -- it is not (yet) stopped\n' "$name" "$id" >&2
+    if [[ "$verdict" != "finished" ]]; then
+      printf 'foreman: leaving session %s (%s) -- it is not finished (state %s)\n' "$name" "$id" "$state" >&2
       continue
     fi
     if [[ -n "$BOARD_DRY_RUN" ]]; then
@@ -463,18 +707,31 @@ remove_transcripts() {
 # SKILL.md only ever passes tickets it just judged terminal, so this should be
 # a no-op in the ordinary case; it is the same defense-in-depth `--orphans`
 # already has, for the case where that judgment was stale, raced, or wrong.
+#
+# WHAT THIS SWEEP TREATS AS IDLE is the one thing the two modes disagree
+# about, so it is decided once, here, and passed to both reads below.
+# $AGENT_IDLE_STATES explains the difference: ticket mode has just judged
+# these cards terminal and has just asked their idle agents to stop;
+# `--orphans` has judged nothing, and a card that is not terminal is resumed
+# INTO its worktree. Word-split unquoted at the call, which is how an empty
+# value passes no extra states at all.
+if [[ "${1:-}" == "--orphans" ]]; then
+  SWEEP_IDLE_STATES=""
+else
+  SWEEP_IDLE_STATES="$AGENT_IDLE_STATES"
+fi
 LIVE_FILE="$(mktemp)"
 trap 'rm -f "$LIVE_FILE"' EXIT
-if ! live_worktrees >"$LIVE_FILE"; then
+if ! live_worktrees $SWEEP_IDLE_STATES >"$LIVE_FILE"; then
   die "could not read live agents; refusing to sweep"
 fi
 
 # remove_tree_unless_live <path> -- remove_tree(), but leave a worktree alone
-# if it is a not-provably-stopped agent's cwd, the same guard --orphans uses.
+# if it is a not-provably-finished agent's cwd, the same guard --orphans uses.
 remove_tree_unless_live() {
   local path="$1"
   if grep -Fxq "$path" "$LIVE_FILE"; then
-    printf 'foreman: leaving %s -- its agent is not (yet) stopped\n' "$path" >&2
+    printf 'foreman: leaving %s -- its agent has not finished\n' "$path" >&2
     return 0
   fi
   remove_tree "$path"
@@ -485,6 +742,18 @@ if [[ "${1:-}" == "--orphans" ]]; then
   for path in "$REPO"/.claude/worktrees/"$BOARD_WORKTREE_PREFIX"-*/; do
     [[ -d "$path" ]] || continue
     path="${path%/}"
+    grep -Fxq "$path" "$LIVE_FILE" || remove_tree "$path"
+  done
+  # The pre-single-foreman trees, which no glob above can reach. A SECOND loop
+  # rather than a looser glob in the one above, so the current shape keeps the
+  # guard it has: legacy_agent_dir is what decides whether a candidate here is
+  # this board's dead installation or a live board's own tree, and LIVE_FILE
+  # still protects any tree an agent is working in. Ticket mode grows no such
+  # loop -- a legacy tree belongs to no card this board dispatches.
+  for path in "$REPO"/.claude/worktrees/foreman-*-"$INSTANCE"-*/; do
+    [[ -d "$path" ]] || continue
+    path="${path%/}"
+    legacy_agent_dir "$(basename "$path")" || continue
     grep -Fxq "$path" "$LIVE_FILE" || remove_tree "$path"
   done
   # Scratch whose worktree is already gone. The loop above only visits trees
@@ -500,6 +769,17 @@ if [[ "${1:-}" == "--orphans" ]]; then
     grep -Fxq "$wt" "$LIVE_FILE" && continue
     remove_agent_tmp "$tmp"
   done
+  # The same scratch pass for the legacy shape, on the same terms as the
+  # legacy worktree loop above.
+  for tmp in "$AGENT_TMP_ROOT"/foreman-*-"$INSTANCE"-*/; do
+    [[ -d "$tmp" ]] || continue
+    tmp="${tmp%/}"
+    legacy_agent_dir "$(basename "$tmp")" || continue
+    wt="$REPO/.claude/worktrees/$(basename "$tmp")"
+    [[ -d "$wt" ]] && continue
+    grep -Fxq "$wt" "$LIVE_FILE" && continue
+    remove_agent_tmp "$tmp"
+  done
   # Held rather than propagated on the spot, for the reason the evidence-ref
   # reap below is held: the rest of the sweep is unrelated and still worth
   # doing.
@@ -509,7 +789,7 @@ else
   # again once they have landed -- and refused again if it cannot be read, for
   # the reason it was refused the first time.
   stop_card_agents "$@"
-  if ! live_worktrees >"$LIVE_FILE"; then
+  if ! live_worktrees $SWEEP_IDLE_STATES >"$LIVE_FILE"; then
     die "could not read live agents after stopping the cards' agents; refusing to sweep"
   fi
   for ticket in "$@"; do

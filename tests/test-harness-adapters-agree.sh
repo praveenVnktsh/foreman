@@ -732,14 +732,83 @@ for harness in claude codex opencode; do
   # contract, and an adapter that reaped a WORKING agent would delete the log it
   # still has open.
   if [[ "$harness" == claude ]]; then
-    # Claude's registry is Claude's, and Claude Code ages it out. The verb still
-    # has to exist and still has to succeed, so sweep.sh calls one verb on every
-    # installation instead of branching on the harness.
-    claude_reap="$work/$harness/reap.out"
-    if run_adapter reap 0 >"$claude_reap" 2>&1 && [[ ! -s "$claude_reap" ]]; then
-      ok "$harness reap exits 0 and prints nothing, because its registry is not a directory it owns"
+    # Until 2026-09-22 this comment read "Claude's registry is Claude's, and
+    # Claude Code ages it out." Measured the same day: it does not. A `--bg`
+    # session's record sits at ~/.claude/jobs/<short-id>/, `done`, for days
+    # after its process exits, so this verb now deletes it -- see claude.sh's
+    # own reap() for the mechanism.
+    #
+    # The stub `claude` binary answers `list`, `stop` and the rest from its own
+    # state directory (tests/lib/harness-stub.sh), never from
+    # $HOME/.claude/jobs, so none of the claims above this line left a record
+    # there. The claims below write their own state.json files directly, the
+    # shape claude.sh's reap() reads.
+    #
+    # HOME moves to a directory of this test's own, not the shared per-harness
+    # $home above: ~/.claude/jobs is the OPERATOR's directory too, shared with
+    # their own `claude --bg` sessions, and a claim here must never be able to
+    # reach the real one.
+    export HOME="$work/$harness/reap-home"
+    claude_jobs="$HOME/.claude/jobs"
+    mkdir -p "$claude_jobs"
+
+    # Freshly written, so its mtime is now -- new enough to sit inside the
+    # 999999-second window below, old enough for a window of 0, whose cutoff is
+    # "now".
+    mkdir -p "$claude_jobs/reapable"
+    printf '{"name":"foreman/probe","state":"done","pid":null}\n' \
+      >"$claude_jobs/reapable/state.json"
+
+    # Old enough that age alone would reap it under either window below; only
+    # its state protects it. No pid, so the claim is on `state == "working"`
+    # alone, the same tie-goes-to-leaving-it rule detached.sh's reap applies.
+    mkdir -p "$claude_jobs/livewire"
+    printf '{"name":"foreman/probe","state":"working","pid":null}\n' \
+      >"$claude_jobs/livewire/state.json"
+    touch -t 197001010000 "$claude_jobs/livewire/state.json"
+
+    # Old and done, same as reapable -- but its name is not foreman's. An
+    # operator's own `claude --bg` session, sharing this jobs directory.
+    mkdir -p "$claude_jobs/operator"
+    printf '{"name":"some-other-session","state":"done","pid":null}\n' \
+      >"$claude_jobs/operator/state.json"
+    touch -t 197001010000 "$claude_jobs/operator/state.json"
+
+    same "$harness reap leaves a record inside the retention window alone" \
+      "" "$(run_adapter reap 999999)"
+
+    # BOARD_DRY_RUN says what a real sweep would take and takes nothing, the
+    # same promise every other deletion sweep.sh makes keeps.
+    # `env`, not an assignment in front of `run_adapter`: bash leaves an
+    # assignment that prefixes a SHELL FUNCTION in effect after the function
+    # returns, and a leaked BOARD_DRY_RUN would make the real reap below a
+    # second dry run that deleted nothing while every claim still passed.
+    same "$harness reap under BOARD_DRY_RUN names the agent it would take" \
+      "reapable" "$(env BOARD_DRY_RUN=1 "$adapter" reap 0)"
+    if [[ -d "$claude_jobs/reapable" ]]; then
+      ok "$harness reap under BOARD_DRY_RUN deletes nothing"
     else
-      bad "$harness reap 0 should exit 0 and print nothing, got: $(cat "$claude_reap")"
+      bad "$harness reap under BOARD_DRY_RUN deleted $claude_jobs/reapable"
+    fi
+
+    same "$harness reap prints one line per agent it took" \
+      "reapable" "$(run_adapter reap 0)"
+    if [[ -d "$claude_jobs/reapable" ]]; then
+      bad "$harness reap left $claude_jobs/reapable behind"
+    else
+      ok "$harness reap deletes a finished agent's job record"
+    fi
+
+    if [[ -d "$claude_jobs/livewire" ]]; then
+      ok "$harness reap never takes a working agent"
+    else
+      bad "$harness reap deleted $claude_jobs/livewire from an agent that is still working"
+    fi
+
+    if [[ -d "$claude_jobs/operator" ]]; then
+      ok "$harness reap leaves a record outside its own foreman/ namespace alone"
+    else
+      bad "$harness reap deleted $claude_jobs/operator, a record outside foreman's namespace"
     fi
   else
     # A home of its own. Reaping in the shared one would delete the records

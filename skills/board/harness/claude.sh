@@ -12,7 +12,8 @@
 #                                             prints the session id
 #   claude.sh list                            every agent, as a JSON list
 #   claude.sh stop <id>                       stop one agent
-#   claude.sh reap <older-than-seconds>       nothing here; see the verb below
+#   claude.sh reap <older-than-seconds>       delete finished foreman records,
+#                                             printing the ids it took
 #   claude.sh transcript <cwd> <session-id>   prints the transcript path
 #   claude.sh check                           exit 0 if the binary runs
 #   claude.sh skills-dir                      where this harness resolves skills
@@ -260,6 +261,98 @@ resume() {
   printf '%s\n' "$session"
 }
 
+# The namespace every name foreman gives an agent starts with. `config.sh`
+# spells it literally twice -- `TICK_AGENT_NAME="foreman/tick"` and
+# `BOARD_NAME_PREFIX="foreman/$INSTANCE"` -- and THIS FILE SOURCES NOTHING, so
+# it carries its own copy. Changing the namespace means changing both places.
+FOREMAN_NAME_ROOT="foreman/"
+
+# Delete the record of every finished foreman agent older than the window, and
+# print one id per line.
+#
+# `~/.claude/jobs/<short-id>/` is Claude Code's record of a `--bg` session, and
+# it is what `claude agents --json --all` lists an agent from. Removing the
+# directory is the only thing that clears the listing; no `claude` subcommand
+# does. Until 2026-09-22 this verb was a no-op, commented "Claude Code ages it
+# out itself". It does not: records days old were still listed, still `done`,
+# and sweep.sh reads every listed agent as a live one -- so no Claude-harness
+# worktree could ever be reaped. One machine reached 72 worktrees and 261G,
+# which failed preflight's free-disk gate and stopped every board dispatching.
+reap() { # <older-than-seconds>
+  python3 - "$HOME/.claude/jobs" "$1" "$FOREMAN_NAME_ROOT" <<'PY'
+import json, os, shutil, sys, time
+
+jobs, raw_window, name_root = sys.argv[1], sys.argv[2], sys.argv[3]
+
+try:
+    window = float(raw_window)
+except ValueError:
+    sys.exit("foreman: reap: older-than-seconds %r is not a number" % raw_window)
+if window < 0:
+    sys.exit("foreman: reap: older-than-seconds %r cannot be negative" % raw_window)
+
+# The same switch sweep.sh reads before every other deletion it makes. The ids
+# still print, so a dry run says exactly which records a real one would take;
+# only the removal is skipped. Read from the environment because the adapter is
+# a separate process from the sweep that sets it.
+dry_run = bool(os.environ.get("BOARD_DRY_RUN"))
+
+if not os.path.isdir(jobs):
+    sys.exit(0)
+
+cutoff = time.time() - window
+
+for short in sorted(os.listdir(jobs)):
+    directory = os.path.join(jobs, short)
+    # `pins.json` is a FILE in this directory. Only a directory is a record.
+    if not os.path.isdir(directory):
+        continue
+    path = os.path.join(directory, "state.json")
+    try:
+        # The age comes from the mtime of state.json, never from a field inside
+        # it. The schema is Claude Code's, not foreman's, and it changed under
+        # us once already: on 2.1.228 (2026-09-13) `claude stop` wrote `state:
+        # stopped` into the record, and by 2026-09-22 it printed "stopped <id>",
+        # exited 0 and left the record saying `done`. The mtime is the
+        # filesystem's own answer to "nothing has touched this in thirty days",
+        # and the daemon writes the record as the agent runs.
+        mtime = os.path.getmtime(path)
+        with open(path) as handle:
+            record = json.load(handle)
+    except (OSError, ValueError) as exc:
+        # reap DELETES files, so an unreadable record goes the safe way: name it
+        # and leave it. Saying so is not a failure of the reap, so the exit code
+        # stays 0 -- detached.sh's `complain(..., strict=False)` rule.
+        print("foreman: could not read %s (%s); leaving that record" % (path, exc), file=sys.stderr)
+        continue
+    if not isinstance(record, dict):
+        print("foreman: %s is not a JSON object; leaving that record" % path, file=sys.stderr)
+        continue
+    # ~/.claude/jobs is the OPERATOR'S directory, shared with their own
+    # `claude --bg` sessions. Those are not foreman's to delete, so a record is
+    # taken only when its name sits under foreman's own namespace root.
+    if not (record.get("name") or "").startswith(name_root):
+        continue
+    # FINISHED is: the turn is over AND the process is gone. `working` is never
+    # taken, even if it somehow lost its pid -- the same tie-goes-to-leaving-it
+    # rule detached.sh's reap applies. A record that still holds a pid is a
+    # process that is still up whatever its state says: its log is open, and
+    # sweep.sh's worktree protection reads it.
+    if record.get("state") == "working":
+        continue
+    if record.get("pid"):
+        continue
+    if mtime > cutoff:
+        continue
+    if not dry_run:
+        try:
+            shutil.rmtree(directory)
+        except OSError as exc:
+            sys.exit("foreman: cannot remove %s (%s)" % (directory, exc))
+    print(short)
+PY
+}
+
 transcript() { # <cwd> <session-id>
   # Claude persists a session at ~/.claude/projects/<slug>/<id>.jsonl, where the
   # slug is the cwd with every '/' and '.' replaced by '-'. The file's mtime is
@@ -306,16 +399,18 @@ case "$VERB" in
     [[ $# -eq 1 ]] || usage
     claude stop "$1"
     ;;
-  # Nothing to reap. This adapter keeps no records of its own: `claude agents`
-  # IS the registry, and Claude Code ages it out itself. codex.sh and
-  # opencode.sh answer this verb by deleting the record, log and wrapper that
-  # detached.sh wrote for each of their spawns, because nothing else ever would.
+  # Claude Code keeps the registry, but it never ages it out: a record under
+  # `~/.claude/jobs/<short-id>/` outlives the process by days, and every listed
+  # agent protects its worktree from the sweep. So this verb deletes what
+  # codex.sh and opencode.sh delete through detached.sh -- the record of a
+  # finished agent -- and for the same reason: nothing else ever would.
   #
-  # It still takes the window and still exits 0, so sweep.sh calls the same
-  # verb on every installation instead of branching on the harness -- the
-  # branching this adapter exists to remove.
+  # It takes the same window and prints the same one-id-per-line answer on every
+  # harness, so sweep.sh calls one verb instead of branching on the harness --
+  # the branching this adapter exists to remove.
   reap)
     [[ $# -eq 1 ]] || usage
+    reap "$1"
     ;;
   transcript)
     [[ $# -eq 2 ]] || usage
