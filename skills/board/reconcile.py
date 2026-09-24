@@ -1247,6 +1247,12 @@ def dispatch_verdict(board: str, host_max: int,
     A board may dispatch when `available >= 1`. That lets it use capacity
     nobody is using, while reserving what other boards are still owed.
 
+    A board holding fewer slots than its own floor may also dispatch whenever
+    the machine has a free slot, whatever the other boards are owed. Floors can
+    sum above `host_max`, because every floor is at least 1. Without this rule,
+    boards that are each short of their floor reserve slots for each other, and
+    every one of them is refused while slots sit free.
+
     A FLOOR IS RESERVED ONLY FOR A BOARD THAT IS ASKING -- `board_demands()`,
     which reads the `wants-slot` stamp `dispatch.sh` writes. Measured 2026-09-20
     on a machine serving four boards at priority 2 with host_max 10: every board
@@ -1291,6 +1297,8 @@ def dispatch_verdict(board: str, host_max: int,
             floors[name] = 0
         else:
             floors[name] = max(1, (host_max * priority) // weight)
+    if floors[board] > held.get(board, 0) and total < host_max:
+        return ""
     # One list, then its sum and its names. The refusal below has to name the
     # same boards the arithmetic reserved for, or it explains a number nobody
     # can reproduce from what it says.
@@ -1723,9 +1731,9 @@ def board_order(foreman_home: str) -> dict:
 def _attempts(entries: list[dict], role: str) -> int:
     """How many attempts of one role this card has actually consumed.
 
-    Counts distinct attempt labels rather than spawn lines: a spawn and a later
-    resume of the same attempt are one attempt, and re-dispatching the same
-    attempt number after an environment repair must not count twice.
+    Counts distinct attempt labels rather than spawn lines: re-dispatching the
+    same attempt number after an environment repair must not count twice.
+    Resumes are not counted here; `build_attempts` adds the ones it charges.
 
     A `void` entry removes an attempt from the count. An attempt budget exists
     to stop a card looping on a ticket that cannot be done; an attempt killed by
@@ -1750,9 +1758,28 @@ def _attempts(entries: list[dict], role: str) -> int:
     return len(seen - voided)
 
 
+# The `dispatch.sh --reason` values whose build resume spends an attempt. A
+# `fix` resume does not: review rounds already bound the one fix a blocking
+# finding earns.
+CHARGED_BUILD_RESUME_REASONS = frozenset({"ci-fix", "retry"})
+
+
 def build_attempts(entries: list[dict]) -> int:
-    """Build attempts consumed, which step 2 checks against MAX_BUILD_ATTEMPTS."""
-    return _attempts(entries, "build")
+    """Build attempts consumed, which step 2 checks against MAX_BUILD_ATTEMPTS.
+
+    Spawned attempts as `_attempts` counts them, plus one for every build
+    resume whose reason is in `CHARGED_BUILD_RESUME_REASONS`. Counting spawns
+    alone let a card whose required check never passes be resumed every pass
+    and never reach the cap.
+    """
+    resumes = sum(
+        1
+        for e in entries
+        if (e.get("event") or {}).get("action") == "resume"
+        and (e.get("event") or {}).get("role") == "build"
+        and (e.get("event") or {}).get("reason") in CHARGED_BUILD_RESUME_REASONS
+    )
+    return _attempts(entries, "build") + resumes
 
 
 def plan_rounds(entries: list[dict]) -> int:

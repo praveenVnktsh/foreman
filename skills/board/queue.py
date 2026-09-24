@@ -152,14 +152,27 @@ def report_skip(identifier: str, reason: str) -> None:
 def band(value: object) -> int:
     """The sort band for one card's priority, in any representation Linear uses.
 
-    The tick may hand over the integer, the float or the name, depending on
-    which Linear MCP call produced the issue, so all three are accepted here
-    rather than normalised by every caller.
+    The tick may hand over the integer, the float, the name, or -- from
+    Linear MCP's list_issues -- an object like {"value": 3, "name": "Medium"},
+    depending on which Linear call produced the issue, so all of these are
+    accepted here rather than normalised by every caller.
+
+    A dict is read through the same int/float/name rules by recursing on
+    "value" first, falling back to "name". A dict with neither key is
+    Unrankable.
 
     Raises Unrankable when the priority cannot be read. Naming the card and
     reporting the skip belong to the caller, which is the only place that knows
     the identifier.
     """
+    if isinstance(value, dict):
+        if "value" in value:
+            return band(value["value"])
+        if "name" in value:
+            return band(value["name"])
+        raise Unrankable(
+            f"priority object {value!r} has neither \"value\" nor \"name\"; {EXPECTED_PRIORITY}"
+        )
     if value is None:
         # Missing and null are the same failure. Reading either as 0 would rank
         # an untriaged card as though someone had triaged it.
