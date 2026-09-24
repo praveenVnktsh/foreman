@@ -100,6 +100,20 @@ wait_for_mtime_change() { # <path> <mtime>
   return 1
 }
 
+# Polls for a path to be GONE, the mirror of wait_for_state: detached.sh's
+# cleanup (trap on TERM, or the plain rm after a normal exit) runs in the
+# wrapper process, not in this shell, so a bare `[[ ! -e ]]` right after a stop
+# or a marker would race it.
+wait_for_absence() { # <path>
+  local tries=0
+  while [[ "$tries" -lt "$POLL_TRIES" ]]; do
+    [[ ! -e "$1" ]] && return 0
+    sleep "$POLL_SECONDS"
+    tries=$(( tries + 1 ))
+  done
+  return 1
+}
+
 for harness in claude codex opencode; do
   adapter="$root/skills/board/harness/$harness.sh"
 
@@ -132,6 +146,29 @@ for harness in claude codex opencode; do
   same "$harness list shows the agent it just spawned as working" \
     "working" "$(agent_field probe state)"
 
+  # Claim: each run's TMPDIR is its own <id>.tmp under $FOREMAN_HOME/agents,
+  # never this test's own TMPDIR. Before detached.sh set this per run, the
+  # wrapper left TMPDIR as it found it, and opencode's leaked 5.4MB .so per
+  # run piled 586 files / 3.1G into the shared /tmp between 2026-09-16 and
+  # 2026-09-23, tripping preflight's min_free_tmp_mb and stopping dispatch.
+  # Claude is exempt: claude.sh runs `claude --bg` directly, with no
+  # detached.sh wrapper underneath it.
+  probe_tmp=""
+  if [[ "$harness" != claude ]]; then
+    probe_id="$(agent_field probe id)"
+    probe_tmp="$FOREMAN_HOME/agents/$probe_id.tmp"
+    recorded_tmp=""
+    tries=0
+    while [[ "$tries" -lt "$POLL_TRIES" ]]; do
+      recorded_tmp="$(tail -1 "$HARNESS_STUB_TMPDIRS" 2>/dev/null | awk '{print $1}')"
+      [[ -n "$recorded_tmp" ]] && break
+      sleep "$POLL_SECONDS"
+      tries=$(( tries + 1 ))
+    done
+    same "$harness spawn gives the run its own TMPDIR under agents/<id>.tmp, not this test's" \
+      "$probe_tmp" "$recorded_tmp"
+  fi
+
   transcript="$(run_adapter transcript "$agent_cwd" "$spawned")"
   if [[ -n "$transcript" ]]; then ok "$harness transcript prints a path for a live session"
   else bad "$harness transcript prints a path for a live session"; fi
@@ -147,9 +184,22 @@ for harness in claude codex opencode; do
   # of an adapter whose `stop` is a no-op.
   run_adapter spawn --name stopper --cwd "$agent_cwd" \
     --model stub-model --prompt-file "$prompt" --skip-permissions >/dev/null
+  stopper_tmp=""
+  [[ "$harness" != claude ]] && stopper_tmp="$FOREMAN_HOME/agents/$(agent_field stopper id).tmp"
   run_adapter stop "$(agent_field stopper id)"
   if wait_for_state stopper stopped; then ok "$harness stop moves that agent to stopped"
   else bad "$harness stop moves that agent to stopped"; fi
+
+  # Claim: TERMing a run's process group also removes its run directory. The
+  # wrapper's trap on TERM (detached.sh) is what makes a stopped agent leave
+  # no .tmp/ behind for a KILL-only reap to have to clean up later.
+  if [[ "$harness" != claude ]]; then
+    if wait_for_absence "$stopper_tmp"; then
+      ok "$harness stopping an agent with TERM removes its run directory"
+    else
+      bad "$harness run directory $stopper_tmp still exists after stop"
+    fi
+  fi
 
   # `forget` refuses a working agent everywhere: its record is what `stop`, the
   # host ceiling and sweep.sh's worktree protection all still read, so a
@@ -174,6 +224,18 @@ for harness in claude codex opencode; do
   : >"$HARNESS_STUB_MARKER"
   if wait_for_state probe done; then ok "$harness list shows the agent done once its work ends"
   else bad "$harness list shows the agent done once its work ends"; fi
+
+  # Claim: a run directory is removed once its agent finishes normally, not
+  # just when it is stopped. The wrapper's own `rm -rf "$RUN_TMP"` after the
+  # harness call returns is what this pins; the trap above pins the signalled
+  # path.
+  if [[ "$harness" != claude ]]; then
+    if wait_for_absence "$probe_tmp"; then
+      ok "$harness run directory is removed once probe finishes on its own"
+    else
+      bad "$harness run directory $probe_tmp still exists once probe is done"
+    fi
+  fi
 
   # A sweep of a terminal card stops agents that already finished, on its way
   # to forgetting them once they exit. Measured 2026-09-23 on Claude Code
@@ -201,11 +263,26 @@ for harness in claude codex opencode; do
   # 2026-09-23: 162 done/no-pid rows sat in one registry). `forget` is how a
   # sweep clears one once it has exited, on every harness, and it refuses to
   # touch a row that is still working or that names no agent at all.
+  # A run a SIGKILL ended leaves its `<id>.tmp/` run directory behind, and
+  # forget meets it as the one suffix that is a directory. Planted here, so the
+  # claim holds whether or not this run cleaned up after itself.
+  finisher_tmp=""
+  if [[ "$harness" != claude ]]; then
+    finisher_tmp="$FOREMAN_HOME/agents/$(agent_field finisher id).tmp"
+    mkdir -p "$finisher_tmp" && : >"$finisher_tmp/.leaked-00000000.so"
+  fi
   run_adapter forget "$(agent_field finisher id)"
   if [[ "$(agent_field finisher state)" == "" ]]; then
     ok "$harness forget removes an exited agent from list"
   else
     bad "$harness forget left finisher listed as $(agent_field finisher state)"
+  fi
+  if [[ -n "$finisher_tmp" ]]; then
+    if [[ -e "$finisher_tmp" ]]; then
+      bad "$harness forget left the run directory $finisher_tmp behind"
+    else
+      ok "$harness forget removes a leftover run directory with the record"
+    fi
   fi
 
   if run_adapter forget definitely-no-such-agent-id >/dev/null 2>&1; then
@@ -666,6 +743,7 @@ for harness in claude codex opencode; do
   # what lands in the runs file is one line per pass and nothing else. Reset
   # first, because every verb above has already run the binary.
   : >"$HARNESS_STUB_RUNS"
+  : >"$HARNESS_STUB_TMPDIRS"
   run_adapter spawn --name looper --cwd "$agent_cwd" --model stub-model \
     --prompt-file "$prompt" --skip-permissions --loop-minutes "$LOOP_MINUTES" >/dev/null
   sleep "$LOOP_WATCH_SECONDS"
@@ -683,6 +761,22 @@ for harness in claude codex opencode; do
       "$harness spawn --loop-minutes runs the harness again after the interval" \
       "$passes" "$LOOP_WATCH_SECONDS" "$LOOP_MINUTES" >&2
     fail=1
+  fi
+
+  # Claim: the loop wrapper's `rm -rf "$RUN_TMP"` before each pass's `mkdir`
+  # (detached.sh) gives every pass a fresh, empty TMPDIR, even though the
+  # stub itself drops a leaked .stub-00000000.so into it every single pass.
+  # Without that rm-then-mkdir, pass two would inherit pass one's leak and
+  # every later pass would read "dirty" -- the shape of the 586-file,
+  # 3.1G production leak (2026-09-16 to 2026-09-23), reproduced one pass at
+  # a time instead of one run at a time.
+  if [[ "$harness" != claude ]]; then
+    tmpdir_runs="$(wc -l <"$HARNESS_STUB_TMPDIRS" | tr -d ' ')"
+    if [[ "$tmpdir_runs" -ge 2 ]] && ! grep -q ' dirty$' "$HARNESS_STUB_TMPDIRS"; then
+      ok "$harness spawn --loop-minutes gives every pass its own empty run directory"
+    else
+      bad "$harness loop recorded $tmpdir_runs run(s); tmpdirs: $(cat "$HARNESS_STUB_TMPDIRS")"
+    fi
   fi
   # Leave nothing looping behind this iteration: the wrapper outlives this
   # test by design, and a stray loop would keep re-running a stub against a
@@ -819,6 +913,14 @@ for harness in claude codex opencode; do
     wait_for_state reapable done \
       || bad "$harness reap claims need a done agent; reapable sat at $(agent_field reapable state)"
 
+    # A run KILLed before its own cleanup, or a process that just never got a
+    # chance to run its trap, leaves <id>.tmp/ behind with the harness's
+    # leaked file still in it. detached_reap's SUFFIXES list names .tmp
+    # beside .json, .log and .sh for exactly this: nothing else reaps it.
+    reapable_tmp="$FOREMAN_HOME/agents/$reapable.tmp"
+    mkdir -p "$reapable_tmp"
+    : >"$reapable_tmp/leaked.so"
+
     # An agent that is certainly working: this test's own shell, with the start
     # time the kernel gave it, which is what makes the pid mean this process and
     # not a later one reusing the number. startedAt 1 puts it far outside every
@@ -828,9 +930,17 @@ for harness in claude codex opencode; do
       >"$FOREMAN_HOME/agents/livewire.json"
     : >"$FOREMAN_HOME/agents/livewire.log"
     : >"$FOREMAN_HOME/agents/livewire.sh"
+    livewire_tmp="$FOREMAN_HOME/agents/livewire.tmp"
+    mkdir -p "$livewire_tmp"
+    : >"$livewire_tmp/leaked.so"
 
     same "$harness reap leaves a record inside the retention window alone" \
       "" "$(run_adapter reap 999999)"
+    if [[ -d "$reapable_tmp" ]]; then
+      ok "$harness reap 999999 leaves a finished agent's leftover run directory alone"
+    else
+      bad "$harness reap 999999 removed $reapable_tmp, which is inside the retention window"
+    fi
 
     # BOARD_DRY_RUN says what a real sweep would take and takes nothing, the
     # same promise every other deletion sweep.sh makes keeps.
@@ -845,6 +955,11 @@ for harness in claude codex opencode; do
     else
       bad "$harness reap under BOARD_DRY_RUN deleted $reapable.json"
     fi
+    if [[ -d "$reapable_tmp" ]]; then
+      ok "$harness reap under BOARD_DRY_RUN leaves a finished agent's leftover run directory alone"
+    else
+      bad "$harness reap under BOARD_DRY_RUN removed $reapable_tmp"
+    fi
 
     same "$harness reap prints one line per agent it took" \
       "$reapable" "$(run_adapter reap 0)"
@@ -857,6 +972,11 @@ for harness in claude codex opencode; do
     else
       bad "$harness reap left$left behind for $reapable"
     fi
+    if [[ ! -e "$reapable_tmp" ]]; then
+      ok "$harness reap removes a finished agent's leftover run directory"
+    else
+      bad "$harness reap left $reapable_tmp behind"
+    fi
 
     kept=""
     for suffix in json log sh; do
@@ -866,6 +986,11 @@ for harness in claude codex opencode; do
       ok "$harness reap never takes a working agent"
     else
       bad "$harness reap deleted$kept from an agent that is still working"
+    fi
+    if [[ -d "$livewire_tmp" ]]; then
+      ok "$harness reap never takes a working agent's run directory"
+    else
+      bad "$harness reap deleted $livewire_tmp from an agent that is still working"
     fi
   fi
 

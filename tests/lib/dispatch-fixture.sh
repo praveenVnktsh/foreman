@@ -155,6 +155,7 @@ PY
 
   DISPATCH_ARGV_LOG="$work_dir/argv.log"
   DISPATCH_SUBAGENT_MODEL_LOG="$work_dir/subagent-model.log"
+  DISPATCH_TMPDIR_LOG="$work_dir/tmpdir.log"
   _DISPATCH_AGENT_NAME_LOG="$work_dir/agent-name.log"
   DISPATCH_RUN_LOG="$work_dir/dispatch.log"
   _DISPATCH_PROBE_ERR="$work_dir/probe.err"
@@ -181,6 +182,7 @@ PY
 if [[ "\$1" == "--bg" ]]; then
   printf '%s\n' "\$@" >"$DISPATCH_ARGV_LOG"
   printf '%s\n' "\${CLAUDE_CODE_SUBAGENT_MODEL-<unset>}" >"$DISPATCH_SUBAGENT_MODEL_LOG"
+  printf '%s\n' "\${TMPDIR-<unset>}" >"$DISPATCH_TMPDIR_LOG"
   while [[ \$# -gt 0 ]]; do
     if [[ "\$1" == "--name" && \$# -ge 2 ]]; then printf '%s\n' "\$2" >"$_DISPATCH_AGENT_NAME_LOG"; fi
     shift
@@ -266,6 +268,7 @@ dispatch_fixture_show_run_log() {
 dispatch_fixture_run() {
   : >"$DISPATCH_ARGV_LOG"
   : >"$DISPATCH_SUBAGENT_MODEL_LOG"
+  : >"$DISPATCH_TMPDIR_LOG"
   # Truncated with the other two. A name left over from the previous dispatch
   # would let the stubbed registry answer for an agent this one never spawned.
   # dispatch_fixture_resume keeps it, because answering for that agent is the
