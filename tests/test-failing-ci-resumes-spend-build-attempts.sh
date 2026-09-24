@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# Claim: `reconcile.py` charges a build resume for a failing check, or for a
-# build that produced no PR, to `build_attempts`. A resume to fix a blocking
-# review finding is not charged, and neither is a plan resume.
+# Claim: `reconcile.py` charges a build resume for a failing check to
+# `build_attempts`. A resume to fix a blocking review finding is not charged,
+# nor is the one retry of a build that produced no PR, nor a plan resume.
 #
 # The failure this prevents: `build_attempts` counted spawns only. A card whose
 # required check never passes is resumed with `brief.py ci-fix` on every pass,
@@ -70,7 +70,7 @@ logged PRA-1 "$spawn" "$(resume ci-fix)" "$(resume fix)"
 is "a resume to fix a review finding is not charged" 2 "$(attempts PRA-1)"
 
 logged PRA-1 "$spawn" "$(resume retry)"
-is "a retry after a build that produced no PR is charged" 2 "$(attempts PRA-1)"
+is "a retry after a build that produced no PR is part of that attempt" 1 "$(attempts PRA-1)"
 
 logged PRA-1 "$spawn" \
   '{"action":"spawn","role":"build","attempt":"2"}' \

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Claim: a build resume states why it was resumed, and reconcile.py's
-# build_attempts arithmetic can only tell a ci-fix or retry resume from a fix
-# resume by reading it off the history row `dispatch.sh` writes.
+# build_attempts arithmetic can only tell a charged ci-fix resume from a fix
+# or retry resume by reading it off the history row `dispatch.sh` writes.
 #
 # `--reason` is required on `--resume --role build`, refused everywhere else,
 # and only `ci-fix`, `fix` or `retry` are valid. The row it produces carries
@@ -67,6 +67,16 @@ else
 fi
 after="$(resume_row_count RSN-1)"
 is_eq "no resume row was logged for the refused build resume" "$before" "$after"
+
+# --- a build resume with an unknown --reason is refused ---------------------
+dispatch_fixture_resume --ticket RSN-1 --role build --attempt 1 --reason bogus
+if grep -q -- '--reason must be ci-fix, fix or retry' "$DISPATCH_RUN_LOG"; then
+  ok "a build resume with an unknown --reason is refused"
+else
+  bad "a build resume with an unknown --reason is refused"
+  dispatch_fixture_show_run_log
+fi
+is_eq "no resume row was logged for the unknown reason" "$before" "$(resume_row_count RSN-1)"
 
 # --- --reason on a fresh (non-resume) dispatch is refused -------------------
 dispatch_fixture_run --ticket RSN-2 --role build --attempt 1 --reason ci-fix

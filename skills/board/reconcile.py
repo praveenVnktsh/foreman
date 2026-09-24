@@ -1760,8 +1760,9 @@ def _attempts(entries: list[dict], role: str) -> int:
 
 # The `dispatch.sh --reason` values whose build resume spends an attempt. A
 # `fix` resume does not: review rounds already bound the one fix a blocking
-# finding earns.
-CHARGED_BUILD_RESUME_REASONS = frozenset({"ci-fix", "retry"})
+# finding earns. Nor does a `retry`: it is the one resume a failed attempt
+# earns, part of that attempt, and step 2 bounds it to once.
+CHARGED_BUILD_RESUME_REASONS = frozenset({"ci-fix"})
 
 
 def build_attempts(entries: list[dict]) -> int:
@@ -1793,14 +1794,11 @@ def plan_rounds(entries: list[dict]) -> int:
     number, not a reason a resume happened. History is the only place the
     reason is recorded at all.
 
-    `dispatch.sh --resume` already logs one unconditional line for every
-    resume of every kind: `{"action":"resume","name":...,"session":...}`. That
-    cannot be what this counts -- it would count a build resumed to fix a
-    failing check the same as a build resumed to revise a plan, the same
-    conflation `build_attempts` exists to avoid on the build side. A plan
-    round therefore needs its own entry, the same way an environmental
-    write-off is a second, explicit `card_log` call layered on top of that
-    generic line (see `build_attempts`'s `void`):
+    `dispatch.sh --resume` logs one row for every resume. A build resume's row
+    carries `role` and `reason`; a plan resume's row carries neither, so it
+    cannot say whether it was a revision round. A plan round therefore needs
+    its own entry, the same way an environmental write-off is an explicit
+    `card_log` call (see `build_attempts`'s `void`):
 
         card_log <T> '{"action":"resume","role":"plan","round":"<n>"}'
 

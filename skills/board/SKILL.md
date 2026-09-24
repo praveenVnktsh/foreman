@@ -1144,9 +1144,9 @@ Seven fields carry more than their names suggest:
 - **`build_attempts`** — attempts actually charged to this card, counted from
   `history.jsonl`. Use this, never the number in an agent's name. A spawn plus
   its resumes is one attempt, and a voided attempt is none — except a build
-  resume whose reason is `ci-fix` or `retry`, which each add one: a `fix`
-  resume never does, since the single review fix is bounded by review rounds
-  instead.
+  resume with `--reason ci-fix`, which adds one each time. A `fix` or `retry`
+  resume never does: review rounds bound the one fix, and step 2 bounds the
+  one retry.
 - **`history`** — the card's append-only transition log. This replaced a
   `sidecar` field that read a `state.json` nothing has ever written, so it was
   null on every card forever and attempts got guessed from agent names instead.
@@ -1273,10 +1273,9 @@ is the discriminator and not a timestamp.
     the round it posts under cannot disagree. **`--role plan`, because the agent
     being resumed is the plan agent** — `dispatch.sh` builds the name it resumes
     out of the role, so `--role build` here looks for an agent that was never
-    spawned and refuses. **The `card_log` line is not optional:** `dispatch.sh`
-    logs one generic `resume` entry for every resume of every kind, which cannot
-    tell a plan round from a build resumed to fix a failing check, so
-    `reconcile.py` counts `plan_rounds` from this explicit entry and nothing
+    spawned and refuses. **The `card_log` line is not optional:** the row
+    `dispatch.sh` logs for a plan resume does not say it was a revision round,
+    so `reconcile.py` counts `plan_rounds` from this explicit entry and nothing
     else — a round you do not log is a round `MAX_PLAN_ROUNDS` never sees. And
     the card **released** its slot when it parked, so this resume takes one
     again: check the ceilings first, as step 6 does before a fresh dispatch.
@@ -1443,10 +1442,11 @@ Then, for an agent whose turn has ended:
   same as "no PR", and reading it as one charges a ticket a build attempt for a
   network blip.
 - **no PR** → the attempt failed. Classify it first, as above. If it was the
-  ticket's fault, resume once with `--reason retry` and what the transcript
-  ends on; past
-  `MAX_BUILD_ATTEMPTS`, move the card to `Needs Human` (`STATE_NEEDS_HUMAN`,
-  matched by id) carrying `board-failed` and the reason, and
+  ticket's fault and this attempt has not been retried, resume it once with
+  `--reason retry` and what the transcript ends on. If it has, dispatch the
+  next attempt fresh while `build_attempts < MAX_BUILD_ATTEMPTS`; once
+  `build_attempts >= MAX_BUILD_ATTEMPTS`, move the card to `Needs Human`
+  (`STATE_NEEDS_HUMAN`, matched by id) carrying `board-failed` and the reason, and
   `card_log <T> '{"action":"released","reason":"board-failed: attempts exhausted"}'`
   — this card no longer holds a slot, and `--host-slots` (step 6) only knows
   that if you say so.
