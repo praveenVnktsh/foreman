@@ -54,12 +54,14 @@ _dispatch_git -C "$decoy_repo" push -q origin main
 # failure: the operator already had these in their shell when they typed
 # `tests/run-all.sh`. Each one changes what a dispatch does. `haiku` is neither
 # stage's default, so a passing model assertion cannot be a coincidence.
+mkdir -p "$work_dir/decoy-tmpdir"
 export PLAN_MODEL=haiku BUILD_MODEL=haiku REVIEW_MODEL=haiku \
   CLAUDE_CODE_SUBAGENT_MODEL=fable \
   BOARD_DRY_RUN=1 \
   REPO="$decoy_repo" \
   FOREMAN_HOME="$work_dir/decoy-home" \
-  FOREMAN_TMP_ROOT="$work_dir/decoy-tmp"
+  FOREMAN_TMP_ROOT="$work_dir/decoy-tmp" \
+  TMPDIR="$work_dir/decoy-tmpdir"
 
 dispatch_fixture_setup "$work_dir" "$repo_root"
 
@@ -118,6 +120,16 @@ else
   bad "an exported CLAUDE_CODE_SUBAGENT_MODEL does not reach the spawned agent: got $subagent_model"
 fi
 
+# The tick runs under a per-pass TMPDIR that detached.sh deletes at run end.
+# A claude spare that captured an exported TMPDIR would hand every later
+# agent a directory that is gone by the time it runs.
+dispatch_tmpdir="$(cat "$DISPATCH_TMPDIR_LOG" 2>/dev/null || true)"
+if [[ "$dispatch_tmpdir" == "<unset>" ]]; then
+  ok "an exported TMPDIR does not reach the spawned agent"
+else
+  bad "an exported TMPDIR does not reach the spawned agent: got $dispatch_tmpdir"
+fi
+
 # REPO on its own, because it is the one leak the assertions above cannot see.
 # The decoy is a valid target, so a dispatch that follows an exported REPO
 # still logs the model this test wants and still reports `ok` -- while
@@ -128,7 +140,7 @@ fi
 # The others are cleared first so that none of them can kill the dispatch
 # before it reaches the worktree step and hide that damage behind a pass.
 unset PLAN_MODEL BUILD_MODEL REVIEW_MODEL CLAUDE_CODE_SUBAGENT_MODEL \
-  BOARD_DRY_RUN FOREMAN_HOME FOREMAN_TMP_ROOT
+  BOARD_DRY_RUN FOREMAN_HOME FOREMAN_TMP_ROOT TMPDIR
 dispatch_fixture_run --ticket PRA-3 --role plan --attempt 1
 
 if [[ -d "$decoy_repo/.claude/worktrees" ]]; then

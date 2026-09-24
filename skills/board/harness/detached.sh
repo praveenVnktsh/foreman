@@ -22,10 +22,10 @@
 #       Fills in the harness's own session id, once the adapter has parsed it.
 #   detached_list <home>          the spec's JSON list, one row per record
 #   detached_reap <home> <older-than-seconds>
-#       Deletes the record, the log and the wrapper of every agent that is
-#       finished and older than the window, and prints one line per id. Nothing
-#       else reaps them: every spawn leaves three files under <home>/agents
-#       forever, and detached_list globs and parses all of them on every
+#       Deletes the record, the log, the wrapper and any leftover run directory
+#       of every agent that is finished and older than the window, and prints
+#       one line per id. Nothing else reaps them: every spawn leaves them under
+#       <home>/agents forever, and detached_list globs and parses them on every
 #       dispatch gate, every sweep, every watch-agents poll and every supervise
 #       fire, so the cost of a liveness check rose with the installation's
 #       lifetime. sweep.sh calls it through the adapter's `reap` verb.
@@ -90,8 +90,28 @@
 # TERM and KILL to an unrelated process group. A pid plus the start time the
 # kernel gave THAT process identifies one process and no other.
 #
-# Beside it live <id>.log and <id>.sh, the generated wrapper. The id is the
-# filename, so nothing stores it twice.
+# A spawn leaves four things under <home>/agents, all named by the id. The id
+# is the filename, so nothing stores it twice.
+#
+#   <id>.json   the record above
+#   <id>.log    both streams of the command
+#   <id>.sh     the generated wrapper
+#   <id>.tmp/   the run directory, the command's TMPDIR while a run lives
+#
+# The run directory exists because a harness does not always clean up its own
+# TMPDIR. opencode 1.18.30 extracts a 5.4MB hidden `.<hash>-00000000.so` into $TMPDIR
+# on every run and never deletes it. The wrapper used to leave TMPDIR as it
+# found it, so on the production host 586 of those files, 3.1G, piled into a
+# 7.3G /tmp tmpfs between 2026-09-16 and 2026-09-23. That tripped preflight's
+# min_free_tmp_mb, and dispatch stopped. Now the wrapper creates <id>.tmp/
+# before each run and removes it after, and on TERM, INT and HUP. A run KILLed
+# before it can clean up leaves the directory, and detached_reap removes it
+# with the other three.
+#
+# It lives beside the record rather than under `bin/tmp-dir.sh --root` for two
+# reasons. The wrapper has no board environment to key that root on. And the
+# code that reaps the id is then the code that reaps its directory, so nothing
+# needs a second rule for when a run directory is finished.
 #
 # ## bash 3.2
 #
@@ -337,7 +357,7 @@ print("%.3f" % (minutes * 60))
   # within one millisecond; and the counter separates two spawns by one shell
   # inside one millisecond, which no amount of "that cannot happen" makes
   # impossible. A collision would have one agent overwrite another's record.
-  local safe id record log wrapper
+  local safe id record log wrapper run_tmp
   safe="$(basename "$name")"
   safe="${safe//[!A-Za-z0-9._-]/_}"
   if [[ -z "$safe" ]]; then
@@ -349,6 +369,7 @@ print("%.3f" % (minutes * 60))
   record="$agents_dir/$id.json"
   log="$agents_dir/$id.log"
   wrapper="$agents_dir/$id.sh"
+  run_tmp="$agents_dir/$id.tmp"
 
   # A generated script rather than an inline `bash -c`: the loop, the record
   # write and the wait below are twenty lines of shell, and embedding them in a
@@ -363,6 +384,7 @@ print("%.3f" % (minutes * 60))
     printf 'RECORD=%q\n' "$record"
     printf 'AGENT_CWD=%q\n' "$cwd"
     printf 'LOOP_SECONDS=%q\n' "$loop_seconds"
+    printf 'RUN_TMP=%q\n' "$run_tmp"
     printf 'set --'
     local arg
     for arg in "$@"; do
@@ -400,9 +422,30 @@ fi
 # shell gives any `... &` stdin from /dev/null anyway. Both live in another
 # function, and a harness that hangs here hangs with no error to find, so the
 # rule is stated where the harness runs.
+#
+# TMPDIR is this agent's own run directory, removed when the run ends. The
+# header's record section has the measurement: opencode leaks a 5.4MB .so into
+# TMPDIR per run, and 3.1G of them in the shared /tmp stopped dispatch.
+#
+# The traps remove it when detached_stop TERMs the group. bash 3.2 runs a trap
+# only after the foreground child exits, and the child got the same TERM, so
+# the removal waits for the harness to let go of the directory. A child that
+# ignores TERM is KILLed with the wrapper, no trap runs, and detached_reap
+# removes the directory later. HUP is listed for a wrapper run by hand; under
+# detached_spawn, nohup has set HUP to ignored and bash cannot trap it.
+trap 'rm -rf "$RUN_TMP"; exit 129' HUP
+trap 'rm -rf "$RUN_TMP"; exit 130' INT
+trap 'rm -rf "$RUN_TMP"; exit 143' TERM
+
 if [ -z "$LOOP_SECONDS" ]; then
-  "$@" </dev/null
+  if ! mkdir -p "$RUN_TMP"; then
+    printf 'foreman: cannot create the run directory %s\n' "$RUN_TMP" >&2
+    _detached_record_set "$RECORD" exit 1
+    exit 1
+  fi
+  TMPDIR="$RUN_TMP" "$@" </dev/null
   _detached_record_set "$RECORD" exit "$?"
+  rm -rf "$RUN_TMP"
   exit 0
 fi
 
@@ -412,8 +455,18 @@ fi
 # altogether. Only a signal ends this, which is why no exit code is written
 # here: detached_stop records one, and a death with none recorded already reads
 # as stopped.
+#
+# Each pass gets an empty run directory. The rm before the mkdir clears what a
+# pass KILLed before its own cleanup left behind. A pass whose directory cannot
+# be created is skipped, like any other failed pass.
 while :; do
-  "$@" </dev/null || true
+  rm -rf "$RUN_TMP"
+  if mkdir -p "$RUN_TMP"; then
+    TMPDIR="$RUN_TMP" "$@" </dev/null || true
+    rm -rf "$RUN_TMP"
+  else
+    printf 'foreman: cannot create the run directory %s; skipping this pass\n' "$RUN_TMP" >&2
+  fi
   sleep "$LOOP_SECONDS"
 done
 WRAPPER_BODY
@@ -500,11 +553,12 @@ detached_note_session() { # <home> <id> <sessionId>
 # down, naming a function that was fine.
 _detached_records_py() {
   cat <<'RECORDS_PY'
-import glob, json, os, subprocess, sys, time
+import glob, json, os, shutil, subprocess, sys, time
 
-# What one spawn leaves under <home>/agents, all three named by the id: the
-# record, the log and the generated wrapper.
-SUFFIXES = (".json", ".log", ".sh")
+# What one spawn leaves under <home>/agents, all four named by the id: the
+# record, the log, the generated wrapper and the run directory. The wrapper
+# removes the run directory itself; it is here for a run KILLed first.
+SUFFIXES = (".json", ".log", ".sh", ".tmp")
 
 op, home = sys.argv[1], sys.argv[2]
 
@@ -588,7 +642,7 @@ def records(strict):
     # listing that skipped a row would report that agent as absent, and absent
     # is the answer that lets a second tick start beside a healthy one. `reap`
     # DELETES files, so the safe direction is the opposite one: it says what it
-    # could not read on stderr and leaves that agent's three files alone.
+    # could not read on stderr and leaves that agent's files alone.
     for path in sorted(glob.glob(os.path.join(home, "agents", "*.json"))):
         try:
             with open(path) as handle:
@@ -639,6 +693,15 @@ def listing():
     print(json.dumps(rows))
 
 
+def remove(target):
+    # The run directory is a directory; everything else is a file. A symlink
+    # is removed as a link, never followed into whatever it points at.
+    if os.path.isdir(target) and not os.path.islink(target):
+        shutil.rmtree(target)
+    else:
+        os.remove(target)
+
+
 def reap(raw_window):
     try:
         window = float(raw_window)
@@ -665,7 +728,7 @@ def reap(raw_window):
             for suffix in SUFFIXES:
                 target = os.path.join(home, "agents", name + suffix)
                 try:
-                    os.remove(target)
+                    remove(target)
                 except FileNotFoundError:
                     # A log a spawn never got as far as writing, or another
                     # sweep that reached this record first. The file is gone,

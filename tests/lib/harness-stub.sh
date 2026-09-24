@@ -22,6 +22,9 @@
 #         HARNESS_STUB_SHELL    per codex invocation, `<VARIABLE> <cksum>` for
 #                               each FOREMAN_MCP_* (and the version control
 #                               variable) a model-run command would still see
+#         HARNESS_STUB_TMPDIRS  per codex or opencode invocation, one
+#                               `<tmpdir> empty|dirty` line naming ${TMPDIR-<unset>}
+#                               and whether it was empty on arrival
 #       and reads HARNESS_STUB_CODEX_VERSION (0.133.0 or 0.154.0, default
 #       0.133.0) at run time to choose which codex it acts as.
 #
@@ -73,6 +76,7 @@ _harness_stub_prelude() { # <state_dir>
   printf 'STUB_BEARER=%q\n' "$1/bearer"
   printf 'STUB_PROFILES=%q\n' "$1/profiles"
   printf 'STUB_SHELL=%q\n' "$1/shell-env"
+  printf 'STUB_TMPDIRS=%q\n' "$1/tmpdirs"
   printf 'STUB_EVENT_SECONDS=%q\n' "$_HARNESS_STUB_EVENT_SECONDS"
 }
 
@@ -95,11 +99,13 @@ harness_stub_install() { # <bin_dir> <state_dir>
   HARNESS_STUB_BEARER="$state/bearer"
   HARNESS_STUB_PROFILES="$state/profiles"
   HARNESS_STUB_SHELL="$state/shell-env"
+  HARNESS_STUB_TMPDIRS="$state/tmpdirs"
   : >"$HARNESS_STUB_SHELL" || return 1
   : >"$HARNESS_STUB_RUNS" || return 1
   : >"$HARNESS_STUB_ARGV" || return 1
   : >"$HARNESS_STUB_BEARER" || return 1
   : >"$HARNESS_STUB_PROFILES" || return 1
+  : >"$HARNESS_STUB_TMPDIRS" || return 1
 
   {
     printf '%s\n' '#!/usr/bin/env bash'
@@ -254,6 +260,22 @@ case "$STUB_VERSION" in
 esac
 
 printf '%s\n' "$*" >>"$STUB_ARGV"
+
+# What TMPDIR this invocation inherited, and whether that directory already
+# held files on arrival -- the real opencode/codex binary leaks a 5.4MB .so
+# into it and never cleans up (2026-09-16 to 2026-09-23, 586 files / 3.1G on
+# the production host), and this is how a test proves a run got its own,
+# empty TMPDIR instead of the operator's shared one.
+STUB_TMPDIR_VAL="${TMPDIR-<unset>}"
+STUB_TMPDIR_STATUS=empty
+if [ -n "${TMPDIR-}" ] && [ -n "$(ls -A "$TMPDIR" 2>/dev/null)" ]; then
+  STUB_TMPDIR_STATUS=dirty
+fi
+printf '%s %s\n' "$STUB_TMPDIR_VAL" "$STUB_TMPDIR_STATUS" >>"$STUB_TMPDIRS"
+if [ -n "${TMPDIR-}" ]; then
+  : >"$TMPDIR/.stub-00000000.so"
+fi
+
 case "${1:-}" in
   --version) printf 'codex-cli %s\n' "$STUB_VERSION"; exit 0 ;;
   exec) ;;
@@ -419,6 +441,19 @@ CODEX_STUB
     cat <<'OPENCODE_STUB'
 
 printf '%s\n' "$*" >>"$STUB_ARGV"
+
+# See the matching block in the codex stub above: what TMPDIR this invocation
+# inherited, and whether it already held files on arrival.
+STUB_TMPDIR_VAL="${TMPDIR-<unset>}"
+STUB_TMPDIR_STATUS=empty
+if [ -n "${TMPDIR-}" ] && [ -n "$(ls -A "$TMPDIR" 2>/dev/null)" ]; then
+  STUB_TMPDIR_STATUS=dirty
+fi
+printf '%s %s\n' "$STUB_TMPDIR_VAL" "$STUB_TMPDIR_STATUS" >>"$STUB_TMPDIRS"
+if [ -n "${TMPDIR-}" ]; then
+  : >"$TMPDIR/.stub-00000000.so"
+fi
+
 case "${1:-}" in
   --version) printf '0.0.0-stub\n'; exit 0 ;;
   run) ;;

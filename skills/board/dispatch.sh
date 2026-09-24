@@ -22,6 +22,10 @@ SKILL_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=config.sh
 source "$SKILL_DIR/config.sh"
 
+# Strips TMPDIR from the preflight, resume and spawn calls below. See the
+# note above `agent_tmp_for` for why.
+NO_TMPDIR=(env -u TMPDIR)
+
 TICKET="" ROLE="" ATTEMPT="" SLOT="" REF="" PROMPT_FILE="" RESUME=""
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -56,7 +60,7 @@ PROMPT="$(cat "$PROMPT_FILE")"
 #
 # This runs on the resume path too. A resumed agent runs exactly the same tests
 # as a fresh one and dies exactly the same way.
-if ! PREFLIGHT="$("$SKILL_DIR/preflight.py" --quiet 2>&1)"; then
+if ! PREFLIGHT="$("${NO_TMPDIR[@]}" "$SKILL_DIR/preflight.py" --quiet 2>&1)"; then
   printf '%s\n' "$PREFLIGHT" >&2
   die "environment is unfit to build; refusing to dispatch $NAME.
 This is NOT a failure of ticket $TICKET and must not consume its attempt budget.
@@ -327,7 +331,7 @@ Dispatch fresh (drop --resume, use the next attempt number) instead."
   # `--settings` carries AGENT_SETTINGS on the resume path too: a resumed
   # build is a card agent, and a resume is handed to a spare the same way a
   # spawn is. config.sh records why every card agent needs CARD_AGENT_SETTINGS.
-  SESSION="$("$HARNESS_SH" resume --name "$NAME" --cwd "$WORKTREE" \
+  SESSION="$("${NO_TMPDIR[@]}" "$HARNESS_SH" resume --name "$NAME" --cwd "$WORKTREE" \
     --prompt-file "$PROMPT_FILE" --settings "$AGENT_SETTINGS" \
     "${BUDGET[@]+"${BUDGET[@]}"}" \
     "${SKIP_PERMISSIONS[@]+"${SKIP_PERMISSIONS[@]}"}")"
@@ -403,6 +407,16 @@ fi
 # that cannot go stale. sweep.sh reaps it. The board's own identity cannot be
 # keyed on the worktree, so it rides in AGENT_SETTINGS' `env` instead (above the
 # resume path, measured 2026-09-22).
+#
+# The tick itself now runs under a per-pass TMPDIR that detached.sh deletes at
+# pass end (docs/plans/2026-09-23-per-run-tmpdir.md). That is exactly the
+# value this script must not let a card agent inherit either: a claude spare
+# that captured it would hand a later resume a directory that is already
+# gone, and preflight would probe the root disk while a running claude agent
+# still writes to the real /tmp -- gate and agent would measure different
+# disks. NO_TMPDIR strips it from the preflight call above and the resume and
+# spawn calls below, so all three measure the same /tmp this script itself
+# inherited.
 mkdir -p "$(agent_tmp_for "$WORKTREE")"
 
 # The adapter resolves and prints the session id itself -- see its header --
@@ -417,7 +431,7 @@ mkdir -p "$(agent_tmp_for "$WORKTREE")"
 # error, not an empty expansion. The `+` form below is the portable way to say
 # "expand only if set", and BUDGET and SKIP_PERMISSIONS are both empty on an
 # ordinary dispatch.
-SESSION="$("$SPAWN_ADAPTER" spawn --name "$NAME" --cwd "$WORKTREE" --model "$SPAWN_MODEL" \
+SESSION="$("${NO_TMPDIR[@]}" "$SPAWN_ADAPTER" spawn --name "$NAME" --cwd "$WORKTREE" --model "$SPAWN_MODEL" \
   --prompt-file "$PROMPT_FILE" --add-dir "$BOARD_HOME" \
   --settings "$AGENT_SETTINGS" "${BUDGET[@]+"${BUDGET[@]}"}" \
   "${SKIP_PERMISSIONS[@]+"${SKIP_PERMISSIONS[@]}"}")" \
