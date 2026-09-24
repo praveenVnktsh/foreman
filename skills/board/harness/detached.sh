@@ -29,6 +29,11 @@
 #       dispatch gate, every sweep, every watch-agents poll and every supervise
 #       fire, so the cost of a liveness check rose with the installation's
 #       lifetime. sweep.sh calls it through the adapter's `reap` verb.
+#   detached_forget <home> <id>
+#       Deletes one finished agent's record, log and wrapper. Refuses, exit 1,
+#       when the record is working (message names the state) or the id is
+#       unknown. Prints nothing on success. sweep.sh calls it through the
+#       adapter's `forget` verb, once an exited agent's transcript is copied.
 #   detached_stop <home> <id>     TERM then KILL, to the whole process group
 #   detached_transcript <home> <id>   prints the log path
 #   detached_newest <home> <match-field> <match-value> <out-field>
@@ -534,10 +539,12 @@ detached_note_session() { # <home> <id> <sessionId>
   _detached_record_set "$record" sessionId "$3"
 }
 
-# The one reader of <home>/agents, as a single program with two operations.
+# The one reader of <home>/agents, as a single program with three operations.
 #
 #   list <home>                     the JSON rows
 #   reap <home> <older-than-seconds>  the ids it deleted
+#   forget <home> <id>              delete one agent's files; refuses a
+#                                    working or unknown id
 #
 # Both ask the same question first — is this agent finished? — so `is_alive`
 # and `state_of` are written once. A second copy of that rule would drift, and
@@ -739,6 +746,30 @@ def reap(raw_window):
         print(name)
 
 
+def forget(agent_id_arg):
+    # Reuses records() rather than loading the file a second way, so `working`
+    # is decided once and forget can never disagree with list or reap about
+    # what a record means.
+    dry_run = bool(os.environ.get("BOARD_DRY_RUN"))
+    for path, record, state, _alive in records(strict=False):
+        if agent_id(path) != agent_id_arg:
+            continue
+        if state == "working":
+            sys.exit("foreman: %s is working; refusing to forget a live agent" % agent_id_arg)
+        if not dry_run:
+            for suffix in SUFFIXES:
+                target = os.path.join(home, "agents", agent_id_arg + suffix)
+                try:
+                    # remove(), not os.remove: `.tmp` is the run's directory.
+                    remove(target)
+                except FileNotFoundError:
+                    pass
+                except OSError as exc:
+                    sys.exit("foreman: cannot remove %s (%s)" % (target, exc))
+        return
+    sys.exit("foreman: no agent record for %s" % agent_id_arg)
+
+
 if op == "list":
     if len(sys.argv) != 3:
         sys.exit("foreman: list takes <home> and nothing else")
@@ -747,6 +778,10 @@ elif op == "reap":
     if len(sys.argv) != 4:
         sys.exit("foreman: reap takes <home> <older-than-seconds>")
     reap(sys.argv[3])
+elif op == "forget":
+    if len(sys.argv) != 4:
+        sys.exit("foreman: forget takes <home> <id>")
+    forget(sys.argv[3])
 else:
     sys.exit("foreman: %r is not an operation on agent records" % op)
 RECORDS_PY
@@ -777,6 +812,21 @@ detached_reap() { # <home> <older-than-seconds>
     return 1
   fi
   python3 -c "$(_detached_records_py)" reap "$1" "$2"
+}
+
+# Delete one finished agent's record, log and wrapper. Refuses, exit 1, when
+# the agent is working (a live agent's files belong to sweep.sh's liveness
+# guard, not to a card that is done with it) or the id is unknown (nothing to
+# forget is a caller bug, not a success). Prints nothing on success.
+#
+# BOARD_DRY_RUN is honoured inside, the same switch detached_reap reads, so a
+# dry run can say what it would forget without deleting anything.
+detached_forget() { # <home> <id>
+  if [[ $# -ne 2 ]]; then
+    printf 'foreman: detached_forget needs <home> <id>\n' >&2
+    return 1
+  fi
+  python3 -c "$(_detached_records_py)" forget "$1" "$2"
 }
 
 # TERM the process group, then KILL what survives, and record the stop.
@@ -1113,6 +1163,13 @@ detached_main() { # <verb> [args...]
       [[ $# -eq 1 ]] || usage
       home="$(detached_home)" || exit 1
       detached_reap "$home" "$1"
+      ;;
+    # One verb for both adapters, mirroring reap above: sweep.sh forgets a
+    # finished agent through this instead of reaching into <home>/agents.
+    forget)
+      [[ $# -eq 1 ]] || usage
+      home="$(detached_home)" || exit 1
+      detached_forget "$home" "$1"
       ;;
     transcript)
       [[ $# -eq 2 ]] || usage

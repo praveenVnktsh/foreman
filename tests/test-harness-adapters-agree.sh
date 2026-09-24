@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Claim: claude.sh, codex.sh and opencode.sh answer the same nine verbs the
+# Claim: claude.sh, codex.sh and opencode.sh answer the same ten verbs the
 # same way, so every caller that runs "$HARNESS_SH" gets one contract whatever
 # the installation's harness is.
 #
@@ -201,6 +201,26 @@ for harness in claude codex opencode; do
     fi
   fi
 
+  # `forget` refuses a working agent everywhere: its record is what `stop`, the
+  # host ceiling and sweep.sh's worktree protection all still read, so a
+  # forget that raced ahead of a stop would take that out from under them.
+  # Tested here, before the marker below ends every agent's work, so this
+  # agent is genuinely still working and not merely reported so.
+  run_adapter spawn --name liveagent --cwd "$agent_cwd" \
+    --model stub-model --prompt-file "$prompt" --skip-permissions >/dev/null
+  if wait_for_state liveagent working; then
+    if run_adapter forget "$(agent_field liveagent id)" >/dev/null 2>&1; then
+      bad "$harness forget succeeded on a working agent"
+    elif [[ "$(agent_field liveagent state)" == "working" ]]; then
+      ok "$harness forget on a working agent exits non-zero and leaves it listed"
+    else
+      bad "$harness forget on a working agent changed its state to $(agent_field liveagent state)"
+    fi
+  else
+    bad "$harness liveagent never reached working, so forgetting a live one went untested"
+  fi
+  run_adapter stop "$(agent_field liveagent id)" >/dev/null 2>&1 || true
+
   : >"$HARNESS_STUB_MARKER"
   if wait_for_state probe done; then ok "$harness list shows the agent done once its work ends"
   else bad "$harness list shows the agent done once its work ends"; fi
@@ -217,17 +237,58 @@ for harness in claude codex opencode; do
     fi
   fi
 
-  # A sweep of a terminal card stops agents that already finished. Afterwards
-  # they must list as stopped on every harness, or the sweep waits out its
-  # timeout, fails the card, and keeps its worktree as a live agent's.
+  # A sweep of a terminal card stops agents that already finished, on its way
+  # to forgetting them once they exit. Measured 2026-09-23 on Claude Code
+  # 2.1.280: `stop` on an already-exited (no-pid) row is a NO-OP -- prints
+  # `stopped <id>`, exits 0, changes nothing. So the contract that holds
+  # across all three harnesses is narrower than "stop moves it to stopped": a
+  # finished agent is never reported `working` after a stop, whether or not
+  # stop itself did anything.
   run_adapter spawn --name finisher --cwd "$agent_cwd" \
     --model stub-model --prompt-file "$prompt" --skip-permissions >/dev/null
   if wait_for_state finisher done; then
-    run_adapter stop "$(agent_field finisher id)" >/dev/null 2>&1 || true
-    if wait_for_state finisher stopped; then ok "$harness stop moves a finished agent to stopped"
-    else bad "$harness stop left a finished agent at $(agent_field finisher state)"; fi
+    run_adapter stop "$(agent_field finisher id)" >/dev/null 2>&1
+    stop_status=$?
+    state_after="$(agent_field finisher state)"
+    if [[ "$stop_status" -eq 0 && "$state_after" != "working" ]]; then
+      ok "$harness stop on a finished agent exits 0 and leaves it not working ($state_after)"
+    else
+      bad "$harness stop on a finished agent: exit $stop_status, state $state_after"
+    fi
   else
     bad "$harness finisher never reached done, so stopping a finished agent went untested"
+  fi
+
+  # Claude Code does NOT age a finished row out on its own (measured
+  # 2026-09-23: 162 done/no-pid rows sat in one registry). `forget` is how a
+  # sweep clears one once it has exited, on every harness, and it refuses to
+  # touch a row that is still working or that names no agent at all.
+  # A run a SIGKILL ended leaves its `<id>.tmp/` run directory behind, and
+  # forget meets it as the one suffix that is a directory. Planted here, so the
+  # claim holds whether or not this run cleaned up after itself.
+  finisher_tmp=""
+  if [[ "$harness" != claude ]]; then
+    finisher_tmp="$FOREMAN_HOME/agents/$(agent_field finisher id).tmp"
+    mkdir -p "$finisher_tmp" && : >"$finisher_tmp/.leaked-00000000.so"
+  fi
+  run_adapter forget "$(agent_field finisher id)"
+  if [[ "$(agent_field finisher state)" == "" ]]; then
+    ok "$harness forget removes an exited agent from list"
+  else
+    bad "$harness forget left finisher listed as $(agent_field finisher state)"
+  fi
+  if [[ -n "$finisher_tmp" ]]; then
+    if [[ -e "$finisher_tmp" ]]; then
+      bad "$harness forget left the run directory $finisher_tmp behind"
+    else
+      ok "$harness forget removes a leftover run directory with the record"
+    fi
+  fi
+
+  if run_adapter forget definitely-no-such-agent-id >/dev/null 2>&1; then
+    bad "$harness forget of an unknown id exited 0"
+  else
+    ok "$harness forget of an unknown id exits non-zero"
   fi
 
   same "$harness resume continues the session spawn started" \
@@ -732,15 +793,112 @@ for harness in claude codex opencode; do
   # contract, and an adapter that reaped a WORKING agent would delete the log it
   # still has open.
   if [[ "$harness" == claude ]]; then
-    # Claude's registry is Claude's, and Claude Code ages it out. The verb still
-    # has to exist and still has to succeed, so sweep.sh calls one verb on every
-    # installation instead of branching on the harness.
-    claude_reap="$work/$harness/reap.out"
-    if run_adapter reap 0 >"$claude_reap" 2>&1 && [[ ! -s "$claude_reap" ]]; then
-      ok "$harness reap exits 0 and prints nothing, because its registry is not a directory it owns"
+    # Measured 2026-09-23 on Claude Code 2.1.280: it does NOT age a finished
+    # row out on its own (162 done/no-pid rows sat in one production
+    # registry), so `reap` now does real work here too -- removing exited
+    # rows under AGENT_NAME_ROOT past a retention window, the same contract
+    # detached.sh's reap keeps below.
+    #
+    # A registry of its own for this: reaping here must not touch anything
+    # the earlier claims in this loop created.
+    reap_bin="$work/$harness/reap-bin"
+    reap_state="$work/$harness/reap-state"
+    harness_stub_install "$reap_bin" "$reap_state"
+    export PATH="$reap_bin:$ORIGINAL_PATH"
+    reap_cwd="$work/$harness/reap-worktree"
+    mkdir -p "$reap_cwd"
+
+    # The root reap refuses to guess. config.sh's AGENT_NAME_ROOT is what
+    # every real foreman name starts with, so this test's rooted names do
+    # too -- exactly the string reap must not have to default or invent.
+    export AGENT_NAME_ROOT="foreman/"
+
+    # foreman/reapable: exits, under the root -- what reap is FOR. Stopped
+    # while genuinely still working, exactly the "stopper" claim above, so
+    # its pid actually goes to null rather than being asserted so.
+    run_adapter spawn --name foreman/reapable --cwd "$reap_cwd" \
+      --model stub-model --prompt-file "$prompt" --skip-permissions >/dev/null
+    reapable="$(agent_field foreman/reapable id)"
+    wait_for_state foreman/reapable working \
+      || bad "$harness reap claims need foreman/reapable to start working"
+    run_adapter stop "$reapable"
+    wait_for_state foreman/reapable stopped \
+      || bad "$harness reap claims need foreman/reapable exited; it sat at $(agent_field foreman/reapable state)"
+
+    # unrooted: exits the same way, but its name never carried
+    # AGENT_NAME_ROOT -- the operator's own background session, which the
+    # same `claude agents --all` registry also lists.
+    run_adapter spawn --name unrooted --cwd "$reap_cwd" \
+      --model stub-model --prompt-file "$prompt" --skip-permissions >/dev/null
+    run_adapter stop "$(agent_field unrooted id)"
+    wait_for_state unrooted stopped \
+      || bad "$harness reap claims need unrooted exited; it sat at $(agent_field unrooted state)"
+
+    # foreman/rooted-working: under the root, never stopped. It must never be
+    # taken however old the window, whatever else is true of it.
+    run_adapter spawn --name foreman/rooted-working --cwd "$reap_cwd" \
+      --model stub-model --prompt-file "$prompt" --skip-permissions >/dev/null
+    wait_for_state foreman/rooted-working working \
+      || bad "$harness reap claims need foreman/rooted-working to start working"
+
+    # foreman/rooted-idle: "done" but STILL carrying a pid -- the "1
+    # done/pid (idle)" row the production registry showed (see claude.sh's
+    # exited_filter_py). A pid alone must save it: state says "done", but
+    # `pid is None` is the other half of exited, and this row fails it.
+    run_adapter spawn --name foreman/rooted-idle --cwd "$reap_cwd" \
+      --model stub-model --prompt-file "$prompt" --skip-permissions >/dev/null
+    printf '%s\n' "$(agent_field foreman/rooted-idle id)" >>"$HARNESS_STUB_IDLE"
+
+    if env -u AGENT_NAME_ROOT "$adapter" reap 0 >/dev/null 2>&1; then
+      bad "$harness reap with no AGENT_NAME_ROOT exited 0"
     else
-      bad "$harness reap 0 should exit 0 and print nothing, got: $(cat "$claude_reap")"
+      ok "$harness reap with no AGENT_NAME_ROOT refuses"
     fi
+    if [[ "$(agent_field foreman/reapable state)" == "stopped" ]]; then
+      ok "$harness reap with no AGENT_NAME_ROOT deleted nothing"
+    else
+      bad "$harness reap with no AGENT_NAME_ROOT changed foreman/reapable to $(agent_field foreman/reapable state)"
+    fi
+
+    same "$harness reap leaves every exited row inside the retention window alone" \
+      "" "$(run_adapter reap 999999)"
+
+    # `env`, not an assignment in front of `run_adapter`: bash leaves an
+    # assignment that prefixes a SHELL FUNCTION in effect after the function
+    # returns, and a leaked BOARD_DRY_RUN would make the real reap below a
+    # second dry run that deleted nothing while every claim still passed.
+    same "$harness reap under BOARD_DRY_RUN names the exited rooted row it would take" \
+      "$reapable" "$(env BOARD_DRY_RUN=1 "$adapter" reap 0)"
+    if [[ "$(agent_field foreman/reapable state)" == "stopped" ]]; then
+      ok "$harness reap under BOARD_DRY_RUN deletes nothing"
+    else
+      bad "$harness reap under BOARD_DRY_RUN changed foreman/reapable to $(agent_field foreman/reapable state)"
+    fi
+
+    same "$harness reap 0 prints the id of the exited row under the root, past the window" \
+      "$reapable" "$(run_adapter reap 0)"
+    if [[ "$(agent_field foreman/reapable state)" == "" ]]; then
+      ok "$harness reap removes the row it took from list"
+    else
+      bad "$harness reap 0 left foreman/reapable listed"
+    fi
+    if [[ "$(agent_field foreman/rooted-working state)" == "working" ]]; then
+      ok "$harness reap never takes a working row"
+    else
+      bad "$harness reap changed foreman/rooted-working to $(agent_field foreman/rooted-working state)"
+    fi
+    if [[ "$(agent_field foreman/rooted-idle state)" == "done" ]]; then
+      ok "$harness reap never takes a done row that still carries a pid"
+    else
+      bad "$harness reap changed foreman/rooted-idle to $(agent_field foreman/rooted-idle state)"
+    fi
+    if [[ "$(agent_field unrooted state)" == "stopped" ]]; then
+      ok "$harness reap never takes an exited row outside AGENT_NAME_ROOT"
+    else
+      bad "$harness reap changed unrooted to $(agent_field unrooted state)"
+    fi
+
+    unset AGENT_NAME_ROOT
   else
     # A home of its own. Reaping in the shared one would delete the records
     # every claim above just made, and the next claim would then be testing an

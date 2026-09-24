@@ -2401,25 +2401,26 @@ refuses to run at all if it cannot read the agent list — "no agents are alive"
 and "I could not tell" must never look the same. Deleting a live agent's working
 directory destroys unpushed work and kills it with no diagnosable error, while
 leaving a dead tree costs disk until the next tick. Those are not comparable
-costs, so the tie goes to leaving it.
+costs, so the tie goes to leaving it. `--orphans` never forgets a session —
+a card that is not terminal may still be diagnosed from its transcript
+(`reconcile.py` → `death`) or resumed into it — but its reap ages exited
+foreman sessions (no pid, and not `working`) out after `SWEEP_RETENTION_DAYS`
+on every harness, and their worktrees follow on the next orphan pass.
 
 **Ticket mode also stops and forgets the card's sessions.** A background agent
 idles at `done` when its turn ends, and nothing else ever stops it. So a sweep
-for a terminal card first asks `"$HARNESS_SH" stop` of every agent named
-`foreman/<board>/<T>/…` that is `done` or `blocked`, and waits up
-to `AGENT_STOP_TIMEOUT_SECONDS` for the adapter's `list` to agree. On a Claude
-card it then removes every stopped session's record under
-`~/.claude/jobs/` — what `claude agents --all` and the operator's session list
-keep showing a stopped agent from — and the transcript directory of each one
-that ran in the card's own worktree. On codex and opencode the records are the
-adapter's own, and `"$HARNESS_SH" reap` ages them out on the orphan pass. A
-`working` agent is never stopped, and its session is left and named on stderr
-the same way its worktree is: the judgment that the card is terminal may be
-stale. `--orphans` never stops or forgets a session, because a card that is
-not terminal may still be diagnosed from its transcript (`reconcile.py` →
-`death`) or resumed into it. The card's history records `forgot` with the
-count, before `released`. A stop that does not land in time leaves the session
-in place and makes the sweep exit non-zero, so report it on the tick.
+for a terminal card classifies every agent named `foreman/<board>/<T>/…` by
+its row in `"$HARNESS_SH" list`: one with a pid and state `done` or `blocked`
+is stopped and awaited, up to `AGENT_STOP_TIMEOUT_SECONDS`, for the adapter's
+`list` to agree. Once a row has no pid it has exited, and the sweep runs
+`"$HARNESS_SH" forget` on it — that deletes the session's record and drops
+its row from the agent list, and removes the transcript directory too, but
+only for a session that ran in the card's own worktree, never a shared
+repo-root one. A `working` agent is never stopped, and its session is left
+and named on stderr the same way its worktree is: the judgment that the card
+is terminal may be stale. The card's history records `forgot` with the count,
+before `released`. A stop that does not land in time leaves the session in
+place and makes the sweep exit non-zero, so report it on the tick.
 
 Either form also reaps `refs/foreman/<board>/evidence/<pid>`
 refs left by an `evidence.sh` that was killed between its fetch and its
