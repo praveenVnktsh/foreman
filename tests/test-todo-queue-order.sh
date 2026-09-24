@@ -123,6 +123,21 @@ orders "a float priority ranks as its integer value: 1.0 sorts as Urgent" \
   '[{"identifier":"ABC-1","priority":1.0},
     {"identifier":"ABC-2","priority":4}]'
 
+orders "a Linear MCP priority object ranks the same as its int" \
+  "$(printf 'ABC-1\nABC-2')" \
+  '[{"identifier":"ABC-1","priority":{"value":3,"name":"Medium"}},
+    {"identifier":"ABC-2","priority":4}]'
+
+orders "a priority object with only a name works" \
+  "$(printf 'ABC-1\nABC-2')" \
+  '[{"identifier":"ABC-1","priority":{"name":"Urgent"}},
+    {"identifier":"ABC-2","priority":4}]'
+
+skips "an empty priority object is skipped as unrankable" \
+  0 "ABC-2" "ABC-1" "neither" \
+  '[{"identifier":"ABC-1","priority":{}},
+    {"identifier":"ABC-2","priority":4}]'
+
 skips "a missing priority skips its own card, and the message names it" \
   0 "ABC-7" "ABC-8" "missing" \
   '[{"identifier":"ABC-7","priority":1},{"identifier":"ABC-8"}]'

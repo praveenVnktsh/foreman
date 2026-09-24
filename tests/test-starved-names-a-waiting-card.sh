@@ -164,12 +164,30 @@ with open(path, "w") as handle:
 PY
 }
 
+# start_stub -- backgrounds the stub directly (not through a process
+# substitution) so $! is python's own pid under bash 3.2, not a wrapper
+# subshell's. A wrapper pid here would make `kill` miss python, and 1,353 of
+# them were found still serving under PID 1 on this machine.
 start_stub() {
   [[ -n "$STUB_PID" ]] && { kill "$STUB_PID" 2>/dev/null; wait "$STUB_PID" 2>/dev/null; }
-  exec 3< <(python3 "$stub" "$work/scenario.json")
+  local port_file="$work/stub.port"
+  rm -f "$port_file"
+  python3 "$stub" "$work/scenario.json" >"$port_file" 2>"$work/stub.err" &
   STUB_PID=$!
-  read -r port <&3
-  api_url="http://127.0.0.1:$port/graphql"
+  local tries=0
+  until [[ -s "$port_file" ]]; do
+    tries=$((tries + 1))
+    if [[ $tries -gt 100 ]]; then
+      echo "FAIL: stub server never printed a port: $(cat "$work/stub.err")" >&2
+      exit 1
+    fi
+    kill -0 "$STUB_PID" 2>/dev/null || {
+      echo "FAIL: stub server exited early: $(cat "$work/stub.err")" >&2
+      exit 1
+    }
+    sleep 0.05
+  done
+  api_url="http://127.0.0.1:$(cat "$port_file")/graphql"
 }
 
 # Prints starved.py's stdout and exits with its status; stderr lands in

@@ -32,7 +32,7 @@ bad() { printf 'FAIL %s\n' "$1" >&2; fail=1; }
 
 fh="$work/.foreman"
 mkdir -p "$fh/instances"
-for b in alpha beta; do
+for b in alpha beta gamma; do
   mkdir -p "$work/repo-$b" "$fh/instances/$b"
   git init -q -b main "$work/repo-$b"
   # config.sh loads the target's contract before answering anything, even a
@@ -154,6 +154,40 @@ hold alpha A-1; hold alpha A-2
 [[ -z "$(may beta 4)" ]] \
   && ok "a board that has never asked may still take a free slot" \
   || bad "beta refused its first ask: $(may beta 4)"
+
+# --- floors that sum above the ceiling do not deadlock -----------------------
+#     Three boards at equal priority on host_max 2: every floor is 1, so the
+#     floors sum to 3. Each board is owed a floor the other two reserve, and
+#     all three asking must not refuse all three while both slots sit free.
+reset
+declare_boards alpha beta gamma
+want alpha; want beta; want gamma
+for b in alpha beta gamma; do
+  [[ -z "$(may "$b" 2)" ]] \
+    && ok "$b, short of its floor, may take a free slot when floors oversubscribe" \
+    || bad "$b refused on an empty machine: $(may "$b" 2)"
+done
+hold alpha A-1; hold beta B-1
+r="$(may gamma 2)"
+case "$r" in *"2 of 2"*) ok "short of its floor or not, no board passes the ceiling" ;;
+  *) bad "gamma at a full machine -> ${r:-allowed}" ;; esac
+
+# --- two boards short of their floors do not reserve for each other ----------
+#     host_max 4, priorities 2, 1, 1 -> floors 2, 1, 1, which fit. alpha holds
+#     3, one past its floor. beta and gamma both ask and hold nothing, so each
+#     sees the other's unmet floor, and one free slot minus that is none.
+reset
+declare_boards alpha:2 beta:1 gamma:1
+want beta; want gamma
+hold alpha A-1; hold alpha A-2; hold alpha A-3
+for b in beta gamma; do
+  [[ -z "$(may "$b" 4)" ]] \
+    && ok "$b, short of its floor, takes the free slot the other also wants" \
+    || bad "$b refused while a slot sits free: $(may "$b" 4)"
+done
+r="$(may alpha 4)"
+case "$r" in *beta*gamma*) ok "a board past its floor still yields to boards owed theirs" ;;
+  *) bad "alpha past its floor -> ${r:-allowed}" ;; esac
 
 # --- an undeclared board is refused rather than stamped ----------------------
 reset

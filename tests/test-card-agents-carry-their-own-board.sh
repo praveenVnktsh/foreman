@@ -126,7 +126,7 @@ dispatch_fixture_run --ticket PRA-9 --role build --attempt 1
 spawn_report="$(settings_report "$DISPATCH_ARGV_LOG" "$prompt" "${names[@]}")"
 check_env spawn "$spawn_report"
 
-dispatch_fixture_resume --ticket PRA-9 --role build --attempt 1
+dispatch_fixture_resume --ticket PRA-9 --role build --attempt 1 --reason fix
 resume_report="$(settings_report "$DISPATCH_ARGV_LOG" "$prompt" "${names[@]}")"
 check_env resume "$resume_report"
 if [[ "$(field "$spawn_report" env)" == "$(field "$resume_report" env)" ]]; then

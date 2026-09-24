@@ -11,7 +11,7 @@
 #   dispatch.sh --ticket ABC-42 --role review --attempt 1 --slot a \
 #               --ref <pr-head-sha> --prompt-file review.md
 #   dispatch.sh --ticket ABC-42 --role build  --attempt 1 --resume \
-#               --prompt-file findings.md
+#               --reason ci-fix --prompt-file findings.md
 #   dispatch.sh --ticket cleanup --role cleanup --attempt <yyyymmddHHMM> \
 #               --prompt-file cleanup.md
 #
@@ -26,7 +26,7 @@ source "$SKILL_DIR/config.sh"
 # note above `agent_tmp_for` for why.
 NO_TMPDIR=(env -u TMPDIR)
 
-TICKET="" ROLE="" ATTEMPT="" SLOT="" REF="" PROMPT_FILE="" RESUME=""
+TICKET="" ROLE="" ATTEMPT="" SLOT="" REF="" PROMPT_FILE="" RESUME="" REASON=""
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --ticket) TICKET="$2"; shift 2 ;;
@@ -36,6 +36,7 @@ while [[ $# -gt 0 ]]; do
     --ref) REF="$2"; shift 2 ;;
     --prompt-file) PROMPT_FILE="$2"; shift 2 ;;
     --resume) RESUME=1; shift ;;
+    --reason) REASON="$2"; shift 2 ;;
     *) die "unknown argument: $1" ;;
   esac
 done
@@ -45,6 +46,22 @@ done
   || die "--role must be plan, build, review or cleanup"
 [[ -n "$ATTEMPT" ]] || die "--attempt is required"
 [[ -n "$PROMPT_FILE" && -r "$PROMPT_FILE" ]] || die "--prompt-file must be readable"
+
+# --reason is required on a build resume and refused everywhere else: it feeds
+# reconcile.py's build_attempts arithmetic (a ci-fix or retry resume charges an
+# attempt, a fix resume does not), so a resume it cannot classify must not
+# proceed silently, and a role or spawn that arithmetic never reads must not
+# carry one to go stale.
+REASON_BAD=""
+if [[ -n "$RESUME" && "$ROLE" == "build" ]]; then
+  case "$REASON" in
+    ci-fix|fix|retry) ;;
+    *) REASON_BAD=1 ;;
+  esac
+elif [[ -n "$REASON" ]]; then
+  REASON_BAD=1
+fi
+[[ -z "$REASON_BAD" ]] || die "--reason must be ci-fix, fix or retry, and only on --resume --role build"
 
 NAME="$(agent_name "$TICKET" "$ROLE" "${ATTEMPT}${SLOT}")"
 PROMPT="$(cat "$PROMPT_FILE")"
@@ -335,7 +352,17 @@ Dispatch fresh (drop --resume, use the next attempt number) instead."
     --prompt-file "$PROMPT_FILE" --settings "$AGENT_SETTINGS" \
     "${BUDGET[@]+"${BUDGET[@]}"}" \
     "${SKIP_PERMISSIONS[@]+"${SKIP_PERMISSIONS[@]}"}")"
-  card_log "$TICKET" "$(printf '{"action":"resume","name":"%s","session":"%s"}' "$NAME" "$SESSION")"
+  # A build resume states and logs why: reconcile.py's build_attempts charges a
+  # ci-fix or retry resume and not a fix resume, and it reads that off this
+  # row's own "role" and "reason" fields. A resume of any other role writes the
+  # row it always has -- no role key -- so reconcile.py's plan_rounds keeps
+  # counting only rows with role=plan and never double-counts one of these.
+  if [[ "$ROLE" == "build" ]]; then
+    card_log "$TICKET" "$(printf '{"action":"resume","name":"%s","session":"%s","role":"%s","reason":"%s"}' \
+      "$NAME" "$SESSION" "$ROLE" "$REASON")"
+  else
+    card_log "$TICKET" "$(printf '{"action":"resume","name":"%s","session":"%s"}' "$NAME" "$SESSION")"
+  fi
   printf '%s\n' "$SESSION"
   exit 0
 fi

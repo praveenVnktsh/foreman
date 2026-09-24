@@ -1247,6 +1247,12 @@ def dispatch_verdict(board: str, host_max: int,
     A board may dispatch when `available >= 1`. That lets it use capacity
     nobody is using, while reserving what other boards are still owed.
 
+    A board holding fewer slots than its own floor may also dispatch whenever
+    the machine has a free slot, whatever the other boards are owed. Floors can
+    sum above `host_max`, because every floor is at least 1. Without this rule,
+    boards that are each short of their floor reserve slots for each other, and
+    every one of them is refused while slots sit free.
+
     A FLOOR IS RESERVED ONLY FOR A BOARD THAT IS ASKING -- `board_demands()`,
     which reads the `wants-slot` stamp `dispatch.sh` writes. Measured 2026-09-20
     on a machine serving four boards at priority 2 with host_max 10: every board
@@ -1291,6 +1297,8 @@ def dispatch_verdict(board: str, host_max: int,
             floors[name] = 0
         else:
             floors[name] = max(1, (host_max * priority) // weight)
+    if floors[board] > held.get(board, 0) and total < host_max:
+        return ""
     # One list, then its sum and its names. The refusal below has to name the
     # same boards the arithmetic reserved for, or it explains a number nobody
     # can reproduce from what it says.
@@ -1723,9 +1731,9 @@ def board_order(foreman_home: str) -> dict:
 def _attempts(entries: list[dict], role: str) -> int:
     """How many attempts of one role this card has actually consumed.
 
-    Counts distinct attempt labels rather than spawn lines: a spawn and a later
-    resume of the same attempt are one attempt, and re-dispatching the same
-    attempt number after an environment repair must not count twice.
+    Counts distinct attempt labels rather than spawn lines: re-dispatching the
+    same attempt number after an environment repair must not count twice.
+    Resumes are not counted here; `build_attempts` adds the ones it charges.
 
     A `void` entry removes an attempt from the count. An attempt budget exists
     to stop a card looping on a ticket that cannot be done; an attempt killed by
@@ -1750,9 +1758,29 @@ def _attempts(entries: list[dict], role: str) -> int:
     return len(seen - voided)
 
 
+# The `dispatch.sh --reason` values whose build resume spends an attempt. A
+# `fix` resume does not: review rounds already bound the one fix a blocking
+# finding earns. Nor does a `retry`: it is the one resume a failed attempt
+# earns, part of that attempt, and step 2 bounds it to once.
+CHARGED_BUILD_RESUME_REASONS = frozenset({"ci-fix"})
+
+
 def build_attempts(entries: list[dict]) -> int:
-    """Build attempts consumed, which step 2 checks against MAX_BUILD_ATTEMPTS."""
-    return _attempts(entries, "build")
+    """Build attempts consumed, which step 2 checks against MAX_BUILD_ATTEMPTS.
+
+    Spawned attempts as `_attempts` counts them, plus one for every build
+    resume whose reason is in `CHARGED_BUILD_RESUME_REASONS`. Counting spawns
+    alone let a card whose required check never passes be resumed every pass
+    and never reach the cap.
+    """
+    resumes = sum(
+        1
+        for e in entries
+        if (e.get("event") or {}).get("action") == "resume"
+        and (e.get("event") or {}).get("role") == "build"
+        and (e.get("event") or {}).get("reason") in CHARGED_BUILD_RESUME_REASONS
+    )
+    return _attempts(entries, "build") + resumes
 
 
 def plan_rounds(entries: list[dict]) -> int:
@@ -1766,14 +1794,11 @@ def plan_rounds(entries: list[dict]) -> int:
     number, not a reason a resume happened. History is the only place the
     reason is recorded at all.
 
-    `dispatch.sh --resume` already logs one unconditional line for every
-    resume of every kind: `{"action":"resume","name":...,"session":...}`. That
-    cannot be what this counts -- it would count a build resumed to fix a
-    failing check the same as a build resumed to revise a plan, the same
-    conflation `build_attempts` exists to avoid on the build side. A plan
-    round therefore needs its own entry, the same way an environmental
-    write-off is a second, explicit `card_log` call layered on top of that
-    generic line (see `build_attempts`'s `void`):
+    `dispatch.sh --resume` logs one row for every resume. A build resume's row
+    carries `role` and `reason`; a plan resume's row carries neither, so it
+    cannot say whether it was a revision round. A plan round therefore needs
+    its own entry, the same way an environmental write-off is an explicit
+    `card_log` call (see `build_attempts`'s `void`):
 
         card_log <T> '{"action":"resume","role":"plan","round":"<n>"}'
 

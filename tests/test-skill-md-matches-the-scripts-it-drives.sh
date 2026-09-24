@@ -348,7 +348,10 @@ esac
 # the agent name it resumes out of `--role`, so `--role build` there hunts for
 # an agent no plan dispatch ever spawned. Proving the block fails when the role
 # is wrong is what makes the case above evidence rather than a coincidence.
-sed 's/--role plan/--role build/' "$blocks/replan.sh" > "$work/replan-wrong-role.sh"
+# `--reason retry` is added here only because `--role build --resume` now
+# requires one; the plan block itself takes no `--reason` since that gate is
+# build-only, and this swap must still fail on identity, not on that gate.
+sed 's/--role plan/--role build --reason retry/' "$blocks/replan.sh" > "$work/replan-wrong-role.sh"
 # Same rule as the case above: read the refusal, never the status.
 out="$(run_block "$work/replan-wrong-role.sh" 2>&1)" || true
 if [[ -z "$out" ]]; then

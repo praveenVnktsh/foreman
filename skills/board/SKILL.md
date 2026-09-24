@@ -1143,7 +1143,10 @@ Seven fields carry more than their names suggest:
 
 - **`build_attempts`** — attempts actually charged to this card, counted from
   `history.jsonl`. Use this, never the number in an agent's name. A spawn plus
-  its resumes is one attempt, and a voided attempt is none.
+  its resumes is one attempt, and a voided attempt is none — except a build
+  resume with `--reason ci-fix`, which adds one each time. A `fix` or `retry`
+  resume never does: review rounds bound the one fix, and step 2 bounds the
+  one retry.
 - **`history`** — the card's append-only transition log. This replaced a
   `sidecar` field that read a `state.json` nothing has ever written, so it was
   null on every card forever and attempts got guessed from agent names instead.
@@ -1270,10 +1273,9 @@ is the discriminator and not a timestamp.
     the round it posts under cannot disagree. **`--role plan`, because the agent
     being resumed is the plan agent** — `dispatch.sh` builds the name it resumes
     out of the role, so `--role build` here looks for an agent that was never
-    spawned and refuses. **The `card_log` line is not optional:** `dispatch.sh`
-    logs one generic `resume` entry for every resume of every kind, which cannot
-    tell a plan round from a build resumed to fix a failing check, so
-    `reconcile.py` counts `plan_rounds` from this explicit entry and nothing
+    spawned and refuses. **The `card_log` line is not optional:** the row
+    `dispatch.sh` logs for a plan resume does not say it was a revision round,
+    so `reconcile.py` counts `plan_rounds` from this explicit entry and nothing
     else — a round you do not log is a round `MAX_PLAN_ROUNDS` never sees. And
     the card **released** its slot when it parked, so this resume takes one
     again: check the ceilings first, as step 6 does before a fresh dispatch.
@@ -1426,17 +1428,25 @@ Then, for an agent whose turn has ended:
   failing.** A job that is still running reports an empty conclusion, and reading
   that as a failure sends the build agent to fix a job that never failed — at the
   cost of an attempt and a confused agent chasing nothing.
-- **PR open and `checks.failing`** → a required check has *concluded* badly.
-  Resume the build agent with the failing job names. Counts as an attempt.
+- **PR open and `checks.failing`** → a required check has *concluded* badly. If
+  `build_attempts >= MAX_BUILD_ATTEMPTS`, this attempt is already spent: move
+  the card to `Needs Human` (`STATE_NEEDS_HUMAN`, matched by id) carrying
+  `board-failed` and the reason, and
+  `card_log <T> '{"action":"released","reason":"board-failed: attempts exhausted"}'`
+  — the same exhaustion the no-PR bullet below runs into. Otherwise, `brief.py
+  ci-fix` and resume the build agent with `--reason ci-fix` and the failing job
+  names. Counts as an attempt.
 - **`pr.lookup_failed`** → `gh pr list` failed, so whether a pull request exists
   is *unknown*. Do nothing to the card: do not resume, do not charge an attempt,
   do not fail it. Say the lookup failed and look again next tick. This is not the
   same as "no PR", and reading it as one charges a ticket a build attempt for a
   network blip.
 - **no PR** → the attempt failed. Classify it first, as above. If it was the
-  ticket's fault, resume once with what the transcript ends on; past
-  `MAX_BUILD_ATTEMPTS`, move the card to `Needs Human` (`STATE_NEEDS_HUMAN`,
-  matched by id) carrying `board-failed` and the reason, and
+  ticket's fault and this attempt has not been retried, resume it once with
+  `--reason retry` and what the transcript ends on. If it has, dispatch the
+  next attempt fresh while `build_attempts < MAX_BUILD_ATTEMPTS`; once
+  `build_attempts >= MAX_BUILD_ATTEMPTS`, move the card to `Needs Human`
+  (`STATE_NEEDS_HUMAN`, matched by id) carrying `board-failed` and the reason, and
   `card_log <T> '{"action":"released","reason":"board-failed: attempts exhausted"}'`
   — this card no longer holds a slot, and `--host-slots` (step 6) only knows
   that if you say so.
@@ -1666,7 +1676,8 @@ against, the pull request head and the build agent's phase — the four facts
 - **`fixing`**, **`awaiting-checks`** → the fix is in flight, or it is pushed
   and its checks have not concluded. Not actionable, exactly like
   `awaiting-review`. **`checks-failing`** is step 2's `checks.failing` bullet
-  on the card in `In Progress`: `brief.py ci-fix` and resume.
+  on the card in `In Progress`: `brief.py ci-fix` and resume with `--reason
+  ci-fix`.
 - **`mergeable`** → go to step 4 **in this same slice**. Reading a clean
   review moved no card, so the slice is not over; the merge is what ends it. A
   clean review that waits a whole pass for its merge is the exact delay this
@@ -2363,16 +2374,16 @@ is in that agent's worktree:
 
 ```bash
 $B/brief.py fix --ticket <T> --findings-file $BOARD_HOME/cards/<T>/reviews/<r>a.json > /tmp/f.md
-$B/dispatch.sh --ticket <T> --role build --attempt <n> --resume --prompt-file /tmp/f.md
+$B/dispatch.sh --ticket <T> --role build --attempt <n> --resume --reason fix --prompt-file /tmp/f.md
 ```
 
 `<n>` is the **build's** own attempt number, not the round: `dispatch.sh`
 resolves the agent to resume from the role and the attempt, so the round number
 there looks for an agent nobody spawned. `brief.py ci-fix` (failing checks) is
 the same two lines with that subcommand and `--pr`/`--jobs` in place of
-`--findings-file`. Both refuse rather than producing an empty prompt, so a `fix`
-that exits non-zero means there was nothing blocking — not that you should
-improvise one.
+`--findings-file`, and `--reason ci-fix` in place of `--reason fix`. Both refuse
+rather than producing an empty prompt, so a `fix` that exits non-zero means
+there was nothing blocking — not that you should improvise one.
 
 **A fix merges on its checks, with no second review.** `brief.py fix` tells the
 agent to fix the finding and push, or to push nothing and say in its report
