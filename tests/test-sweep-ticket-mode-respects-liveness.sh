@@ -8,6 +8,13 @@
 # terminal, so this is defense-in-depth for when that judgment was stale,
 # raced, or wrong -- exactly the same judgment `--orphans` already defends
 # against, applied to the same class of call.
+#
+# Measured 2026-09-23 on Claude Code 2.1.280: a finished agent EXITS, so a
+# "stopped" row is already exited (pid null, state not "working"). Ticket
+# mode now forgets it through the adapter -- `claude rm` for this harness --
+# rather than waiting for a `stopped` it will never see arrive a second time.
+# The stub below answers `rm` for real, by dropping the row from a state
+# file, so a forget that did not actually happen cannot pass this test.
 set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -39,17 +46,53 @@ live_wt="$fixture/.claude/worktrees/foreman-alpha-PRA-1"
 dead_wt="$fixture/.claude/worktrees/foreman-alpha-PRA-2"
 mkdir -p "$live_wt" "$dead_wt"
 
-# PRA-1's build agent is still "working"; PRA-2's is "stopped".
+# PRA-1's build agent is still "working" (a pid, no session id needed for
+# that classification); PRA-2's is "stopped" -- pid null, which on 2.1.280 is
+# already exited, not merely idle.
 stub_dir="$work_dir/stub"
 mkdir -p "$stub_dir"
-cat > "$stub_dir/claude" <<STUB
+state_file="$stub_dir/agents.json"
+
+write_state() { # <json>
+  printf '%s' "$1" >"$state_file"
+}
+
+write_state '[
+  {"id": "sess-PRA-1", "name": "foreman/alpha/PRA-1/build-1", "sessionId": "sess-PRA-1", "state": "working", "pid": 111, "cwd": "'"$live_wt"'"},
+  {"id": "sess-PRA-2", "name": "foreman/alpha/PRA-2/build-1", "sessionId": "sess-PRA-2", "state": "stopped", "pid": null, "cwd": "'"$dead_wt"'"}
+]'
+
+# One stub, driven by a state file on disk rather than a second fixed
+# heredoc: `rm <id>` actually removes that row, so a sweep that only THINKS
+# it forgot a session (but never called the adapter's `rm`) fails here
+# instead of coincidentally passing because the next heredoc was already
+# empty. Every other argv -- `agents --json --all`, in particular -- prints
+# whatever is currently in the file.
+cat > "$stub_dir/claude" <<'STUB'
 #!/usr/bin/env bash
-cat <<JSON
-[
-  {"name": "foreman/alpha/PRA-1/build-1", "state": "working", "cwd": "$live_wt"},
-  {"name": "foreman/alpha/PRA-2/build-1", "state": "stopped", "cwd": "$dead_wt"}
-]
-JSON
+state="$(dirname "$0")/agents.json"
+case "$1" in
+  rm)
+    python3 - "$2" "$state" <<'PY'
+import json, sys
+target, path = sys.argv[1], sys.argv[2]
+with open(path) as f:
+    rows = json.load(f)
+rows = [r for r in rows if r.get("id") != target]
+with open(path, "w") as f:
+    json.dump(rows, f)
+PY
+    printf 'removed %s\n' "$2"
+    ;;
+  stop)
+    # Matches the measurement: a stop changes nothing in the registry,
+    # whether the row has a pid or not.
+    printf 'stopped %s\n' "$2"
+    ;;
+  *)
+    cat "$state"
+    ;;
+esac
 STUB
 chmod +x "$stub_dir/claude"
 
@@ -75,11 +118,13 @@ fi
 
 grep -qi "PRA-1" <<<"$out" || bad "sweep.sh said nothing about skipping the live PRA-1 worktree: $out"
 
-# A second sweep, once the agent has actually stopped, must reap it.
-cat > "$stub_dir/claude" <<STUB
-#!/usr/bin/env bash
-printf '[]\n'
-STUB
+# A second sweep, once the agent has actually stopped (pid gone, so it is now
+# exited too), must forget it through the same `rm` verb and reap it. The
+# stub script is unchanged -- only the state file moves, the same way the
+# real registry would report the same row differently a tick later.
+write_state '[
+  {"id": "sess-PRA-1", "name": "foreman/alpha/PRA-1/build-1", "sessionId": "sess-PRA-1", "state": "stopped", "pid": null, "cwd": "'"$live_wt"'"}
+]'
 out2="$(HOME="$home" FOREMAN_HOME="$home/.foreman" FOREMAN_INSTANCE=alpha \
   PATH="$stub_dir:$PATH" "$sweep" PRA-1 2>&1)" \
   || { bad "second sweep of PRA-1 exited non-zero: $out2"; exit "$fail"; }

@@ -22,8 +22,20 @@
 #         HARNESS_STUB_SHELL    per codex invocation, `<VARIABLE> <cksum>` for
 #                               each FOREMAN_MCP_* (and the version control
 #                               variable) a model-run command would still see
-#       and reads HARNESS_STUB_CODEX_VERSION (0.133.0 or 0.154.0, default
-#       0.133.0) at run time to choose which codex it acts as.
+#         HARNESS_STUB_IDLE     add a claude agent id here to make the claude
+#                               stub report it "done" with a pid still set --
+#                               2.1.280 measured one such row in production
+#                               (see claude.sh), and reap must never take it
+#       and reads, at run time:
+#         HARNESS_STUB_CODEX_VERSION    0.133.0 or 0.154.0 (default 0.133.0),
+#                                       which codex it acts as
+#         HARNESS_STUB_STARTED_AT_MS    the claude stub's NEXT spawned row's
+#                                       startedAt, epoch milliseconds. Unset
+#                                       (the default), it is the real current
+#                                       time, so a row spawned with nothing set
+#                                       is inside any retention window a test
+#                                       asks for; a test that needs a row
+#                                       already outside one sets this first.
 #
 # ## The marker is the whole clock
 #
@@ -95,21 +107,24 @@ harness_stub_install() { # <bin_dir> <state_dir>
   HARNESS_STUB_BEARER="$state/bearer"
   HARNESS_STUB_PROFILES="$state/profiles"
   HARNESS_STUB_SHELL="$state/shell-env"
+  HARNESS_STUB_IDLE="$state/idle"
   : >"$HARNESS_STUB_SHELL" || return 1
   : >"$HARNESS_STUB_RUNS" || return 1
   : >"$HARNESS_STUB_ARGV" || return 1
   : >"$HARNESS_STUB_BEARER" || return 1
   : >"$HARNESS_STUB_PROFILES" || return 1
+  : >"$HARNESS_STUB_IDLE" || return 1
 
   {
     printf '%s\n' '#!/usr/bin/env bash'
-    printf '%s\n' '# Stub `claude`, for the four things claude.sh runs: --bg, agents, stop'
-    printf '%s\n' '# and --version.'
+    printf '%s\n' '# Stub `claude`, for the five things claude.sh runs: --bg, agents, stop,'
+    printf '%s\n' '# rm and --version.'
     _harness_stub_prelude "$state"
     cat <<'CLAUDE_STUB'
 
 STUB_ROWS="$STUB_STATE/rows"
 STUB_STOPPED="$STUB_STATE/stopped"
+STUB_IDLE="$STUB_STATE/idle"
 
 printf '%s\n' "$*" >>"$STUB_ARGV"
 
@@ -170,9 +185,17 @@ background() {
   index="$(next_index)"
   session="session-$index"
   # startedAt is epoch MILLIseconds in the real registry, and every consumer
-  # sorts by it, so it only has to rise with each spawn.
+  # sorts by it, so it only has to rise with each spawn. Real current time by
+  # default, so a row spawned with nothing set is inside any retention window
+  # a test asks for; HARNESS_STUB_STARTED_AT_MS overrides it for a test that
+  # needs a row already outside one.
+  if [ -n "${HARNESS_STUB_STARTED_AT_MS:-}" ]; then
+    started="$HARNESS_STUB_STARTED_AT_MS"
+  else
+    started="$(python3 -c 'import time; print(int(time.time() * 1000))')"
+  fi
   printf '%s\t%s\t%s\t%s\t%s\n' \
-    "agent-$index" "$session" "$name" "$PWD" "$(( 1700000000000 + index ))" >>"$STUB_ROWS"
+    "agent-$index" "$session" "$name" "$PWD" "$started" >>"$STUB_ROWS"
   start_transcript "$PWD" "$session"
   printf 'stub agent %s started\n' "$session"
 }
@@ -181,11 +204,15 @@ agents() {
   python3 -c '
 import json, os, sys
 
-rows_path, stopped_path, marker = sys.argv[1], sys.argv[2], sys.argv[3]
+rows_path, stopped_path, marker, idle_path = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
 stopped = set()
 if os.path.exists(stopped_path):
     with open(stopped_path) as handle:
         stopped = {line.strip() for line in handle if line.strip()}
+idle = set()
+if os.path.exists(idle_path):
+    with open(idle_path) as handle:
+        idle = {line.strip() for line in handle if line.strip()}
 finished = os.path.exists(marker)
 
 agents = []
@@ -195,22 +222,45 @@ if os.path.exists(rows_path):
             if not line.strip():
                 continue
             agent_id, session, name, cwd, started = line.rstrip("\n").split("\t")
-            if agent_id in stopped:
-                state = "stopped"
+            live_pid = int(started) % 100000
+            # 2.1.280 measured one row in production that was "done" and
+            # STILL carried a pid (see claude.sh). HARNESS_STUB_IDLE
+            # reproduces exactly that combination for a test to protect from
+            # reap, ahead of the ordinary stopped/finished/working states,
+            # none of which can produce it on their own.
+            if agent_id in idle:
+                state, pid = "done", live_pid
+            elif agent_id in stopped:
+                state, pid = "stopped", None
+            elif finished:
+                state, pid = "done", None
             else:
-                state = "done" if finished else "working"
+                state, pid = "working", live_pid
             agents.append({
                 "name": name,
                 "id": agent_id,
                 "sessionId": session,
-                "pid": int(started) % 100000,
+                "pid": pid,
                 "state": state,
                 "startedAt": int(started),
                 "cwd": cwd,
                 "status": "running",
             })
 print(json.dumps(agents))
-' "$STUB_ROWS" "$STUB_STOPPED" "$STUB_MARKER"
+' "$STUB_ROWS" "$STUB_STOPPED" "$STUB_MARKER" "$STUB_IDLE"
+}
+
+# Whether <id> currently carries a pid, straight out of `agents`'s own answer
+# -- so `stop` and `agents` can never disagree about what "still working"
+# means.
+has_pid() { # <id>
+  agents | python3 -c '
+import json, sys
+
+want = sys.argv[1]
+rows = [a for a in json.load(sys.stdin) if a.get("id") == want]
+sys.exit(0 if rows and rows[0].get("pid") is not None else 1)
+' "$1"
 }
 
 case "${1:-}" in
@@ -220,8 +270,35 @@ case "${1:-}" in
     ;;
   agents) agents ;;
   # The registry keys a stop by the AGENT id, not the session id. Recorded so
-  # the next `agents` answers stopped for that row and no other.
-  stop) printf '%s\n' "${2:-}" >>"$STUB_STOPPED" ;;
+  # the next `agents` answers stopped for that row and no other. Measured
+  # 2026-09-23: `claude stop` on a row that has already exited (no pid) is a
+  # NO-OP -- it still prints `stopped <id>` and exits 0, but nothing in the
+  # registry moves. Reproduced here because sweep.sh used to re-issue stop for
+  # 30s against exactly this row and report "did not land" forever.
+  stop)
+    if has_pid "${2:-}"; then printf '%s\n' "${2:-}" >>"$STUB_STOPPED"; fi
+    printf 'stopped %s\n' "${2:-}"
+    ;;
+  # `claude rm <id>`: drops the row from the registry and leaves its
+  # transcript, exactly as measured (see claude.sh's header). Unlike `stop`
+  # this is not conditional -- claude.sh's own forget/reap verbs are what
+  # decide whether an id is safe to remove, not this stub.
+  rm)
+    id="${2:-}"
+    if [ -f "$STUB_ROWS" ]; then
+      tmp="$STUB_ROWS.tmp"
+      awk -F'\t' -v want="$id" '$1 != want' "$STUB_ROWS" >"$tmp" && mv "$tmp" "$STUB_ROWS"
+    fi
+    if [ -f "$STUB_STOPPED" ]; then
+      tmp="$STUB_STOPPED.tmp"
+      awk -v want="$id" '$0 != want' "$STUB_STOPPED" >"$tmp" && mv "$tmp" "$STUB_STOPPED"
+    fi
+    if [ -f "$STUB_IDLE" ]; then
+      tmp="$STUB_IDLE.tmp"
+      awk -v want="$id" '$0 != want' "$STUB_IDLE" >"$tmp" && mv "$tmp" "$STUB_IDLE"
+    fi
+    printf 'removed %s\n' "$id"
+    ;;
   --version) printf 'claude-stub 0.0.0\n' ;;
   *) exit 0 ;;
 esac

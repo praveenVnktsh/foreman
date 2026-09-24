@@ -127,7 +127,15 @@ if [[ ! -x "$HARNESS_SH" ]]; then
 fi
 FOREMAN_DEFAULT_HARNESS="$HARNESS"
 FOREMAN_HARNESSES="$_foreman_harnesses"
-export HARNESS_SH FOREMAN_DEFAULT_HARNESS FOREMAN_HARNESSES
+
+# THE ROOT EVERY FOREMAN AGENT NAME COMES FROM. claude.sh sources nothing (its
+# header says why), so it cannot read BOARD_NAME_PREFIX or TICK_AGENT_NAME
+# below -- and its reap has to tell foreman's rows apart from the operator's
+# own background `claude --bg` sessions, which share the same registry.
+# Exported so the adapter reads the one copy instead of spelling the prefix in
+# again.
+AGENT_NAME_ROOT="foreman/"
+export HARNESS_SH FOREMAN_DEFAULT_HARNESS FOREMAN_HARNESSES AGENT_NAME_ROOT
 unset _foreman_harnesses _foreman_default_adapter
 
 # Which board this is, where its repository is, and where its runtime lives.
@@ -203,7 +211,7 @@ BOARD_HOME="${BOARD_HOME:-$INSTANCE_HOME}"
 # globs, and reconcile.py and watch-agents.py, which read both through
 # reconcile.py's _load_config. Not environment-wins: a name this shell pastes
 # into a glob is not the environment's to answer.
-BOARD_NAME_PREFIX="foreman/$INSTANCE"
+BOARD_NAME_PREFIX="${AGENT_NAME_ROOT}$INSTANCE"
 BOARD_WORKTREE_PREFIX="foreman-$INSTANCE"
 
 # ids.env is KEY=VALUE, written by bin/resolve-ids.py, never by hand and never
@@ -427,7 +435,7 @@ AGENT_SKIP_PERMISSIONS="${AGENT_SKIP_PERMISSIONS-1}"
 # NOT environment-wins, unlike the knobs around it. Found in review on
 # 2026-09-14: an operator shell exporting TICK_AGENT_NAME would give the tick a
 # name `supervise.sh --restart` no longer stops before starting a replacement.
-TICK_AGENT_NAME="foreman/tick"
+TICK_AGENT_NAME="${AGENT_NAME_ROOT}tick"
 TICK_INTERVAL_MINUTES="${TICK_INTERVAL_MINUTES:-20}"
 
 # How long a board's ask for a slot -- `instances/<board>/wants-slot`, written by

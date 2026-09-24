@@ -12,6 +12,7 @@
 #   codex.sh list                             every agent, as a JSON list
 #   codex.sh stop <id>                        stop one agent
 #   codex.sh reap <older-than-seconds>        delete what finished agents left
+#   codex.sh forget <id>                       delete one finished agent's record
 #   codex.sh transcript <cwd> <session-id>    prints the transcript path
 #   codex.sh check                            exit 0 if the binary runs
 #   codex.sh skills-dir                       where this harness resolves skills

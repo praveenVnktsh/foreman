@@ -11,8 +11,10 @@
 #                   [--mcp-config F]... [--max-budget-usd N] [--settings JSON]
 #                                             prints the session id
 #   claude.sh list                            every agent, as a JSON list
-#   claude.sh stop <id>                       stop one agent
-#   claude.sh reap <older-than-seconds>       nothing here; see the verb below
+#   claude.sh stop <id>                       stop one idle agent
+#   claude.sh forget <id>                     remove one exited agent's record
+#   claude.sh reap <older-than-seconds>       remove exited foreman agents older
+#                                             than the window; prints their ids
 #   claude.sh transcript <cwd> <session-id>   prints the transcript path
 #   claude.sh check                           exit 0 if the binary runs
 #   claude.sh skills-dir                      where this harness resolves skills
@@ -44,6 +46,13 @@ usage() {
 # folds a failed `claude agents` into an empty list answers it by starting a
 # second tick beside a healthy one, or by re-dispatching on top of a live build.
 # So this refuses instead, and prints nothing when it refuses.
+#
+# `state` passes through as Claude Code writes it. On 2.1.280 a finished agent
+# EXITS and its row stays `done` with `pid: null`, so "done" now covers both an
+# idle agent and a dead one. It is NOT remapped to `stopped` here: reconcile.py's
+# PHASE reads `done` as "turn-complete, go look at the PR", and `stopped` as
+# terminal. Remapping would turn every finished build into a stopped one before
+# the tick had read its result. `pid` is what tells idle from exited.
 list_agents() {
   local raw
   raw="$(claude agents --json --all 2>/dev/null)" \
@@ -260,6 +269,126 @@ resume() {
   printf '%s\n' "$session"
 }
 
+# Measured 2026-09-23 on Claude Code 2.1.280, on the production host:
+#
+# - A finished `claude --bg` agent EXITS. Its `~/.claude/jobs/<id>/state.json`
+#   stays `done` with `pid: null`. The registry held 162 done, 54 stopped,
+#   2 blocked and 1 failed rows with no pid, against 1 idle `done` row and
+#   1 `working` row that had one.
+# - `claude stop <id>` on such a row printed `stopped <id>`, exited 0, and
+#   changed nothing: the state stayed `done` and `updatedAt` did not move.
+# - `claude rm <id>` printed `removed <id>`, exited 0, deleted
+#   `~/.claude/jobs/<id>`, and the row left `claude agents --all`. It left the
+#   git worktree and the transcripts under `~/.claude/projects`.
+#
+# Claude Code does NOT age these rows out. Before `forget` and `reap` existed,
+# sweep.sh re-issued a stop for 30s on every terminal card and reported "did
+# not land" on every board every pass, and a no-op `reap` meant `--orphans`
+# never freed a tree. One board piled up 72 trees, 261G.
+#
+# EXITED is `pid` null AND `state` not `working`. `pid` null alone is not
+# enough: a `working` row with no pid is either one Claude Code has registered
+# but not yet started, or one whose record never recorded the death. Removing
+# the first takes a live agent's record, so that row is left for a human.
+exited_filter_py() {
+  cat <<'EXITED_PY'
+def exited(row):
+    return row.get("pid") is None and row.get("state") != "working"
+EXITED_PY
+}
+
+# The ids of exited agents under AGENT_NAME_ROOT that started before the window.
+#
+# The root is required, not defaulted. `claude agents --all` also lists the
+# operator's own background sessions, and this list feeds `claude rm`. A reap
+# that guessed the root, or took every row when it had none, would delete
+# records foreman never made.
+reapable_ids() { # <older-than-seconds>
+  local agents
+  agents="$(list_agents)" || exit 1
+  printf '%s' "$agents" | python3 -c "$(exited_filter_py)"'
+import json, sys, time
+
+window, root = float(sys.argv[1]), sys.argv[2]
+# startedAt is epoch MILLIseconds, as `claude agents --json` reports it.
+cutoff = int(time.time() * 1000) - int(window * 1000)
+for row in json.load(sys.stdin):
+    if not exited(row) or not (row.get("name") or "").startswith(root):
+        continue
+    started = row.get("startedAt")
+    # A row with no start time has no age, so it cannot be older than
+    # anything. Said out loud, because a reap that silently skips a row is
+    # the one nobody notices never finishing.
+    if not isinstance(started, (int, float)) or isinstance(started, bool):
+        print("harness/claude: reap: leaving %s -- startedAt %r is not a time"
+              % (row.get("id"), started), file=sys.stderr)
+        continue
+    if started > cutoff or not row.get("id"):
+        continue
+    print(row["id"])
+' "$1" "$AGENT_NAME_ROOT"
+}
+
+# `claude rm` WITHOUT `--discard-unpushed` or `--force-remove-worktree`. Those
+# act on a worktree Claude Code itself created. Foreman's trees are added by
+# dispatch.sh with `git worktree add`, `rm` was measured to leave them, and
+# sweep.sh reaps them once the row is gone.
+remove_record() { # <id>
+  claude rm "$1" >/dev/null
+}
+
+reap() { # <older-than-seconds>
+  local number='^[0-9]+([.][0-9]+)?$' ids id failed=0
+  [[ "$1" =~ $number ]] \
+    || die "reap: older-than-seconds '$1' is not a non-negative number"
+  [[ -n "${AGENT_NAME_ROOT:-}" ]] \
+    || die "reap: AGENT_NAME_ROOT is unset; config.sh exports it, and without it this cannot tell foreman's sessions from the operator's own"
+  ids="$(reapable_ids "$1")" || exit 1
+  while IFS= read -r id; do
+    [[ -n "$id" ]] || continue
+    # The same switch sweep.sh reads before every other deletion it makes. The
+    # ids still print, so a dry run names exactly what a real one would take.
+    if [[ -z "${BOARD_DRY_RUN:-}" ]] && ! remove_record "$id"; then
+      printf 'harness/claude: claude rm %s exited non-zero; its record stays\n' "$id" >&2
+      failed=1
+      continue
+    fi
+    printf '%s\n' "$id"
+  done <<< "$ids"
+  [[ "$failed" -eq 0 ]] || exit 1
+}
+
+# Remove one exited agent's record, so its row leaves `claude agents --all`.
+#
+# It refuses a row that is working or still has a pid. `claude rm` on a live
+# session is not what sweep.sh asked for: it stops an idle agent first and
+# waits for the pid to go, and a forget that raced ahead of that would take the
+# record `stop`, the host ceiling and the worktree protection all read.
+forget() { # <id>
+  local agents
+  agents="$(list_agents)" || exit 1
+  printf '%s' "$agents" | python3 -c "$(exited_filter_py)"'
+import json, sys
+
+want = sys.argv[1]
+rows = [row for row in json.load(sys.stdin) if row.get("id") == want]
+if not rows:
+    sys.exit("harness/claude: forget: no agent %s in `claude agents --all`" % want)
+for row in rows:
+    if not exited(row):
+        sys.exit(
+            "harness/claude: forget: agent %s is %s with pid %s; only an exited "
+            "agent (no pid, not working) can be forgotten"
+            % (want, row.get("state"), row.get("pid"))
+        )
+' "$1" || exit 1
+  if [[ -n "${BOARD_DRY_RUN:-}" ]]; then
+    printf 'DRY RUN: would remove the record of claude session %s\n' "$1"
+    return 0
+  fi
+  remove_record "$1" || die "forget: claude rm $1 exited non-zero; its record stays"
+}
+
 transcript() { # <cwd> <session-id>
   # Claude persists a session at ~/.claude/projects/<slug>/<id>.jsonl, where the
   # slug is the cwd with every '/' and '.' replaced by '-'. The file's mtime is
@@ -302,20 +431,25 @@ case "$VERB" in
     [[ $# -eq 0 ]] || usage
     list_agents
     ;;
+  # For an IDLE agent: one whose row has a pid. On 2.1.280 a stop on an agent
+  # that has already exited prints `stopped <id>`, exits 0 and changes nothing
+  # (see the measurement above `exited_filter_py`), so it is never how an
+  # exited agent's row goes. `forget` is.
   stop)
     [[ $# -eq 1 ]] || usage
     claude stop "$1"
     ;;
-  # Nothing to reap. This adapter keeps no records of its own: `claude agents`
-  # IS the registry, and Claude Code ages it out itself. codex.sh and
-  # opencode.sh answer this verb by deleting the record, log and wrapper that
-  # detached.sh wrote for each of their spawns, because nothing else ever would.
-  #
-  # It still takes the window and still exits 0, so sweep.sh calls the same
-  # verb on every installation instead of branching on the harness -- the
-  # branching this adapter exists to remove.
+  forget)
+    [[ $# -eq 1 ]] || usage
+    forget "$1"
+    ;;
+  # The same verb codex.sh and opencode.sh answer by deleting detached.sh's
+  # records, so sweep.sh calls one verb on every installation instead of
+  # branching on the harness. Here it takes the exited rows under
+  # AGENT_NAME_ROOT, because Claude Code never ages them out (measured above).
   reap)
     [[ $# -eq 1 ]] || usage
+    reap "$1"
     ;;
   transcript)
     [[ $# -eq 2 ]] || usage

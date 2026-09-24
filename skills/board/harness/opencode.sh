@@ -12,6 +12,7 @@
 #   opencode.sh list                          every agent, as a JSON list
 #   opencode.sh stop <id>                     stop one agent
 #   opencode.sh reap <older-than-seconds>     delete what finished agents left
+#   opencode.sh forget <id>                    delete one finished agent's record
 #   opencode.sh transcript <cwd> <session-id> prints the transcript path
 #   opencode.sh check                         exit 0 if the binary runs
 #   opencode.sh skills-dir                    where this harness resolves skills

@@ -3,6 +3,7 @@
 #
 #   registry.sh list                          every agent, from every harness
 #   registry.sh stop <id>                     stop the agent, on its harness
+#   registry.sh forget <id>                   delete one finished agent's record
 #   registry.sh reap <older-than-seconds>     reap finished agents, every harness
 #   registry.sh transcript <cwd> <session>    the transcript's path
 #   registry.sh spawn|resume|check|skills-dir|skill-prompt ...
@@ -96,13 +97,35 @@ PY
     printf 'foreman: no harness owns agent %s\n' "$id" >&2
     exit 1
     ;;
-  reap)
-    [[ $# -eq 1 ]] || { printf 'foreman: registry.sh reap takes older-than-seconds\n' >&2; exit 1; }
+  forget)
+    # Mirrors stop's shape, but the adapter's own stderr is left alone: a
+    # refusal (working, missing) is the message sweep.sh shows the operator,
+    # not noise to hide. Only one adapter normally owns a given id, so the
+    # adapters that do not tend to say nothing rather than "missing".
+    [[ $# -eq 1 ]] || { printf 'foreman: registry.sh forget takes one id\n' >&2; exit 1; }
+    id="$1"
     for harness in $adapters; do
       sh="$(adapter_for "$harness")"
       [[ -x "$sh" ]] || continue
-      "$sh" reap "$1" 2>/dev/null || true
+      if "$sh" forget "$id"; then exit 0; fi
     done
+    printf 'foreman: no harness owns agent %s\n' "$id" >&2
+    exit 1
+    ;;
+  reap)
+    # AN ADAPTER THAT FAILS TO REAP IS NOT NOTHING TO REAP. The old loop threw
+    # away every adapter's exit code and stderr, so a `claude rm` that failed
+    # partway through a reap looked identical to a clean pass -- sweep.sh's
+    # ticket-mode caller had no way to tell the operator a session was stuck.
+    # Run every adapter regardless, and fail loud if any of them did.
+    [[ $# -eq 1 ]] || { printf 'foreman: registry.sh reap takes older-than-seconds\n' >&2; exit 1; }
+    failed=0
+    for harness in $adapters; do
+      sh="$(adapter_for "$harness")"
+      [[ -x "$sh" ]] || continue
+      "$sh" reap "$1" || failed=1
+    done
+    exit "$failed"
     ;;
   transcript)
     [[ $# -eq 2 ]] || { printf 'foreman: registry.sh transcript takes <cwd> <session>\n' >&2; exit 1; }
