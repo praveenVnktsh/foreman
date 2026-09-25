@@ -78,6 +78,10 @@ git_q -C "$target" push -q origin main
 
 home="$work/home"
 fixture_add_instance "$home" demo "$target"
+# A fresh monitor.stamp. dispatch.sh (Task 4) refuses to dispatch while any
+# board's Monitor stamp is stale or missing, and this file is testing the
+# contract brief.py builds, not that gate.
+fixture_arm_monitor "$home/.foreman" demo
 
 # FOREMAN_HOME is named explicitly here and in every other run below. config.sh
 # no longer derives it from $HOME: it asks bin/installation.py, which reads the

@@ -5,6 +5,7 @@
 #   supervise.sh --status   # report what it sees, change nothing
 #   supervise.sh --stop     # stop the loop agent and leave it stopped
 #   supervise.sh --restart  # replace the tick, leaving in-flight cards alone
+#   supervise.sh --resume   # clear a halt and start ticking again
 #
 # THIS SCRIPT NEVER DISPATCHES A CARD. It starts an agent that runs the board
 # skill on a loop, and that agent does all board work. The separation is the
@@ -52,7 +53,7 @@ usage() { sed -n 's/^#   \(supervise\.sh.*\)/  \1/p' "${BASH_SOURCE[0]}"; }
 # which starts or restarts a tick the operator was not asking about. The flags
 # most likely to be mistyped are the two that change the most.
 case "$MODE" in
-  run|--status|--stop|--restart) ;;
+  run|--status|--stop|--restart|--resume) ;;
   *)
     printf 'foreman: supervise.sh: unrecognised argument %s\n' "$MODE" >&2
     usage >&2
@@ -101,6 +102,22 @@ log() { printf '%s supervise: %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$*"; }
 # lock exists to prevent. There is one home, so there is one lock, so there is
 # one tick.
 SUPERVISE_LOCK="${SUPERVISE_LOCK:-$FOREMAN_HOME/supervise.lock}"
+
+# THE HALT IS A FILE, because this script is a cron entry point and everything
+# else it knows dies with the process. halt_foreman() stops the tick; the next
+# fire ten minutes later finds no tick, takes the "not running" branch and
+# starts one -- the halt/restart thrash the halt exists to prevent, one tick
+# session burned per cycle. A marker on disk is what survives between fires.
+#
+# AT THE HOME'S ROOT, one level above each board's own `instances/<board>/HALT`,
+# because this halt is machine-wide: a rejected Monitor call is evidence about
+# the harness contract and every board shares one harness. The name is the same
+# so an operator reading either one reads the same word.
+#
+# Only an operator clears it, with `supervise.sh --resume`. Nothing on a timer
+# does, because the trigger is a changed tool contract and no amount of waiting
+# repairs one.
+FOREMAN_HALT="${FOREMAN_HALT:-$FOREMAN_HOME/HALT}"
 
 # The tick's own control plane, and it must be foreman's rather than inherited.
 #
@@ -702,6 +719,58 @@ card_state() { # <card_agents listing> <agent name>
   printf '%s' "${found:-gone}"
 }
 
+# The registry JSON, with the machine-wide halt added to it.
+#
+# --STATUS MUST REPORT THE HALT, because it returns above the marker block and
+# would otherwise answer a halted machine with "no tick is running" and no
+# reason. That is the silent state this whole feature exists to remove, and it
+# is the only report left when the marker could not be written at all.
+#
+# THE FIELDS ARE ADDED, never substituted. Something parses this shape, so a
+# reader that knows nothing of a halt still reads every field it came for.
+#
+# The marker's own text rides along, because it is what says why the machine
+# halted and when. It is read here rather than re-derived: halt_foreman() wrote
+# it and no other reader has to agree with it.
+#
+# A marker that exists but cannot be read still reports halted. "I could not
+# read why" is a halted machine; treating it as a running one is the one answer
+# that must never be given.
+status_json() {
+  local marker=""
+  if [[ -e "$FOREMAN_HALT" ]]; then
+    marker="$(cat "$FOREMAN_HALT" 2>/dev/null || printf 'the marker is unreadable')"
+  fi
+  local merged
+  # Falling back to the untouched registry JSON, because a python3 that will
+  # not run is not a reason for --status to answer with nothing.
+  merged="$(FOREMAN_HALT_PATH="$FOREMAN_HALT" FOREMAN_HALT_TEXT="$marker" \
+            python3 -c '
+import json, os, sys
+info = json.loads(sys.argv[1])
+path = os.environ["FOREMAN_HALT_PATH"]
+halted = os.path.exists(path)
+info["machine_halted"] = halted
+info["machine_halt_marker"] = path if halted else None
+info["machine_halt_reason"] = os.environ["FOREMAN_HALT_TEXT"] if halted else ""
+sys.stdout.write(json.dumps(info))
+' "$INFO" 2>/dev/null)" || merged=""
+  if [[ -n "$merged" ]]; then
+    printf '%s' "$merged"
+  else
+    # THE HALT STILL GETS SAID, on stderr, because the fallback would otherwise
+    # answer a halted machine with the same JSON a machine whose tick merely
+    # died gets. Losing the halt in the one path this function exists for is
+    # the exact defect it was written to remove.
+    #
+    # STDERR AND NOT STDOUT. Something parses stdout, so the JSON there stays
+    # byte-for-byte what it was before this function existed.
+    [[ -e "$FOREMAN_HALT" ]] \
+      && log "foreman is HALTED by $FOREMAN_HALT, and python3 could not add that to the JSON below" >&2
+    printf '%s' "$INFO"
+  fi
+}
+
 # --status is the ONE mode that reads the registry without the lock, because it
 # changes nothing. Making it queue would make the gesture an operator reaches
 # for during an incident the one that hangs behind a running start.
@@ -713,7 +782,7 @@ if [[ "$MODE" == "--status" ]]; then
     printf '{"error":"could not read the agent registry"}\n'
     exit 1
   fi
-  printf '%s\n' "$INFO"
+  printf '%s\n' "$(status_json)"
   exit 0
 fi
 
@@ -799,6 +868,43 @@ if ! read_registry; then
     exit 0
   fi
   die "cannot read the agent registry, so $MODE cannot say which tick to act on; the old tick is still running and nothing retries this. Run $MODE again once the registry reads."
+fi
+
+# A HALTED MACHINE STAYS HALTED, and this is the branch that makes it so.
+#
+# IT SITS ABOVE EVERY REASON TO START. The elif chain at the bottom asks how
+# many ticks are live before it asks anything else, and a halted machine has
+# none -- so "no tick exists" and "the tick is not running" both answer with
+# start_agent, and the halt lasts exactly until the next cron fire. Reading the
+# marker here, before any of them, is what makes the halt outlive the process
+# that wrote it.
+#
+# --stop is not listed: it stops a tick and asks nothing about starting one, so
+# a halted machine answers it the same way a running one does.
+if [[ -e "$FOREMAN_HALT" ]]; then
+  case "$MODE" in
+    run)
+      log "foreman is HALTED by $FOREMAN_HALT; starting nothing"
+      log "$(cat "$FOREMAN_HALT" 2>/dev/null || printf 'the marker is unreadable')"
+      log "clear it with: supervise.sh --resume"
+      exit 0
+      ;;
+    --restart)
+      # REFUSE RATHER THAN CLEAR. --restart is the gesture an operator reaches
+      # for out of habit, so honouring it here would undo a halt without the
+      # operator ever reading why the machine stopped -- and the halt's whole
+      # value is that somebody looks before the tick runs again.
+      die "foreman is HALTED by $FOREMAN_HALT, so --restart did not run.
+$(cat "$FOREMAN_HALT" 2>/dev/null || printf 'the marker is unreadable')
+Fix the cause above, then run: supervise.sh --resume"
+      ;;
+    --resume)
+      rm -f "$FOREMAN_HALT" || die "cannot clear $FOREMAN_HALT"
+      log "cleared the halt at $FOREMAN_HALT"
+      ;;
+  esac
+elif [[ "$MODE" == "--resume" ]]; then
+  log "foreman was not halted; continuing as an ordinary run"
 fi
 
 if [[ "$MODE" == "--stop" ]]; then
@@ -888,6 +994,93 @@ find_starved_board() {
   [[ -n "$STARVED_REASON" ]]
 }
 
+# Is any declared board's agent Monitor not alive? Sets MONITOR_STALE_REASON.
+#
+# reconcile.py owns the staleness rule; this only asks. Two readers of one
+# setting is the drift config.sh warns about throughout.
+monitor_stale_board() {
+  local out rc=0
+  MONITOR_STALE_REASON=""
+  if ! out="$("$SKILL_DIR/reconcile.py" --monitor-stamps 2>/dev/null)"; then
+    # Unreadable is not the same as stale. A boards.toml that will not load is
+    # already the corpse/starved branches' problem, and halting the machine on
+    # a failed read would stop it for a fault it cannot name.
+    log "monitor: could not read the monitor stamps; leaving the tick alone"
+    return 1
+  fi
+  # THE PARSER'S EXIT CODE DECIDES, not whether it printed. A bare command
+  # substitution whose python3 cannot run yields an empty string, and an empty
+  # string is indistinguishable from the "every stamp is fresh" answer -- so a
+  # machine with no usable interpreter would read as healthy forever. Exit 0
+  # means fresh, a printed reason means stale, and any other exit is a read
+  # this branch cannot act on.
+  MONITOR_STALE_REASON="$(printf '%s' "$out" | python3 -c '
+import json, sys
+d = json.load(sys.stdin)
+# `halt_ok`, NOT `ok`. `ok` is dispatch.sh gate: four polls, correct because
+# dispatch runs inside a pass moments after the tick armed it. This runs from
+# cron at any moment, including the heartbeat wait between two ticks, where a
+# Monitor capped at MONITOR_TIMEOUT_SECONDS has already expired on a healthy
+# machine. Halting on `ok` stopped the machine on its default settings.
+if d["halt_ok"]:
+    sys.exit(0)
+stale = ", ".join(d["halt"])
+secs = d["halt_seconds"]
+print(f"no live agent Monitor on: {stale} (stamp older than {secs:.0f}s)")
+')" || rc=$?
+  if [[ "$rc" -ne 0 ]]; then
+    MONITOR_STALE_REASON=""
+    log "monitor: could not parse the monitor stamps; leaving the tick alone"
+    return 1
+  fi
+  [[ -n "$MONITOR_STALE_REASON" ]]
+}
+
+# Has this tick been running long enough to have armed its Monitors?
+#
+# Nothing is armed in the first seconds of a fresh tick, by definition. AGE is
+# in hours, from inspect(); MONITOR_GRACE_SECONDS is in seconds.
+tick_outlived_monitor_grace() {
+  [[ "$AGE" != "None" ]] || return 1
+  awk "BEGIN{exit !($AGE * 3600 > $MONITOR_GRACE_SECONDS)}"
+}
+
+# Stop every tick and start nothing. THE ONE BRANCH THAT DOES NOT RESTART.
+#
+# A tick restarted against a harness that rejects the Monitor call arms nothing
+# again, and the next fire does it again: a slow machine turned into a thrashing
+# one. The trigger is a changed tool contract, which no restart repairs.
+#
+# What an operator does next is in docs/specs/2026-09-22-monitor-liveness-design.md:
+# correct the call in SKILL.md, then start the tick again.
+halt_foreman() {
+  log "HALTING foreman: $MONITOR_STALE_REASON"
+  log "a board with no armed Monitor runs at heartbeat speed and says nothing;"
+  log "this does NOT restart, because a restart would arm nothing again."
+  log "correct the Monitor call in skills/board/SKILL.md, then run: supervise.sh --resume"
+  # THE MARKER IS WRITTEN BEFORE THE STOP, not after. A stop that hangs or fails
+  # would otherwise leave the machine with a live tick and no marker, and the
+  # next cron fire would judge it healthy and carry on -- a halt that logged
+  # itself and changed nothing. Written first, a failed stop is a halted machine
+  # with one tick still to kill by hand, which is what the log below says.
+  #
+  # `|| log` and not `|| die`: a home that cannot be written is not a reason to
+  # skip the stop. It is a reason to say the halt will not survive this process.
+  mkdir -p "$(dirname -- "$FOREMAN_HALT")" 2>/dev/null || true
+  {
+    printf '%s foreman halted by supervise.sh\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    printf '%s\n' "$MONITOR_STALE_REASON"
+    printf 'A board whose Monitor is not armed runs at heartbeat speed and says nothing.\n'
+    printf 'Correct the Monitor call in skills/board/SKILL.md, then run: supervise.sh --resume\n'
+  } >"$FOREMAN_HALT" \
+    || log "ERROR: cannot write $FOREMAN_HALT; the next cron fire will start a tick again"
+  # A stop that will not land is reported, not died on. Under `set -e` a failing
+  # last command in this branch would abort the script before anything said why,
+  # and the operator would read a halt that printed no outcome at all.
+  stop_ticks \
+    || log "ERROR: $TICK_AGENT_NAME is still live as: $(surviving_tick_ids), ${TICK_STOP_TIMEOUT_SECONDS}s after being asked to stop. Stop it by id; foreman is meant to be down."
+}
+
 # Reasons to (re)start, most specific first. Each prints why, because a watchdog
 # that restarts silently is indistinguishable from one that does nothing.
 #
@@ -915,6 +1108,12 @@ elif [[ "$STATE" == "working" && "$IDLE" != "None" ]] \
 elif [[ "$IDLE" != "None" ]] && awk "BEGIN{exit !($IDLE > $TICK_DEAD_MINUTES)}"; then
   log "$TICK_AGENT_NAME loop stopped rescheduling: idle ${IDLE}m (> ${TICK_DEAD_MINUTES}m)"
   repair_tick
+# AFTER the liveness branches above: a tick that is not running cannot have
+# armed anything, and halting for that would hide the real fault. BEFORE the
+# starved and recycle branches, because both of those restart, and a machine
+# whose edge-trigger is gone must stop rather than cycle.
+elif tick_outlived_monitor_grace && monitor_stale_board; then
+  halt_foreman
 # After the liveness checks, because those need no network call and a tick they
 # replace is judged afresh next fire. Before the age recycle, so the log names
 # the starved board rather than calling the restart routine.

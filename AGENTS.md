@@ -65,6 +65,7 @@
 | Make skills resolvable | `bin/install-skills.sh` | assuming the install directory is searched |
 | View a diagram | `bin/render-diagram.sh <file.md>` | committing the render |
 | Check a plan is a graph | `bin/check-plan-graph.py --max-label-chars <N> <file>` | reading the plan by eye, or the checker's default budget over a target that sets its own |
+| Start ticking again after foreman halted itself | `skills/board/supervise.sh --resume` | `--restart`, which refuses while `$FOREMAN_HOME/HALT` is there; read the marker first |
 | Restart the tick, leaving cards alone | `skills/board/supervise.sh --restart` | `systemctl --user restart foreman.service`; it finds a healthy tick |
 | Update foreman to the latest release | `bin/self-update.sh` | `git -C ~/.foreman/install pull` by hand; the tick keeps running the code it started with, so the machine reports healthy while running a version nobody chose |
 | Cut a release foreman follows | `bin/release.sh` (CI runs it on a push to `main`) | assuming a merge deploys; it does, so a commit that should not ship needs the marker below |

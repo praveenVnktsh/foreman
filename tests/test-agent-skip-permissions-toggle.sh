@@ -78,6 +78,10 @@ git_q -C "$target" push -q origin main
 
 home="$work_dir/home"
 fixture_add_instance "$home" demo "$target"
+# A fresh monitor.stamp. dispatch.sh (Task 4) refuses to dispatch while any
+# board's Monitor stamp is stale or missing, and this file is testing
+# AGENT_SKIP_PERMISSIONS, not that gate.
+fixture_arm_monitor "$home/.foreman" demo
 
 argv_log="$work_dir/argv.log"
 name_log="$work_dir/agent-name.log"
@@ -119,6 +123,11 @@ echo "do the thing" > "$prompt_file"
 
 run_dispatch() { # AGENT_SKIP_PERMISSIONS=<value or unset via ''-marker>, ticket
   local value="$1" ticket="$2"
+  # Re-armed on every call, not only at setup. dispatch.sh (Task 4) reads the
+  # stamp's age with no grace period, and four real (non-dry-run) dispatches in
+  # a row -- each cutting its own git worktree -- can outrun
+  # MONITOR_STALE_SECONDS between the first call and the last.
+  fixture_arm_monitor "$home/.foreman" demo
   : >"$argv_log"
   # A name left over from the previous dispatch would let the stubbed registry
   # answer for an agent this one never spawned.

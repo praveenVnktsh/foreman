@@ -288,6 +288,8 @@ PAGE = r"""<!doctype html>
   <span class="dim" id="at"></span>
 </header>
 
+<div id="halt"></div>
+
 <h2>Stuck</h2>
 <div id="problems"></div>
 
@@ -344,6 +346,19 @@ function render(d) {
   $("tick").style.color = t.running ? "" : "var(--crit)";
   $("at").textContent = d.at || "";
 
+  // ABOVE EVERY BOARD ROW, because a machine halt stops all of them at once
+  // and is worse news than any one board being parked. Rendered from
+  // --overview's own machine_halt; this file derives nothing.
+  const halt = d.machine_halt || {};
+  $("halt").innerHTML = halt.halted
+    ? `<div class="row crit"><span class="tag">halted</span>
+        foreman is HALTED by ${esc(halt.marker || "a marker")}; no tick runs and
+        no board dispatches
+        <code class="fix">${esc(halt.reason
+          || (halt.readable ? "no reason recorded" : "the marker is unreadable"))}</code>
+        <code class="fix">skills/board/supervise.sh --resume</code></div>`
+    : "";
+
   const probs = d.problems || [];
   $("problems").innerHTML = probs.length
     ? probs.map((p) => `<div class="row ${esc(p.severity)}">
@@ -379,6 +394,12 @@ function render(d) {
       <b>${esc(b.name)}</b>
       <span class="pill">${b.slots_held || 0} in flight</span>
       ${b.halted ? '<span class="pill" style="color:var(--warn)">halted</span>' : ""}
+      ${(() => {
+        const mon = b.monitor || {};
+        if (!mon.stale) return "";
+        const age = mon.present ? `${Math.round(mon.age_seconds)}s stale` : "never";
+        return `<span class="pill" style="color:var(--crit)">no live Monitor (${esc(age)})</span>`;
+      })()}
       <span class="dim"> · served ${ago(b.last_served_seconds)} ago · ${b.cards_total || 0} cards on disk</span>
       ${rows.length ? `<div class="wrap"><table>
         <tr><th>card</th><th>agent</th><th>last</th><th>idle</th></tr>

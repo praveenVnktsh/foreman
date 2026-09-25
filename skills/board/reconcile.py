@@ -48,6 +48,7 @@ def _load_config() -> dict[str, str]:
         "DEPLOY_WORKFLOW", "DEPLOY_STEP", "DEPLOY_SELECTION_STEP", "CI_WORKFLOW",
         "INSTANCE",
         "FOREMAN_HOME", "HOST_SLOT_STALE_MINUTES", "DEMAND_STALE_MINUTES",
+        "MONITOR_STALE_SECONDS", "MONITOR_HALT_SECONDS", "MONITOR_GRACE_SECONDS",
         "HARNESS_SH", "TICK_AGENT_NAME",
         "FOREMAN_DEFAULT_HARNESS", "FOREMAN_HARNESSES",
         "BOARD_NAME_PREFIX", "BOARD_WORKTREE_PREFIX",
@@ -1333,6 +1334,141 @@ def cards_holding_slots(cards_dir: str, stale_minutes: float | None) -> list[str
             if card_holds_slot(os.path.join(cards_dir, t, "history.jsonl"), stale_minutes)]
 
 
+# THE TWO WINDOWS, AND WHY THERE ARE TWO. config.sh derives both and states the
+# arithmetic; this file only applies them. MONITOR_STALE_SECONDS is
+# dispatch.sh's, which runs inside a pass moments after the tick armed that
+# pass's Monitors. MONITOR_HALT_SECONDS is supervise.sh's, which fires from cron
+# at an arbitrary moment -- including the heartbeat wait, where a capped Monitor
+# has already expired on a perfectly healthy machine.
+#
+# A MISSING VALUE IS A BROKEN CONFIG, not a default to invent. A literal fallback
+# here was silently wrong the moment an operator changed WATCH_POLL_SECONDS: the
+# reader would hold 60 while the watcher stamped every 240, and every board on
+# the machine would read dead forever. config.sh always prints both, so an empty
+# one means _load_config's contract broke and that is worth saying out loud.
+def _monitor_window(key: str) -> float:
+    raw = _CFG.get(key) or ""
+    try:
+        return float(raw)
+    except ValueError:
+        raise SystemExit(
+            f"reconcile: config.sh gave no usable {key} ({raw!r}); "
+            "the monitor gates cannot be evaluated"
+        )
+
+
+MONITOR_STALE_SECONDS = _monitor_window("MONITOR_STALE_SECONDS")
+MONITOR_HALT_SECONDS = _monitor_window("MONITOR_HALT_SECONDS")
+
+
+def _stamp_window(path: str, default: float) -> float:
+    """The staleness window the process that wrote `path` was actually polling at.
+
+    TWO PROCESSES, ONE POLL, AND NOTHING MADE THEM AGREE. watch-agents.py reads
+    WATCH_POLL_SECONDS from the tick session's environment; config.sh derives
+    this window from whatever environment its reader happens to have, which for
+    supervise.sh is cron's -- no profile, no exports. An operator who set
+    WATCH_POLL_SECONDS=60 in a shell profile got a watcher stamping every 60s
+    and a supervisor demanding one every 60s, which is a permanent halt of a
+    healthy machine.
+
+    THE STAMP CARRIES THE ANSWER. watch-agents.py writes the poll it is using
+    into the file, so the window is derived from the writer's own value and the
+    two cannot disagree. A stamp without the line is one an older
+    watch-agents.py wrote, and it falls back to the caller's window.
+
+    The clamp is config.sh's, spelled the same way and for the same reason: four
+    polls is narrower than the worst case of one poll plus the 30s registry-read
+    timeout whenever the poll is 10s or less.
+    """
+    try:
+        with open(path) as fh:
+            body = fh.read()
+    except OSError:
+        return default
+    for line in body.splitlines():
+        if line.startswith("poll="):
+            try:
+                poll = float(line[len("poll="):].strip())
+            except ValueError:
+                return default
+            if poll <= 0:
+                return default
+            return max(poll * 4, poll + 60)
+    return default
+
+
+def monitor_stamps(foreman_home: str = FOREMAN_HOME) -> dict:
+    """Is every declared board's agent Monitor alive right now?
+
+    ONE DERIVATION, THREE READERS. dispatch.sh refuses on a stale stamp,
+    supervise.sh stops the tick on one, and bin/dashboard.py shows it. Spelling
+    the rule once is why `--host-slots` exists in this file rather than in each
+    caller, and this answers the same shape of question over the same local
+    files.
+
+    A MISSING STAMP IS STALE, never absent. A board that never armed a Monitor
+    is the fault this exists to catch; reporting it as "no answer" would let a
+    caller skip the gate, which is how the slot ceilings were once disabled with
+    nothing on stderr.
+
+    A HALTED BOARD IS REPORTED AND NEVER COUNTED. SKILL.md tells the tick to arm
+    one Monitor for every board that is NOT halted, so a halted board's stamp
+    goes stale within minutes of `boardctl halt` -- by design. Counting it made
+    `ok` false, and `ok` is machine-wide: halting one board refused every
+    dispatch on every other board and then halted foreman itself. The board
+    stays in `boards` with `halted: true` so the dashboard can still show it.
+
+    AN EMPTY ROSTER READS ok, DELIBERATELY. `ok = not stale` over zero
+    unhalted boards is True, and that is the right answer rather than an
+    oversight: a machine with no unhalted board has no Monitor to arm and no
+    board to dispatch to, and failing this gate closed would stop a tick that is
+    idle exactly as the operator asked. What it does NOT cover is dispatching to
+    a halted board -- nothing here would catch that, and nothing here should:
+    the tick skips a halted board before it sources anything of that board's.
+
+    RAISES BoardsUnreadable when boards.toml will not load, exactly as
+    host_slots() does. A roster nobody can read must never read as a machine
+    with nothing to check.
+    """
+    now = time.time()
+    boards = {}
+    for board in declared_boards(foreman_home):
+        path = os.path.join(foreman_home, "instances", board, "monitor.stamp")
+        halted = board_is_halted(foreman_home, board)
+        stale_window = _stamp_window(path, MONITOR_STALE_SECONDS)
+        halt_window = max(stale_window, MONITOR_HALT_SECONDS)
+        try:
+            age = now - os.path.getmtime(path)
+        except OSError:
+            boards[board] = {
+                "age_seconds": None, "stale": not halted, "halt": not halted,
+                "present": False, "halted": halted,
+                "stale_seconds": stale_window, "halt_seconds": halt_window,
+            }
+            continue
+        boards[board] = {
+            "age_seconds": round(age, 1),
+            "stale": (not halted) and age > stale_window,
+            "halt": (not halted) and age > halt_window,
+            "present": True,
+            "halted": halted,
+            "stale_seconds": stale_window,
+            "halt_seconds": halt_window,
+        }
+    stale = sorted(n for n, b in boards.items() if b["stale"])
+    halt = sorted(n for n, b in boards.items() if b["halt"])
+    return {
+        "boards": boards,
+        "stale": stale,
+        "ok": not stale,
+        "stale_seconds": MONITOR_STALE_SECONDS,
+        "halt": halt,
+        "halt_ok": not halt,
+        "halt_seconds": MONITOR_HALT_SECONDS,
+    }
+
+
 def host_slots(stale_minutes: float | None = HOST_SLOT_STALE_MINUTES) -> dict:
     """Cards holding a slot, across every DECLARED board of this machine.
 
@@ -1570,6 +1706,41 @@ def board_is_halted(foreman_home: str, board: str) -> bool:
     access `host_slots()` already makes to every board's `cards/`.
     """
     return os.path.exists(os.path.join(foreman_home, "instances", board, "HALT"))
+
+
+def machine_halt(foreman_home: str = FOREMAN_HOME) -> dict:
+    """Whether `supervise.sh` has halted the WHOLE machine, and what it said.
+
+    A file check on `$FOREMAN_HOME/HALT`, in this process, exactly as
+    `board_is_halted()` checks a board's own marker. Nothing is sourced: a
+    halted machine's config is the last thing a watcher should run.
+
+    `machine_halted` and not `halted`, because every board row already carries
+    a `halted` of its own and a reader who confused the two would read one
+    parked board as a stopped machine.
+
+    TOLERANT, like every other field in the picture. A home that cannot be
+    reached reports not halted, and a marker that cannot be read reports halted
+    with no reason: "I could not read why" is still a stopped machine, and
+    raising here would render as a blank page.
+    """
+    path = os.path.join(foreman_home, "HALT")
+    try:
+        halted = os.path.exists(path)
+    except OSError:
+        return {"halted": False, "marker": path, "reason": "", "readable": False}
+    if not halted:
+        return {"halted": False, "marker": path, "reason": "", "readable": False}
+    # UNREADABLE AND EMPTY ARE DIFFERENT ANSWERS, and the page says so. Folding
+    # them into one empty string made an empty-but-readable marker render as
+    # "the marker is unreadable", which sends the operator looking for a
+    # permissions fault that is not there.
+    try:
+        with open(path, encoding="utf-8", errors="replace") as handle:
+            reason = handle.read().strip()
+    except OSError:
+        return {"halted": True, "marker": path, "reason": "", "readable": False}
+    return {"halted": True, "marker": path, "reason": reason, "readable": True}
 
 
 # A cleanup agent is not a card, so it is dispatched under the ticket
@@ -2728,19 +2899,33 @@ STUCK_CARD_SECONDS = 4 * 3600
 STALE_TICK_SECONDS = 90 * 60
 
 
-def _problems(tick: dict, boards: list[dict], machine: dict) -> list[dict]:
+def _problems(tick: dict, boards: list[dict], machine: dict,
+              halt: dict | None = None) -> list[dict]:
     """The "is anything stuck" band: everything wrong, worst first.
 
     EVERY ENTRY NAMES WHAT TO DO. A dashboard that says "something is wrong"
     and stops is a dashboard that gets checked once. The fix is prose, not a
     button: this file reports and the operator acts, the same separation
     supervise.sh keeps between the watchdog and the dispatcher.
+
+    `halt` is the machine-wide halt, because a halted machine has no tick and
+    the fix for that is not the same command. More than the page reads these
+    entries, so the banner bin/dashboard.py draws is no substitute for getting
+    the string right here.
     """
     out = []
+    halted = bool((halt or {}).get("halted"))
     if not tick.get("running"):
+        # A HALTED MACHINE GETS THE COMMAND THAT WORKS. `supervise.sh` refuses
+        # while the marker exists, so offering it here sends the operator to a
+        # second dead end -- the machine says HALTED and they are no further on.
         out.append({"severity": "critical", "kind": "tick-down",
-                    "detail": "no tick is running; no board is being walked",
-                    "fix": "skills/board/supervise.sh"})
+                    "detail": ("foreman is halted, so no tick is running and no "
+                               "board is being walked")
+                              if halted else
+                              "no tick is running; no board is being walked",
+                    "fix": "skills/board/supervise.sh --resume" if halted
+                           else "skills/board/supervise.sh"})
     elif (tick.get("age_seconds") or 0) > STALE_TICK_SECONDS:
         out.append({"severity": "warning", "kind": "tick-stale",
                     "detail": f"the tick has been up {_ago(tick['age_seconds'])} "
@@ -2895,6 +3080,13 @@ def overview(with_remote: bool = False) -> dict:
         priorities = board_priorities(FOREMAN_HOME)
     except BoardsUnreadable:
         pass
+    # TOLERANT, like every other field here: a roster that will not load is
+    # reported, never raised. bin/dashboard.py renders a failed --overview as a
+    # problem, and a crash would render as nothing at all.
+    try:
+        monitors = monitor_stamps()["boards"]
+    except BoardsUnreadable:
+        monitors = {}
 
     for name in names:
         cards_dir = os.path.join(FOREMAN_HOME, "instances", name, "cards")
@@ -2909,6 +3101,13 @@ def overview(with_remote: bool = False) -> dict:
         boards.append({
             "name": name,
             "halted": board_is_halted(FOREMAN_HOME, name),
+            # A board missing from monitors defaults to stale, not absent: a
+            # board that armed nothing is the fault this feature exists to catch.
+            "monitor": monitors.get(
+                name,
+                {"present": False, "stale": True, "halt": True,
+                 "halted": False, "age_seconds": None},
+            ),
             "priority": priorities.get(name),
             "slots_held": slots.get(name, 0),
             "last_served": served.strftime(CARD_LOG_STAMP) if served else None,
@@ -2927,6 +3126,11 @@ def overview(with_remote: bool = False) -> dict:
         "at": now.strftime(CARD_LOG_STAMP),
         "tick": tick,
         "machine": machine,
+        # TOP-LEVEL, beside the tick and not inside a board, because a halted
+        # machine stops every board and the page has to say so once and above
+        # them all. Without it a halted machine reads "no tick running" here,
+        # which is the same invisible state the halt exists to report.
+        "machine_halt": machine_halt(FOREMAN_HOME),
         "boards": boards,
         "agents": agents,
         "agents_finished": finished,
@@ -2946,7 +3150,7 @@ def overview(with_remote: bool = False) -> dict:
             "fix": '"$HARNESS_SH" list',
         }]
         return picture
-    problems = _problems(tick, boards, machine)
+    problems = _problems(tick, boards, machine, picture["machine_halt"])
     if roster_error:
         problems.insert(0, {"severity": "critical", "kind": "roster-unreadable",
                             "detail": roster_error, "fix": "bin/boardctl list"})
@@ -3002,6 +3206,7 @@ def main(argv: list[str]) -> int:
         print("usage: reconcile.py <TICKET> [TICKET...]\n"
               "       reconcile.py --main-ci [BRANCH]\n"
               "       reconcile.py --host-slots\n"
+              "       reconcile.py --monitor-stamps\n"
               "       reconcile.py --board-order\n"
               "       reconcile.py --overview [--with-remote]\n"
               "       reconcile.py --served <board>\n"
@@ -3160,6 +3365,16 @@ def main(argv: list[str]) -> int:
         # whole machine, over local files only, and must not require the
         # agent registry (which is per-process, not per-instance) to answer it.
         json.dump(host_slots(), sys.stdout, indent=2)
+        print()
+        return 0
+    if argv[0] == "--monitor-stamps":
+        # Local files only, like --host-slots: a gate that needed the network to
+        # answer would fail open on every rate limit.
+        try:
+            json.dump(monitor_stamps(), sys.stdout, indent=2)
+        except BoardsUnreadable as exc:
+            print(f"reconcile: {exc}", file=sys.stderr)
+            return 2
         print()
         return 0
     agents = load_agents()

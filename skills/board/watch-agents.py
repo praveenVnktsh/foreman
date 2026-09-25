@@ -6,7 +6,12 @@ back wakes the board immediately instead of the board discovering it on a poll
 several minutes later.
 
     Monitor(command="~/.foreman/install/skills/board/watch-agents.py",
-            persistent=True, description="board agents finishing")
+            persistent=True, timeout_ms=1800000,
+            description="board agents finishing")
+
+`timeout_ms` is required even when `persistent` is true, and `persistent`
+itself exists only up to Claude Code 2.1.228 -- 2.1.275 removed it. SKILL.md
+carries the version note; this is the copy a reader of this file sees.
 
 TWO RULES MAKE THIS SAFE.
 
@@ -63,6 +68,51 @@ HARNESS_SH = reconcile.HARNESS_SH
 # `foreman/<instance>` -- config.sh decides which, and this process only reads
 # it. See _dispatched() for how a captured name is held against it.
 BOARD_NAME_PREFIX = reconcile.BOARD_NAME_PREFIX
+
+# PROOF THAT A MONITOR IS ARMED. This process runs only while one is alive, so
+# its own execution is the fact worth recording. The tick cannot report this:
+# asked whether it armed a Monitor it reports intent, and a call rejected by a
+# newer harness reports armed just as readily. The harness cannot report it
+# either -- a Monitor lives inside the session and nothing persists it.
+#
+# Read by reconcile.py --monitor-stamps, and through it by dispatch.sh,
+# supervise.sh and bin/dashboard.py. The mtime is what those read; the first
+# line is for a human who opens the file, and the `poll=` line is the one fact
+# a reader cannot get any other way -- see stamp().
+STAMP_PATH = os.path.join(reconcile.BOARD_HOME, "monitor.stamp")
+
+
+def stamp() -> None:
+    """Refresh STAMP_PATH. Called on every poll, including the seeding one.
+
+    WRITTEN VIA A TEMPORARY AND RENAMED, so a reader never sees a half-written
+    file and mistakes a truncated stamp for a corrupt one. os.replace is atomic
+    within a directory.
+
+    A FAILURE HERE IS SWALLOWED, and that is not the same as ignored. The watch
+    must keep emitting: its wakeups are useful even when the stamp is not
+    writable. The gates then halt foreman on the stale stamp, which is the
+    correct outcome -- a board whose runtime directory cannot be written is not
+    a board that should be dispatching.
+    """
+    try:
+        tmp = f"{STAMP_PATH}.tmp"
+        with open(tmp, "w") as fh:
+            fh.write(time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()) + "\n")
+            # THE POLL TRAVELS WITH THE STAMP, because nothing else carries it
+            # between these two processes. This one reads WATCH_POLL_SECONDS
+            # from the tick session's environment; config.sh derives the
+            # staleness window from whatever environment ITS reader has, and
+            # supervise.sh's is cron's -- no profile, no exports. An operator
+            # who set WATCH_POLL_SECONDS=60 in a shell profile therefore got a
+            # watcher stamping every 60s and a supervisor demanding one every
+            # 60s: a permanent halt of a healthy machine. Written here, the
+            # window is derived from the value actually in use.
+            fh.write(f"poll={POLL_SECONDS}\n")
+        os.replace(tmp, STAMP_PATH)
+    except OSError:
+        pass
+
 
 # foreman/[<installation>/]<instance>/<TICKET>/<role>-<attempt>. The
 # installation segment is optional because the legacy installation's names
@@ -155,9 +205,17 @@ def poll() -> dict[str, str]:
 
 
 def main() -> int:
+    stamp()
     seen = poll()          # seed silently
     while True:
         time.sleep(POLL_SECONDS)
+        # BEFORE the poll and BEFORE the empty-poll skip below, for two
+        # reasons. A board with no dispatched agents polls empty and `continue`s
+        # -- stamping after that would read an idle board as an unarmed one and
+        # stop the machine. And a registry read that hangs takes up to its own
+        # 30s timeout, so stamping first bounds the gap between stamps at
+        # WATCH_POLL_SECONDS + 30 = 45s, inside MONITOR_STALE_SECONDS of 75.
+        stamp()
         now = poll()
         if not now:
             continue
