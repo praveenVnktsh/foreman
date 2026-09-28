@@ -1,12 +1,15 @@
 #!/usr/bin/env bash
-# Claim: tests/run-all.sh passes in an environment that holds a board's values,
-# the way every card agent's does.
+# Claim: the six tests that read a board's values pass in an environment that
+# holds one, the way every card agent's does -- through tests/run-all.sh, and
+# run directly with `bash`.
 #
 # dispatch.sh pins FOREMAN_INSTANCE, FOREMAN_CONFIG_INSTANCE and every name in
 # FOREMAN_BOARD_EXPORTS into a card agent's environment (PRA-517). Measured
-# 2026-09-25: with those inherited, run-all.sh exited 1 on a correct build, and
-# the four tests named below were exactly the ones that failed. CI runs with a
-# clean environment, so only this test shows the leak there.
+# 2026-09-25: with those inherited, run-all.sh exited 1 on a correct build
+# (PRA-575). Measured 2026-09-28: the six tests named below failed run directly,
+# because only run-all.sh cleared the board (PRA-586). Each now sources
+# tests/lib/without-board.sh. CI runs with a clean environment, so only this
+# test shows the leak there.
 set -uo pipefail
 
 # This test runs run-all.sh, so a run-all.sh that ignores the names it is given
@@ -48,17 +51,35 @@ for name in $declared; do
   esac
 done
 
+env_reading_tests=(
+  test-tmp-dir.sh
+  test-config-resolves-instance.sh
+  test-brief-uses-the-contract.sh
+  test-preflight-fetches-only-to-gate.sh
+  test-sweep-reaps-leaked-evidence-refs.sh
+  test-evidence-reads-are-fresh.sh
+)
+
 out="$work/run-all.out"
 if env "${stale_env[@]}" SUITE_IGNORES_BOARD_NESTED=1 bash "$repo_root/tests/run-all.sh" \
-    test-tmp-dir.sh \
-    test-config-resolves-instance.sh \
-    test-brief-uses-the-contract.sh \
-    test-preflight-fetches-only-to-gate.sh >"$out" 2>&1; then
-  ok "run-all.sh passes the four env-reading tests under a stale board"
+    "${env_reading_tests[@]}" >"$out" 2>&1; then
+  ok "run-all.sh passes the six env-reading tests under a stale board"
 else
   bad "run-all.sh failed under a stale board's environment"
   grep -E 'FAIL|^==' "$out" >&2
 fi
+
+# An agent iterating on one test runs it the usual way, not through run-all.sh.
+# Each must clear the board itself, or it fails on a correct build.
+for name in "${env_reading_tests[@]}"; do
+  out="$work/direct-$name.out"
+  if env "${stale_env[@]}" bash "$repo_root/tests/$name" >"$out" 2>&1; then
+    ok "$name passes run directly under a stale board"
+  else
+    bad "$name failed run directly under a stale board"
+    grep -E 'FAIL|contract:' "$out" >&2
+  fi
+done
 
 # A named test that does not exist must refuse, not pass having run nothing.
 if SUITE_IGNORES_BOARD_NESTED=1 bash "$repo_root/tests/run-all.sh" test-no-such-test.sh >/dev/null 2>&1; then

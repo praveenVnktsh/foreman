@@ -23,6 +23,9 @@
 # those words are the check, not leftover prose, but everything else in this
 # file is ordinary prose and stays covered by that scan.
 set -euo pipefail
+# Run directly, too, in a card agent: clear the board it inherits (PRA-586).
+# shellcheck source=lib/without-board.sh
+source "$(dirname -- "${BASH_SOURCE[0]}")/lib/without-board.sh"
 
 here="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 root="$(dirname -- "$here")"
