@@ -11,28 +11,12 @@
 # FOREMAN_BOARD_EXPORTS into a card agent's environment (PRA-517), and config.sh
 # is environment-wins. Measured 2026-09-25 in a foreman card agent: four tests
 # read those values as if an operator had set them, and this suite exited 1 on a
-# correct build. CI runs with a clean environment, so it never showed.
+# correct build. CI runs with a clean environment, so it never showed. The lib
+# clears them here, and every test inherits the cleared environment.
 set -uo pipefail
 here="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
-config_sh="$(dirname "$here")/skills/board/config.sh"
-
-# The names come from config.sh's declaration, never a copy here: a copy misses
-# the next name added there. Parsed, not sourced, because sourcing config.sh
-# needs a declared board and CI has none. An empty list would let the leak back
-# in without a word, so anything but exactly one non-empty declaration refuses.
-exports="$(sed -n 's/^FOREMAN_BOARD_EXPORTS="\([^"]*\)"$/\1/p' "$config_sh" 2>/dev/null)"
-if [[ -z "$exports" || "$exports" == *$'\n'* ]]; then
-  printf 'run-all: cannot read one FOREMAN_BOARD_EXPORTS="..." line from %s\n' "$config_sh" >&2
-  exit 1
-fi
-unset_args=(-u FOREMAN_INSTANCE -u FOREMAN_CONFIG_INSTANCE)
-for name in $exports; do
-  if [[ ! "$name" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]]; then
-    printf 'run-all: FOREMAN_BOARD_EXPORTS in %s names %q, not a variable\n' "$config_sh" "$name" >&2
-    exit 1
-  fi
-  unset_args+=(-u "$name")
-done
+# shellcheck source=lib/without-board.sh
+source "$here/lib/without-board.sh"
 
 tests=()
 if [[ $# -eq 0 ]]; then
@@ -50,9 +34,9 @@ fi
 fail=0
 for t in "${tests[@]}"; do
   printf '\n== %s\n' "$(basename "$t")"
-  env "${unset_args[@]}" bash "$t" || fail=1
+  bash "$t" || fail=1
 done
 if [[ $# -eq 0 ]]; then
-  env "${unset_args[@]}" bash "$(dirname "$here")/bin/check-syntax.sh" || fail=1
+  bash "$(dirname "$here")/bin/check-syntax.sh" || fail=1
 fi
 exit "$fail"

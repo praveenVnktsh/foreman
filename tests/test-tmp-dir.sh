@@ -19,6 +19,9 @@
 # would return the real path, not the sentinel, and fail here.
 
 set -euo pipefail
+# Run directly, too, in a card agent: clear the board it inherits (PRA-586).
+# shellcheck source=lib/without-board.sh
+source "$(dirname -- "${BASH_SOURCE[0]}")/lib/without-board.sh"
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 script="$repo_root/bin/tmp-dir.sh"
