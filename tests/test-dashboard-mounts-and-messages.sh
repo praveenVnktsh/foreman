@@ -154,7 +154,9 @@ ok "every path a computed base can produce is answered"
 # =============================================================================
 # Case: a message reaches the tick's inbox
 # =============================================================================
-send() { curl -s -X POST --data-binary "$1" "http://127.0.0.1:$port${2:-/message}"; }
+# The header is what the page sends; tests/test-dashboard-refuses-foreign-pages.sh
+# covers a POST without it.
+send() { curl -s -X POST -H 'X-Foreman-Dashboard: 1' --data-binary "$1" "http://127.0.0.1:$port${2:-/message}"; }
 
 queued="$(send "look at the stuck card again" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("queued",""))')"
 if [[ -n "$queued" ]] && [[ -f "$home/inbox/$queued" ]]; then

@@ -230,4 +230,26 @@ grep -q 'no tracked shell or Python sources' "$work_dir/out.log" ||
   fail "an empty repository failed for the wrong reason"
 echo "  ok: zero coverage is a failure, not a pass"
 
+# CI's bash is 5, where these parse; macOS ships 3.2, where they fail at run
+# time. `bash -n` on CI cannot tell, so the checker has to.
+echo "==> a bash 4 construct fails, naming the file and line; prose about one does not"
+bash4_ok=1
+# Each construct is spelled in two quoted pieces so this file, which the
+# checker also reads, does not carry the construct itself.
+for construct in 'map''file -t lines <f' 'read''array lines' 'declare -''A seen' 'local -''A seen' \
+                 'echo "$''{name,,}"' 'echo "$''{name^^}"' 'ls |''& cat'; do
+  repo="$(new_repo "bash4-$RANDOM")"
+  printf '#!/usr/bin/env bash\necho ok\n%s\n' "$construct" > "$repo/a.sh"
+  track "$repo"
+  if run_checker "$repo" || ! grep -q 'a.sh:3:' "$work_dir/out.log"; then
+    echo "  not caught: $construct" >&2; bash4_ok=0
+  fi
+done
+[[ "$bash4_ok" == 1 ]] || fail "a bash 4 construct passed the check"
+repo="$(new_repo bash4-comment)"
+printf '#!/usr/bin/env bash\n# no map''file here, and no declare -''A either\necho "${#a[@]}" || true\n' > "$repo/a.sh"
+track "$repo"
+run_checker "$repo" || fail "a comment about a bash 4 construct was rejected"
+echo "  ok: bash 4 is refused in code and allowed in comments"
+
 echo "PASS: syntax errors fail the build, and zero coverage is not a pass"

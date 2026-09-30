@@ -19,7 +19,7 @@
 # would return the real path, not the sentinel, and fail here.
 
 set -euo pipefail
-# Run directly, too, in a card agent: clear the board it inherits (PRA-586).
+# Run directly, too, in a card agent: clear the board it inherits.
 # shellcheck source=lib/without-board.sh
 source "$(dirname -- "${BASH_SOURCE[0]}")/lib/without-board.sh"
 
@@ -48,6 +48,9 @@ new_checkout() {
   echo "$dir"
 }
 
+# The bare derivation below is the one with no board and no home named.
+unset FOREMAN_HOME
+
 echo "==> the no-argument form names the checkout the script is committed to"
 checkout="$(new_checkout board-PRA-1)"
 expect "$HOME/.foreman/tmp/board-PRA-1" "$("$checkout/bin/tmp-dir.sh")" "own checkout"
@@ -69,6 +72,23 @@ expect "/elsewhere/tmp/board-PRA-1" \
 expect "/scratch" \
   "$(FOREMAN_TMP_ROOT=/scratch BOARD_HOME=/elsewhere "$checkout/bin/tmp-dir.sh" --root)" \
   "FOREMAN_TMP_ROOT wins over BOARD_HOME"
+
+# THE REAPER'S DIRECTORY. config.sh hands BOARD_HOME=$FOREMAN_HOME/instances/<board>
+# and sweep.sh reaps under it. An agent running this bare used to get
+# ~/.foreman/tmp, which nothing reaps.
+echo "==> FOREMAN_HOME and FOREMAN_INSTANCE name the directory sweep.sh reaps"
+expect "/fh/tmp/board-PRA-1" \
+  "$(FOREMAN_HOME=/fh "$checkout/bin/tmp-dir.sh")" "FOREMAN_HOME"
+expect "/fh/instances/demo/tmp/board-PRA-1" \
+  "$(FOREMAN_HOME=/fh FOREMAN_INSTANCE=demo "$checkout/bin/tmp-dir.sh")" "FOREMAN_INSTANCE"
+expect "$HOME/.foreman/instances/demo/tmp" \
+  "$(FOREMAN_INSTANCE=demo "$checkout/bin/tmp-dir.sh" --root)" "FOREMAN_INSTANCE with the default home"
+expect "/elsewhere/tmp" \
+  "$(FOREMAN_HOME=/fh FOREMAN_INSTANCE=demo BOARD_HOME=/elsewhere "$checkout/bin/tmp-dir.sh" --root)" \
+  "BOARD_HOME wins, as config.sh passes it"
+status=0
+FOREMAN_INSTANCE=../escape "$checkout/bin/tmp-dir.sh" >/dev/null 2>&1 || status=$?
+[[ "$status" -eq 2 ]] || fail "a FOREMAN_INSTANCE that is not a board name: expected exit 2, got $status"
 
 echo "==> an unrecognized option is refused, not read as a worktree"
 status=0

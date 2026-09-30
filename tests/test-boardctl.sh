@@ -206,6 +206,11 @@ fi
 
 # =============================================================================
 # Case: remove reverts boards.toml when the result would still not parse
+#
+# A malformed board elsewhere -- here an unknown key -- is a file nobody can
+# load, and removing a different board does not change that. (Another board's
+# MISSING repository is not this: tests/test-boardctl-serves-one-board-while-
+# another-is-broken.sh proves remove goes ahead over that.)
 # =============================================================================
 home7="$(new_home)"
 good7="$(new_target)"
@@ -216,8 +221,8 @@ repo = "$good7"
 
 [boards.stale]
 repo = "$stale7"
+team = "typo"
 TOML
-rm -rf "$stale7"
 before7="$(cat "$home7/boards.toml")"
 
 status=0

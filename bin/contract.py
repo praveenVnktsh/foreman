@@ -32,7 +32,15 @@ still sets the key -- a warning nobody would read.
 from __future__ import annotations
 
 import sys
-import tomllib
+
+# tomllib arrived in Python 3.11. On an older interpreter the import below
+# died with a ModuleNotFoundError traceback that names the module, not the
+# fix. Checked inline in each loader, not in a shared module: tests and
+# installs copy these files one by one, and a sibling import would break them.
+if sys.version_info < (3, 11):
+    sys.stderr.write("foreman needs Python 3.11+ (found %s)\n" % sys.version.split()[0])
+    raise SystemExit(2)
+import tomllib  # noqa: E402
 
 # (key, toml path, default). A default of None marks the entry REQUIRED.
 #

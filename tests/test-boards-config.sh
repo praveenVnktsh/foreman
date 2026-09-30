@@ -190,6 +190,34 @@ TOML
 refuses "a board name outside [A-Za-z0-9_] is refused, naming it" \
   "alpha-x" --file "$work/hyphen.toml" --list
 
+# `$` in a Python regex also matches before a trailing newline, so a quoted
+# key "alpha\n" used to pass the name check as if it were alpha.
+cat >"$work/newline.toml" <<TOML
+[boards."alpha\n"]
+repo = "$work/repo_alpha"
+TOML
+refuses "a board name with a trailing newline is refused" \
+  "invalid" --file "$work/newline.toml" --list
+
+# ONE BOARD ASKED ABOUT, ONE BOARD CHECKED. alpha's repository is gone; beta's
+# lookup must still answer, because `boardctl halt beta` and every config.sh
+# for beta go through it. --list is the roster and still refuses.
+mkdir -p "$work/repo_gone"
+cat >"$work/onebroken.toml" <<TOML
+[boards.alpha]
+repo = "$work/repo_gone"
+
+[boards.beta]
+repo = "$work/repo_beta"
+TOML
+rmdir "$work/repo_gone"
+check "a single-board lookup answers while another board's repo is missing" \
+  "$work/repo_beta" "$(read_key REPO --file "$work/onebroken.toml" beta)"
+refuses "the broken board's own lookup still refuses, naming its repo" \
+  "$work/repo_gone" --file "$work/onebroken.toml" alpha
+refuses "--list still refuses a roster with a missing repo" \
+  "$work/repo_gone" --file "$work/onebroken.toml" --list
+
 cat >"$work/notatable.toml" <<TOML
 [boards]
 alpha = "$work/repo_alpha"

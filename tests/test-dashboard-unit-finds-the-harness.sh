@@ -109,12 +109,13 @@ else
   not_ok "a backtick inside the unit heredoc will be executed at install time"
 fi
 
-# Every unescaped $NAME is expanded. Only the three the unit actually needs may
-# be there; anything else is prose that will silently become empty.
+# Every unescaped $NAME is expanded. Only the four the unit actually needs may
+# be there; anything else is prose that will silently become empty. $HOSTS is
+# the names the page is published under, which dashboard.py checks Host against.
 live="$(printf '%s' "$heredoc" | grep -oE '(^|[^\\])\$[A-Za-z_][A-Za-z0-9_]*' \
   | grep -oE '\$[A-Za-z_][A-Za-z0-9_]*' | sort -u | tr '\n' ' ')"
-if [[ "$live" == "\$DASHBOARD \$FOREMAN_HOME \$PORT " ]]; then
-  ok "the heredoc expands exactly the three values the unit needs"
+if [[ "$live" == "\$DASHBOARD \$FOREMAN_HOME \$HOSTS \$PORT " ]]; then
+  ok "the heredoc expands exactly the four values the unit needs"
 else
   not_ok "the heredoc expands more than it means to: $live"
 fi

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Fast-forward foreman's clone to the latest GitHub Release and restart
-# its tick. A merge to main reaches a machine only when bin/release.sh cuts a
+# its tick, and its dashboard when one is installed. A merge to main reaches a machine only when bin/release.sh cuts a
 # release. FOREMAN_UPDATE_REF=origin/<branch> overrides that to track a ref.
 #
 #   self-update.sh --dry-run   say what it would do, change nothing
@@ -39,14 +39,23 @@ die() { printf 'self-update: %s\n' "$*" >&2; exit 1; }
 #
 # FOREMAN_SELF_UPDATE_ROOT carries the install root across the exec, because
 # the copy's own $0 is in a temp directory and can no longer derive it.
-if [[ -z "${FOREMAN_SELF_UPDATE_ROOT:-}" ]]; then
+#
+# IT IS TRUSTED ONLY WITH ITS PROOF. FOREMAN_SELF_UPDATE_COPY names the copy
+# that was made, and only the process running that copy has it as $0. The
+# root alone used to be enough, and it leaked: supervise.sh inherited it, so
+# the tick and every agent it spawned carried it. A later self-update run from
+# that environment skipped the copy-out, ran from the clone itself, and its
+# EXIT trap deleted bin/self-update.sh. Both are unset below, before anything
+# is spawned.
+if [[ -z "${FOREMAN_SELF_UPDATE_ROOT:-}" || "${FOREMAN_SELF_UPDATE_COPY:-}" != "$0" ]]; then
   HERE="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
   copy="$(mktemp)" || die "mktemp failed; cannot copy this script out of the clone"
   cat -- "${BASH_SOURCE[0]}" >"$copy" || die "could not copy this script to $copy"
-  FOREMAN_SELF_UPDATE_ROOT="$(dirname -- "$HERE")" \
+  FOREMAN_SELF_UPDATE_ROOT="$(dirname -- "$HERE")" FOREMAN_SELF_UPDATE_COPY="$copy" \
     exec bash "$copy" "$@"
 fi
 INSTALL_ROOT="$FOREMAN_SELF_UPDATE_ROOT"
+unset FOREMAN_SELF_UPDATE_ROOT FOREMAN_SELF_UPDATE_COPY
 trap 'rm -f -- "$0"' EXIT
 
 MODE="${1:-run}"
@@ -196,7 +205,11 @@ if [[ -n "$UPDATE_REF" ]]; then
 else
   command -v gh >/dev/null 2>&1 \
     || die "gh is required to follow releases; set FOREMAN_UPDATE_REF=origin/<branch> to track a ref instead"
-  FETCH_REF="$(cd -- "$INSTALL_ROOT" && gh release list --limit 1 --json tagName --jq '.[0].tagName // ""' 2>/dev/null)" \
+  # DRAFTS AND PRE-RELEASES ARE NOT RELEASES a machine follows. A bare
+  # `--limit 1` answered with whichever was newest, so a draft someone was
+  # still writing deployed to every machine on its next fire.
+  FETCH_REF="$(cd -- "$INSTALL_ROOT" && gh release list --exclude-drafts --exclude-pre-releases \
+                 --limit 1 --json tagName --jq '.[0].tagName // ""' 2>/dev/null)" \
     || die "gh release list failed; is gh installed and authenticated (run gh auth status)? Nothing was changed."
   if [[ -z "$FETCH_REF" ]]; then
     printf 'self-update: foreman follows releases and none exists yet; nothing to do.\n'
@@ -210,6 +223,55 @@ GIT_TERMINAL_PROMPT=0 \
   git_ro fetch --quiet origin "$FETCH_REF" \
   || die "git fetch $SOURCE failed or timed out; expected a reachable origin and a credential usable with no terminal. Nothing was changed."
 
+# THE PENDING MARKER: an update whose clone moved but whose restart did not
+# finish. The fast-forward comes first, so an install-skills.sh or restart
+# that failed used to leave HEAD at the target -- and the next fire said
+# "nothing to do" while the tick ran the old code for ever. The marker is
+# written before the fast-forward and removed only when every step after it
+# has succeeded, so the next fire finishes the job.
+PENDING="$FOREMAN_HOME/self-update-pending"
+
+# The dashboard, when bin/install-dashboard.sh installed it. It runs the
+# clone's code as long as the tick does, so an update that restarts only the
+# tick leaves the page answering from the old code.
+DASHBOARD_UNIT="foreman-dashboard.service"
+
+dashboard_installed() {
+  command -v systemctl >/dev/null 2>&1 \
+    && systemctl --user is-enabled --quiet "$DASHBOARD_UNIT" 2>/dev/null
+}
+
+# finish_update <from> <to> <relink yes|no> -- every step after the
+# fast-forward, then the marker goes. Run by a fresh update and by a fire that
+# finds the marker.
+finish_update() {
+  local from="$1" to="$2" relink="$3" dashboard="not installed"
+  if [[ "$relink" == "yes" ]]; then
+    "$INSTALL_ROOT/bin/install-skills.sh" \
+      || die "at $to, but install-skills.sh failed. The tick was NOT restarted; it is still running $from. The next fire retries."
+  fi
+  if dashboard_installed; then
+    systemctl --user restart "$DASHBOARD_UNIT" \
+      || die "at $to, but restarting $DASHBOARD_UNIT failed. The tick was NOT restarted. The next fire retries."
+    dashboard="restarted"
+  fi
+  # supervise.sh --restart replaces the tick and leaves in-flight cards alone.
+  # It is the only correct way to pick up new code: `systemctl --user restart`
+  # on the watchdog finds a healthy tick and leaves it running the code it
+  # started with, which is the failure AGENTS.md's "What to use" table names.
+  #
+  # FOREMAN_HOME is the only variable it needs from here, exactly as the unit
+  # bin/install-service.sh writes passes it.
+  FOREMAN_HOME="$FOREMAN_HOME" "$SUPERVISE" --restart \
+    || die "at $to, but supervise.sh --restart failed. The tick may still be running $from. The next fire retries."
+  rm -f -- "$PENDING"
+  printf 'self-update: foreman %s -> %s; skills relinked: %s; dashboard: %s; tick restarted.\n' \
+    "$from" "$to" "$relink" "$dashboard"
+}
+
+# pending_field <name> -- one `name value` line of the marker.
+pending_field() { sed -n "s/^$1 //p" "$PENDING" | head -1; }
+
 OLD="$(git_ro rev-parse HEAD)"
 # `^{commit}` peels the annotated tag a release points at, so OLD and NEW are
 # both commits and the ancestry test below is about code, not tag objects.
@@ -221,8 +283,35 @@ NEW_SHORT="$(git_ro rev-parse --short "$NEW")"
 # that restarted on every fire would kill and respawn the tick every few
 # minutes forever, and a board whose tick is always seconds old looks healthy
 # while getting nothing done.
+#
+# Unless the marker says the last update never finished: then this fire
+# finishes it, from the marker's record of where the tick started.
 if [[ "$OLD" == "$NEW" ]]; then
-  printf 'self-update: foreman is already at %s; nothing to do.\n' "$OLD_SHORT"
+  if [[ ! -f "$PENDING" ]]; then
+    printf 'self-update: foreman is already at %s; nothing to do.\n' "$OLD_SHORT"
+    exit 0
+  fi
+  FROM="$(pending_field from)"; RELINK="$(pending_field relink)"
+  if [[ -n "$DRY" ]]; then
+    printf 'self-update: would finish the interrupted update %s -> %s (relink: %s)\n' \
+      "${FROM:-?}" "$OLD_SHORT" "${RELINK:-yes}"
+    exit 0
+  fi
+  printf 'self-update: the update %s -> %s did not finish; finishing it now.\n' "${FROM:-?}" "$OLD_SHORT"
+  # An unreadable relink field reruns install-skills.sh: relinking twice is
+  # harmless, and a missing skill link is a board that cannot find its skill.
+  [[ "$RELINK" == "no" ]] || RELINK="yes"
+  finish_update "${FROM:-unknown}" "$OLD_SHORT" "$RELINK"
+  exit 0
+fi
+
+# AHEAD IS NOT AN ERROR. A clone with commits past the latest release -- one
+# an operator fast-forwarded by hand, or a release cut from an older commit --
+# used to fail every fire as "not a descendant". Nothing is lost by waiting
+# for the next release, so it is nothing to do.
+if git_ro merge-base --is-ancestor "$NEW" "$OLD"; then
+  printf 'self-update: foreman at %s is ahead of %s (%s); nothing to do.\n' \
+    "$OLD_SHORT" "$SOURCE" "$NEW_SHORT"
   exit 0
 fi
 
@@ -250,29 +339,30 @@ if [[ -n "$DRY" ]]; then
   else
     printf 'would not run install-skills.sh; the set of skills is unchanged\n'
   fi
+  dashboard_installed && printf 'would run: systemctl --user restart %s\n' "$DASHBOARD_UNIT"
   printf 'would run: %s --restart\n' "$SUPERVISE"
   exit 0
 fi
 
-git_ro merge --ff-only "$NEW" >/dev/null \
-  || die "the fast-forward to $NEW_SHORT failed; see the error above. The clone is unchanged."
+RELINK="no"
+[[ "$SKILLS_BEFORE" != "$SKILLS_AFTER" ]] && RELINK="yes"
 
-RELINKED="no"
-if [[ "$SKILLS_BEFORE" != "$SKILLS_AFTER" ]]; then
-  "$INSTALL_ROOT/bin/install-skills.sh" \
-    || die "fast-forwarded to $NEW_SHORT, but install-skills.sh failed. The tick was NOT restarted; it is still running $OLD_SHORT."
-  RELINKED="yes"
+# A marker left by an earlier unfinished update keeps its `from`: that is
+# still the code the tick runs.
+FROM="$OLD_SHORT"
+if [[ -f "$PENDING" ]]; then
+  FROM="$(pending_field from)"; FROM="${FROM:-$OLD_SHORT}"
+  [[ "$(pending_field relink)" == "no" ]] || RELINK="yes"
+fi
+mkdir -p "$FOREMAN_HOME"
+printf 'from %s\nto %s\nrelink %s\n' "$FROM" "$NEW_SHORT" "$RELINK" >"$PENDING" \
+  || die "could not write $PENDING; nothing was changed."
+
+if ! git_ro merge --ff-only "$NEW" >/dev/null; then
+  # The clone did not move, so nothing is pending -- unless an earlier update
+  # left the marker, and then it is still owed.
+  [[ "$FROM" != "$OLD_SHORT" ]] || rm -f -- "$PENDING"
+  die "the fast-forward to $NEW_SHORT failed; see the error above. The clone is unchanged."
 fi
 
-# supervise.sh --restart replaces the tick and leaves in-flight cards alone.
-# It is the only correct way to pick up new code: `systemctl --user restart`
-# on the watchdog finds a healthy tick and leaves it running the code it
-# started with, which is the failure AGENTS.md's "What to use" table names.
-#
-# FOREMAN_HOME is the only variable it needs from here, exactly as the unit
-# bin/install-service.sh writes passes it.
-FOREMAN_HOME="$FOREMAN_HOME" "$SUPERVISE" --restart \
-  || die "fast-forwarded to $NEW_SHORT, but supervise.sh --restart failed. The clone is updated and the tick may still be running $OLD_SHORT."
-
-printf 'self-update: foreman %s -> %s; skills relinked: %s; tick restarted.\n' \
-  "$OLD_SHORT" "$NEW_SHORT" "$RELINKED"
+finish_update "$FROM" "$NEW_SHORT" "$RELINK"

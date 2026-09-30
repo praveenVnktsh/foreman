@@ -1,9 +1,16 @@
 #!/usr/bin/env bash
-# Cut a GitHub Release of origin/main -- the thing installations follow.
+# Cut a GitHub Release of a commit on origin/main -- the thing installations
+# follow.
 #
 #   release.sh --dry-run          say what it would cut, change nothing
 #   release.sh                    tag origin/main and publish a release
 #   release.sh --version v1.2.3   name the tag (default vYYYY.MM.DD)
+#   release.sh --sha <sha>        release <sha>, not main's head (or RELEASE_SHA)
+#
+# WHICH COMMIT. .github/workflows/release.yml runs this after CI passes and
+# passes the commit CI ran on as RELEASE_SHA. Main may have moved on by then,
+# and releasing main's head would ship a commit no CI run passed. The commit
+# must be on origin/main; anything else is refused.
 #
 # A MERGE TO MAIN DOES NOT DEPLOY. An installation's bin/self-update.sh polls
 # the LATEST RELEASE and fast-forwards to its tag, so a merge reaches it only
@@ -24,14 +31,19 @@ ROOT="$(dirname -- "$HERE")"
 VERSION=""
 DRY=""
 FORCE=""
+SHA="${RELEASE_SHA:-}"
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --dry-run) DRY=1; shift ;;
     --force) FORCE=1; shift ;;
     --version) [[ $# -ge 2 ]] || die "--version needs a value"; VERSION="$2"; shift 2 ;;
-    *) die "unknown argument: $1 (expected --dry-run, --force or --version <tag>)" ;;
+    --sha) [[ $# -ge 2 ]] || die "--sha needs a value"; SHA="$2"; shift 2 ;;
+    *) die "unknown argument: $1 (expected --dry-run, --force, --version <tag> or --sha <sha>)" ;;
   esac
 done
+if [[ -n "$SHA" && ! "$SHA" =~ ^[0-9a-f]{7,40}$ ]]; then
+  die "--sha (or RELEASE_SHA) must be a hex commit id, got '$SHA'"
+fi
 
 git -C "$ROOT" rev-parse --git-dir >/dev/null 2>&1 \
   || die "$ROOT is not a git repository"
@@ -42,31 +54,63 @@ GIT_SSH_COMMAND="ssh -o BatchMode=yes -o ConnectTimeout=15 -o ServerAliveInterva
 GIT_TERMINAL_PROMPT=0 \
   git -C "$ROOT" fetch --quiet origin main \
   || die "git fetch origin main failed or timed out"
-NEW="$(git -C "$ROOT" rev-parse FETCH_HEAD)"
+MAIN="$(git -C "$ROOT" rev-parse FETCH_HEAD)"
+if [[ -z "$SHA" ]]; then
+  NEW="$MAIN"
+else
+  NEW="$(git -C "$ROOT" rev-parse --verify --quiet "$SHA^{commit}")" \
+    || die "commit $SHA is not in this clone; expected a commit on origin/main"
+  git -C "$ROOT" merge-base --is-ancestor "$NEW" "$MAIN" \
+    || die "commit $SHA is not on origin/main; only main's commits are released"
+fi
 NEW_SHORT="$(git -C "$ROOT" rev-parse --short "$NEW")"
 SUBJECT="$(git -C "$ROOT" log -1 --format=%s "$NEW")"
 
 # A COMMIT CAN OPT OUT OF RELEASING ITSELF. `.github/workflows/release.yml`
-# runs this script on every push to main, so a merge releases unless its commit
-# says otherwise. A head commit with a line of its own reading `[skip release]`
-# or `Release: skip` is not released: this exits 0 without cutting, which the
+# runs this script after CI passes on main, so a merge releases unless it says
+# otherwise. A commit with a line of its own reading `[skip release]` or
+# `Release: skip` is not released: this exits 0 without cutting, which the
 # Action reads as a successful no-op. --force cuts it anyway, and a manual
 # `release.sh --version` on a DIFFERENT commit is unaffected -- the marker is on
 # the commit being released, not a blanket switch.
 #
-# THE MARKER MUST BE A WHOLE LINE, and that is not a detail. A squash merge puts
-# the pull request BODY in the commit, so a looser match fires on any prose that
-# mentions the marker -- which is exactly what happened to this feature's own
-# first release, when its PR description explained `Release: skip`. A trailer on
-# its own line is deliberate; a sentence about it is not.
-if [[ -z "$FORCE" ]] \
-   && git -C "$ROOT" log -1 --format=%B "$NEW" \
-      | grep -qiE '^[[:space:]]*(\[skip release\]|release:[[:space:]]*skip)[[:space:]]*$'; then
+# THE MARKER MUST BE A WHOLE LINE, and that is not a detail. A looser match
+# fires on any prose that mentions the marker -- which is exactly what
+# happened to this feature's own first release, when its PR description
+# explained `Release: skip`. A trailer on its own line is deliberate; a
+# sentence about it is not.
+skip_marked() {
+  grep -qiE '^[[:space:]]*(\[skip release\]|release:[[:space:]]*skip)[[:space:]]*$'
+}
+
+# THE PULL REQUEST'S BODY COUNTS TOO. This repository's squash message is the
+# branch's commit messages, not the PR body, so a marker written in the PR --
+# where AGENTS.md says to put it -- never reached the commit and the merge
+# released anyway. gh fills {owner}/{repo} from this clone's remote. A lookup
+# that fails refuses: releasing a commit that asked not to be is the one
+# outcome this check exists to prevent.
+pr_bodies() {
+  ( cd "$ROOT" && gh api "repos/{owner}/{repo}/commits/$NEW/pulls" --jq '.[].body // ""' )
+}
+
+MARKED=""
+if [[ -z "$FORCE" ]]; then
+  if git -C "$ROOT" log -1 --format=%B "$NEW" | skip_marked; then
+    MARKED="its commit message"
+  else
+    BODIES="$(pr_bodies)" \
+      || die "could not read the pull request for $NEW_SHORT (gh api .../commits/$NEW/pulls); nothing cut"
+    if printf '%s\n' "$BODIES" | skip_marked; then
+      MARKED="its pull request"
+    fi
+  fi
+fi
+if [[ -n "$MARKED" ]]; then
   if [[ -n "$DRY" ]]; then
-    printf 'release: %s is marked do-not-release; would cut nothing (--force overrides).\n' "$NEW_SHORT"
+    printf 'release: %s is marked do-not-release in %s; would cut nothing (--force overrides).\n' "$NEW_SHORT" "$MARKED"
     exit 0
   fi
-  printf 'release: %s is marked do-not-release; nothing cut (--force overrides).\n' "$NEW_SHORT"
+  printf 'release: %s is marked do-not-release in %s; nothing cut (--force overrides).\n' "$NEW_SHORT" "$MARKED"
   exit 0
 fi
 

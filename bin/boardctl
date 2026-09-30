@@ -145,12 +145,16 @@ nul_fields() {
   rm -f "$1"
 }
 
-# board_names -- every board bin/boards.py knows about, or an empty list if
-# boards.toml does not exist yet.
+# board_names -- every board boards.toml declares, or an empty list if it does
+# not exist yet.
+#
+# `--names`, not `--list`: --list checks every board's repository, so one
+# board on an unmounted disk made `list` and `forget` refuse for all of them.
+# Each board's own repository is checked where it is used.
 board_names() {
   fields=()
   [[ -f "$boards_toml" ]] || return 0
-  boards_py_call --list
+  boards_py_call --names
   nul_fields "$reply"
 }
 
@@ -178,6 +182,53 @@ board_repo() {
   # fields = REPO, <repo>, KEY_FILE, <key_file> -- see bin/boards.py's emit().
   [[ ${#fields[@]} -ge 2 ]] || die "bin/boards.py returned no REPO for '$name'"
   printf '%s' "${fields[1]}"
+}
+
+# board_lookup <name> -- sets `lookup_repo` to <name>'s REPO, or leaves it
+# empty and sets `lookup_error` to what bin/boards.py refused with. Never dies.
+#
+# For the callers that must go on when one board will not load: `remove`, for
+# which an unmounted repository is one of the reasons to run it, and `list`,
+# which reports that board and carries on with the rest. board_repo dies
+# instead, and dying inside $(...) under `set -e` exits the whole script with
+# the message thrown away -- which is how `remove` of such a board used to
+# exit 1 with nothing said, --force or not.
+board_lookup() {
+  local out err
+  lookup_repo=""; lookup_error=""
+  out="$(mktemp)"; err="$(mktemp)"
+  if "$boards_py" "$1" >"$out" 2>"$err"; then
+    nul_fields "$out"
+    [[ ${#fields[@]} -ge 2 ]] && lookup_repo="${fields[1]}"
+  else
+    lookup_error="$(cat "$err")"
+    rm -f "$out"
+  fi
+  rm -f "$err"
+  [[ -n "$lookup_repo" || -n "$lookup_error" ]] || lookup_error="bin/boards.py returned no REPO for '$1'"
+  return 0
+}
+
+# declared_case_insensitively <name> -- true if boards.toml declares a board
+# whose name equals <name> ignoring case.
+#
+# On a case-insensitive filesystem (macOS by default) instances/ALPHA IS
+# instances/alpha, so `forget ALPHA` used to pass the "not declared" check and
+# delete the live board alpha's history.
+declared_case_insensitively() {
+  [[ -f "$boards_toml" ]] || return 1
+  grep -qixF "[boards.$1]" "$boards_toml"
+}
+
+# exact_instance_entry <name> -- true if instances/ holds an entry spelled
+# exactly <name>, byte for byte. `[[ -d ]]` alone answers true for any casing
+# on a case-insensitive filesystem.
+exact_instance_entry() {
+  local entry
+  for entry in "$FOREMAN_HOME"/instances/*; do
+    [[ "$(basename -- "$entry")" == "$1" ]] && return 0
+  done
+  return 1
 }
 
 # ORPHAN HELPERS. An orphan is a directory under instances/ that boards.toml
@@ -245,9 +296,13 @@ repo_leftovers() {
 # here ever leaves a bad <tmp> where a later read could find it -- a
 # boards.toml that does not parse breaks EVERY board on the machine, not just
 # the one whose write triggered this.
+#
+# <check> is the boards.py question to ask of <tmp>: `--list` checks every
+# board's repository too, `--names` only that the file parses and every board
+# is well-formed.
 revert_unless_valid() {
-  local tmp="$1" message="$2" err_out
-  if ! err_out="$("$boards_py" --file "$tmp" --list 2>&1 >/dev/null)"; then
+  local tmp="$1" message="$2" check="$3" err_out
+  if ! err_out="$("$boards_py" --file "$tmp" "$check" 2>&1 >/dev/null)"; then
     rm -f "$tmp"
     die "$message: $err_out"
   fi
@@ -324,7 +379,7 @@ cmd_add() {
   } >>"$tmp"
 
   revert_unless_valid "$tmp" \
-    "boards.toml would not parse after adding '$name'; nothing written"
+    "boards.toml would not parse after adding '$name'; nothing written" --list
   mv -f "$tmp" "$boards_toml"
 
   printf 'boardctl: board %s added, serving %s\n' "$name" "$repo"
@@ -343,10 +398,14 @@ cmd_remove() {
   raw_board_declared "$name" || die "no board named '$name' in $boards_toml"
 
   # THE REPOSITORY IS READ BEFORE THE DECLARATION GOES, because the declaration
-  # is where it is written. `|| true`: a board whose boards.toml entry will not
-  # load (an unmounted repo path) must still be removable -- that is one of the
-  # reasons to remove it.
-  local repo=""; repo="$(board_repo "$name" 2>/dev/null || true)"
+  # is where it is written. A board whose entry will not load (an unmounted
+  # repo path) must still be removable -- that is one of the reasons to remove
+  # it -- so a refusal here leaves the repository unknown and is said aloud.
+  board_lookup "$name"
+  local repo="$lookup_repo"
+  if [[ -n "$lookup_error" ]]; then
+    printf 'boardctl: %s; its repository is not checked for leftovers\n' "$lookup_error" >&2
+  fi
 
   # STRANDED STATE REFUSES THE REMOVAL. `sweep.sh` is the only thing that reaps
   # a board's worktrees and evidence refs, and it refuses a board boards.toml
@@ -379,8 +438,10 @@ Then remove it. Use --force to remove anyway and strand the above."
     { print }
   ' "$boards_toml" >"$tmp"
 
+  # `--names`: removing one block cannot break another board's repository,
+  # and a board elsewhere whose disk is unmounted must not pin this one in.
   revert_unless_valid "$tmp" \
-    "removing '$name' would leave boards.toml unparseable; nothing written"
+    "removing '$name' would leave boards.toml unparseable; nothing written" --names
   mv -f "$tmp" "$boards_toml"
 
   local inst; inst="$(instance_home "$name")"
@@ -418,11 +479,13 @@ cmd_forget() {
   [[ $# -eq 1 ]] || usage
   local name="$1"
   validate_name "$name"
-  if raw_board_declared "$name"; then
-    die "board $name is still declared in $boards_toml; remove it first"
+  if declared_case_insensitively "$name"; then
+    die "board $name (compared ignoring case) is still declared in $boards_toml; remove it first"
   fi
   local inst; inst="$(instance_home "$name")"
   [[ -d "$inst" ]] || die "no runtime directory for '$name' at $inst"
+  exact_instance_entry "$name" \
+    || die "no runtime directory spelled exactly '$name' under $FOREMAN_HOME/instances; this filesystem ignores case, and $inst is another board's"
 
   # Named before it goes, because this is not recoverable and the line is the
   # only record an operator gets.
@@ -439,23 +502,35 @@ cmd_forget() {
 
 cmd_list() {
   board_names
-  local name
-  for name in ${fields[@]+"${fields[@]}"}; do
-    printf '%s\t%s\n' "$name" "$(board_repo "$name")"
-  done | sort
+  local name names=() roster="" broken=0
+  names=(${fields[@]+"${fields[@]}"})
+  # EVERY BOARD IS LISTED, a broken one with what is wrong with it. `list` is
+  # where an operator looks to find the broken one, so it may not refuse
+  # because of it; it exits 1 afterwards so a script still sees the failure.
+  for name in ${names[@]+"${names[@]}"}; do
+    board_lookup "$name"
+    if [[ -n "$lookup_error" ]]; then
+      roster+="$name"$'\t'"unloadable: $lookup_error"$'\n'
+      broken=1
+    else
+      roster+="$name"$'\t'"$lookup_repo"$'\n'
+    fi
+  done
+  [[ -z "$roster" ]] || printf '%s' "$roster" | sort
 
   # ORPHANS AFTER THE ROSTER, and only when there are any. They are not boards
   # -- nothing dispatches into them and the machine ceiling does not count them
   # -- but they are this command's to surface, because it is the only one that
   # reads the whole of instances/ and they are otherwise invisible.
   orphan_names
-  [[ ${#fields[@]} -gt 0 ]] || return 0
+  [[ ${#fields[@]} -gt 0 ]] || return "$broken"
   printf '\norphaned runtime directories (no declaration; `boardctl forget <name>` deletes one):\n'
   local repo
   for name in "${fields[@]}"; do
     repo="$(removed_repo "$name")"
     printf '%s\t%s\n' "$name" "${repo:-repository unrecorded}"
   done | sort
+  return "$broken"
 }
 
 cmd_status() {
