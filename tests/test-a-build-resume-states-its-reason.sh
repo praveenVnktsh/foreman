@@ -59,7 +59,7 @@ else
 fi
 before="$(resume_row_count RSN-1)"
 dispatch_fixture_resume --ticket RSN-1 --role build --attempt 1
-if grep -q -- '--reason must be ci-fix, fix or retry' "$DISPATCH_RUN_LOG"; then
+if grep -q -- '--reason must be ci-fix, fix, retry or rebuild' "$DISPATCH_RUN_LOG"; then
   ok "a build resume with no --reason is refused"
 else
   bad "a build resume with no --reason is refused"
@@ -70,7 +70,7 @@ is_eq "no resume row was logged for the refused build resume" "$before" "$after"
 
 # --- a build resume with an unknown --reason is refused ---------------------
 dispatch_fixture_resume --ticket RSN-1 --role build --attempt 1 --reason bogus
-if grep -q -- '--reason must be ci-fix, fix or retry' "$DISPATCH_RUN_LOG"; then
+if grep -q -- '--reason must be ci-fix, fix, retry or rebuild' "$DISPATCH_RUN_LOG"; then
   ok "a build resume with an unknown --reason is refused"
 else
   bad "a build resume with an unknown --reason is refused"
@@ -80,7 +80,7 @@ is_eq "no resume row was logged for the unknown reason" "$before" "$(resume_row_
 
 # --- --reason on a fresh (non-resume) dispatch is refused -------------------
 dispatch_fixture_run --ticket RSN-2 --role build --attempt 1 --reason ci-fix
-if grep -q -- '--reason must be ci-fix, fix or retry' "$DISPATCH_RUN_LOG"; then
+if grep -q -- '--reason must be ci-fix, fix, retry or rebuild' "$DISPATCH_RUN_LOG"; then
   ok "--reason on a fresh dispatch is refused"
 else
   bad "--reason on a fresh dispatch is refused"
@@ -94,7 +94,7 @@ fi
 
 # --- --reason with a non-build role is refused, resumed or not -------------
 dispatch_fixture_run --ticket RSN-3 --role plan --attempt 1 --reason ci-fix
-if grep -q -- '--reason must be ci-fix, fix or retry' "$DISPATCH_RUN_LOG"; then
+if grep -q -- '--reason must be ci-fix, fix, retry or rebuild' "$DISPATCH_RUN_LOG"; then
   ok "--reason on a non-build role is refused"
 else
   bad "--reason on a non-build role is refused"
