@@ -302,6 +302,32 @@ else
 fi
 
 # =============================================================================
+# Case: a halted machine is told to --resume, not to run supervise.sh
+# =============================================================================
+# supervise.sh REFUSES while the marker exists, so the ordinary tick-down fix
+# is a second dead end for the one operator who most needs a working command.
+# More than the page reads these entries, so the banner is no substitute.
+home_halt="$(new_home)"
+printf 'halted by supervise.sh\n' >"$home_halt/HALT"
+out_halt="$(run_overview "$home_halt" '[]')"
+if [[ "$(field "$out_halt" 'v["machine_halt"]["halted"]')" == "True" ]] \
+   && [[ "$(field "$out_halt" '[p["fix"] for p in v["problems"] if p["kind"]=="tick-down"]')" \
+         == *"supervise.sh --resume"* ]]; then
+  ok "a halted machine's tick-down fix is the command that works"
+else
+  not_ok "a halted machine's tick-down fix: $(field "$out_halt" '[p for p in v["problems"] if p["kind"]=="tick-down"]')"
+fi
+
+rm -f "$home_halt/HALT"
+out_running="$(run_overview "$home_halt" '[]')"
+if [[ "$(field "$out_running" '[p["fix"] for p in v["problems"] if p["kind"]=="tick-down"]')" \
+      == "['skills/board/supervise.sh']" ]]; then
+  ok "and a machine that is merely down is still told to start a tick"
+else
+  not_ok "an unhalted machine's tick-down fix: $(field "$out_running" '[p["fix"] for p in v["problems"] if p["kind"]=="tick-down"]')"
+fi
+
+# =============================================================================
 # Case: rate-limit stamps are reported under the model's real name
 #
 # fallback.py percent-encodes the filename so a model holding `/` or `:` cannot

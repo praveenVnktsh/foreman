@@ -73,7 +73,18 @@ transcript() { # <sessionId> <old|fresh>
   : >"$transcripts/$1.jsonl"
   [[ "$2" == "old" ]] && touch -t 202609010000 "$transcripts/$1.jsonl"
 }
-reset() { rm -f "$registry"; : >"$stopped"; : >"$started"; }
+# supervise.sh halts the machine, without restarting it, while any declared
+# board's agent Monitor is not alive, and that gate sits ahead of the branch
+# this test drives. Arming every declared board on each scenario keeps the
+# stamps fresh for the whole run, including boards declared partway through.
+arm_monitors() {
+  local dir
+  for dir in "$home/.foreman"/instances/*/; do
+    [[ -d "$dir" ]] || continue
+    fixture_arm_monitor "$home/.foreman" "$(basename "$dir")"
+  done
+}
+reset() { rm -f "$registry"; : >"$stopped"; : >"$started"; arm_monitors; }
 
 mkdir -p "$home/.local/bin"
 cat >"$home/.local/bin/claude" <<STUB

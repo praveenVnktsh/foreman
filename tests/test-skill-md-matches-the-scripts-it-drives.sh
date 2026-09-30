@@ -92,6 +92,10 @@ seed_sha="$(git_q -C "$target" rev-parse HEAD)"
 
 home="$work/home"
 fixture_add_instance "$home" demo "$target"
+# A fresh monitor.stamp. dispatch.sh (Task 4) refuses to dispatch while any
+# board's Monitor stamp is stale or missing, and this file is testing that
+# SKILL.md's own blocks match the scripts they drive, not that gate.
+fixture_arm_monitor "$home/.foreman" demo
 
 # The ids brief.py cleanup pastes into the prompt it writes. bin/resolve-ids.py
 # reads these out of Linear, which nothing in this suite may reach, so the four
