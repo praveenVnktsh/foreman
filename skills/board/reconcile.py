@@ -30,6 +30,7 @@ import re
 import subprocess
 import sys
 import time
+import traceback
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from urllib.parse import unquote
@@ -492,33 +493,35 @@ def branch_for(ticket: str) -> str:
 # a path may hold a tab or a newline.
 _FILES_JQ = '.[] | [.filename, (.previous_filename // "")] | @json'
 
+# The most files the pull request files API lists, however many pages are
+# asked for. GitHub documents the cap and stops there without an error, so a
+# list this long may be a truncated one.
+FILES_API_CAP = 3000
 
-def changed_files(number: int) -> tuple[list[str] | None, list[str]]:
-    """The files a pull request changes, and every path the risk scan reads.
 
-    `(files, scanned)`. `files` is None when neither source could be read,
-    and then `scanned` is empty and means nothing.
+@dataclass(frozen=True)
+class ChangedFiles:
+    """What the risk scan knows about one pull request's diff.
 
-    `gh pr diff --name-only` answers first. It fails for good on some pull
-    requests -- GitHub refuses to render a diff past its size limit -- and a
-    card whose risk stayed `unknown` on every tick never merged and never said
-    why. So a failure falls back to the files API, which pages instead of
-    rendering. That API also names where a renamed file CAME FROM, and the
-    scan reads that path too: moving a file out of a risk path changes that
-    path as much as editing it does.
+    `files` is None when the diff was not read, and `unread` then says why.
+    `scanned` is every path the scan weighs against [risk] paths: each file's
+    path now, plus the path a renamed file came FROM.
     """
-    code, out = run(["gh", "pr", "diff", str(number), "--name-only"], cwd=REPO)
-    if code == 0:
-        files = [f for f in out.splitlines() if f.strip()]
-        return files, files
+    files: list[str] | None
+    scanned: list[str]
+    unread: str = ""
+
+
+def _files_from_api(number: int) -> list[tuple[str, str]] | None:
+    """`(path, previous path)` per changed file, or None when the read failed."""
     code, out = run(
         ["gh", "api", f"repos/{{owner}}/{{repo}}/pulls/{number}/files",
          "--paginate", "--jq", _FILES_JQ],
         cwd=REPO,
     )
     if code != 0:
-        return None, []
-    files, scanned = [], []
+        return None
+    rows = []
     for line in out.splitlines():
         if not line.strip():
             continue
@@ -528,14 +531,66 @@ def changed_files(number: int) -> tuple[list[str] | None, list[str]]:
         try:
             path, previous = json.loads(line)
         except (TypeError, ValueError):
-            return None, []
+            return None
         if not isinstance(path, str) or not isinstance(previous, str) or not path:
-            return None, []
-        files.append(path)
-        scanned.append(path)
-        if previous:
-            scanned.append(previous)
-    return files, scanned
+            return None
+        rows.append((path, previous))
+    return rows
+
+
+def _api_list_is_short(listed: int, reported: object) -> bool:
+    """Whether the files API may have stopped before the end of the diff.
+
+    `reported` is the pull request's own `changedFiles`. When it is a count,
+    it settles the question. When it is missing, a list that reached the cap
+    is taken as cut short, because the API gives no other sign that it was.
+    """
+    if isinstance(reported, int) and not isinstance(reported, bool):
+        return listed < reported
+    return listed >= FILES_API_CAP
+
+
+def changed_files(number: int, reported: object = None) -> ChangedFiles:
+    """The files a pull request changes, and every path the risk scan reads.
+
+    `reported` is the pull request's `changedFiles`, which says whether the
+    files API listed them all.
+
+    THE FILES API ANSWERS FIRST, because it names where a renamed file CAME
+    FROM. `gh pr diff --name-only` lists only the new path, so a migration
+    moved from `db/migrations/` to `archive/` scored `low` and merged on its
+    own: moving a file out of a risk path changes that path as much as editing
+    it does. The API also pages, where `gh pr diff` fails for good on a diff
+    past GitHub's render limit.
+
+    The API stops at FILES_API_CAP files without an error. A list that is
+    shorter than the pull request says is not the diff, so it is unread.
+
+    `gh pr diff --name-only` is the fallback when the API read fails. It sees no
+    renamed-from path, so it is the weaker read, and it is used only because an
+    unread diff parks every card on one failed request.
+    """
+    rows = _files_from_api(number)
+    if rows is not None:
+        if _api_list_is_short(len(rows), reported):
+            return ChangedFiles(None, [], (
+                f"gh api repos/{{owner}}/{{repo}}/pulls/{number}/files listed "
+                f"{len(rows)} files and the pull request reports {reported}; the "
+                f"API stops at {FILES_API_CAP}, so the rest of the diff was never "
+                f"read and this card cannot merge. A person reads the diff "
+                f"against [risk] paths and merges or parks the card"))
+        files = [path for path, _ in rows]
+        return ChangedFiles(files, files + [prev for _, prev in rows if prev])
+    code, out = run(["gh", "pr", "diff", str(number), "--name-only"], cwd=REPO)
+    if code == 0:
+        files = [f for f in out.splitlines() if f.strip()]
+        return ChangedFiles(files, files)
+    return ChangedFiles(None, [], (
+        f"gh api repos/{{owner}}/{{repo}}/pulls/{number}/files and gh pr diff "
+        f"{number} --name-only both failed, so the diff was never read and this "
+        f"card cannot merge. Run either command by hand to see GitHub's error; "
+        f"if it persists, a person reads the diff against [risk] paths and "
+        f"merges or parks the card"))
 
 
 def pr_for(ticket: str) -> dict | None:
@@ -544,7 +599,8 @@ def pr_for(ticket: str) -> dict | None:
         [
             "gh", "pr", "list", "--head", branch, "--state", "all",
             "--json", "number,state,headRefOid,mergeStateStatus,mergeCommit,"
-                      "url,isDraft,title,statusCheckRollup,isCrossRepository",
+                      "url,isDraft,title,statusCheckRollup,isCrossRepository,"
+                      "changedFiles",
         ],
         cwd=REPO,
     )
@@ -622,21 +678,16 @@ def pr_for(ticket: str) -> dict | None:
     # `risk: unknown` is deliberately neither value: step 4 merges only `low`
     # and parks only `high`, so an unknown risk stops the card until the diff
     # can actually be read.
-    files, scanned = changed_files(pr["number"])
-    if files is None:
+    diff = changed_files(pr["number"], pr.get("changedFiles"))
+    if diff.files is None:
         pr["files_changed"] = None
         pr["risk"] = "unknown"
         pr["risk_paths"] = []
-        pr["risk_reason"] = (
-            f"gh pr diff {pr['number']} --name-only and gh api "
-            f"repos/{{owner}}/{{repo}}/pulls/{pr['number']}/files both failed, "
-            f"so the diff was never read and this card cannot merge. Run either "
-            f"command by hand to see GitHub's error; if it persists, a person "
-            f"reads the diff against [risk] paths and merges or parks the card"
-        )
+        pr["risk_reason"] = diff.unread
     else:
-        touched = sorted({p for f in scanned for p in HIGH_RISK_PATHS if f.startswith(p)})
-        pr["files_changed"] = len(files)
+        touched = sorted({p for f in diff.scanned for p in HIGH_RISK_PATHS
+                          if f.startswith(p)})
+        pr["files_changed"] = len(diff.files)
         pr["risk"] = "high" if touched else "low"
         pr["risk_paths"] = touched
 
@@ -2003,8 +2054,55 @@ def build_attempts(entries: list[dict]) -> int:
     return _attempts(entries, "build") + resumes
 
 
+def _plan_round_rows(entries: list[dict]) -> list[str | None]:
+    """What each history row is to `plan_rounds`, in order.
+
+    `resume` is dispatch.sh's own plan resume row, which names its agent.
+    `hand` is a plan resume row the tick wrote by hand, which names none.
+    `respawn` is a fresh plan spawn at an attempt number this card already
+    spawned and never voided. None is any other row.
+
+    A respawn is the fallback SKILL.md step 2 takes when the plan worktree is
+    gone: `--resume` refuses, and the tick dispatches fresh AT THE SAME ATTEMPT
+    NUMBER, because answering the operator must cost no attempt. That writes a
+    spawn row, not a resume row, so a round answered this way used to count as
+    nothing, and MAX_PLAN_ROUNDS never bounded a card whose worktree kept going.
+
+    The attempt number is what tells it from a failed attempt. A plan agent
+    that failed is dispatched again at the NEXT number, which is a new attempt
+    and no round. One the machine killed is dispatched at the same number, but
+    only after a `void` of that number, which `_attempts` reads as "never
+    spawned" -- and so does this.
+    """
+    live: set[str] = set()
+    kinds: list[str | None] = []
+    for e in entries:
+        ev = event_of(e)
+        kind = None
+        if ev.get("role") == "plan":
+            attempt = str(ev.get("attempt"))
+            action = ev.get("action")
+            if action == "resume":
+                kind = "resume" if ev.get("name") else "hand"
+            elif action == "spawn":
+                kind = "respawn" if attempt in live else None
+                live.add(attempt)
+            elif action == "void":
+                live.discard(attempt)
+        kinds.append(kind)
+    return kinds
+
+
+# The pairs of adjacent rows that record ONE round, the first row then the
+# second. A tick following the old prose logged a hand row beside the row
+# dispatch.sh wrote for the same round: after a resume, and before the fresh
+# spawn it fell back to when that resume refused.
+_ONE_ROUND_PAIRS = frozenset({("resume", "hand"), ("respawn", "hand"),
+                              ("hand", "respawn")})
+
+
 def plan_rounds(entries: list[dict]) -> int:
-    """How many times a parked card's agent has been resumed to revise its plan.
+    """How many times a parked card's plan agent has been asked to revise its plan.
 
     Counted from `history.jsonl`, never from agent names -- the same reason
     `build_attempts` gives: `agents_for()` can only ever report the CURRENT
@@ -2014,35 +2112,31 @@ def plan_rounds(entries: list[dict]) -> int:
     number, not a reason a resume happened. History is the only place the
     reason is recorded at all.
 
-    One round is one resume row naming `role: plan`. `dispatch.sh --resume`
-    writes `role` on every resume row it logs, so its own row is the round;
-    the only plan resume the board makes is the one that answers the
-    operator's comments on a parked `needs-plan` card.
+    One round is one of two rows. The usual one is the resume row naming
+    `role: plan` that `dispatch.sh --resume` writes; the only plan resume the
+    board makes is the one that answers the operator's comments on a parked
+    `needs-plan` card. The other is the fresh spawn step 2 falls back to when
+    that resume refuses, which `_plan_round_rows` tells from a new attempt.
 
-    Before that, dispatch.sh wrote a plan resume row with no role, and the
-    tick logged the round by hand:
+    Before dispatch.sh wrote `role` on a resume row, the tick logged the round
+    by hand:
 
         card_log <T> '{"action":"resume","role":"plan","round":"<n>"}'
 
     Those rows still count, so a card parked across the upgrade keeps its
-    rounds. A tick still following the old prose writes its hand row right
-    after dispatch.sh's own; that pair is one round, not two, or the card
-    would reach MAX_PLAN_ROUNDS at half the rounds the operator allowed. A
-    hand row carries no `name`, and dispatch.sh's row always does.
+    rounds. A tick still following the old prose writes its hand row beside
+    dispatch.sh's own; that pair is one round, not two, or the card would
+    reach MAX_PLAN_ROUNDS at half the rounds the operator allowed.
     """
     rounds = 0
-    after_dispatch_row = False
-    for e in entries:
-        ev = event_of(e)
-        if ev.get("action") != "resume" or ev.get("role") != "plan":
-            after_dispatch_row = False
+    previous = None
+    for kind in _plan_round_rows(entries):
+        if kind is not None and (previous, kind) in _ONE_ROUND_PAIRS:
+            previous = None
             continue
-        by_dispatch = bool(ev.get("name"))
-        if not by_dispatch and after_dispatch_row:
-            after_dispatch_row = False
-            continue
-        rounds += 1
-        after_dispatch_row = by_dispatch
+        if kind is not None:
+            rounds += 1
+        previous = kind
     return rounds
 
 
@@ -3596,3 +3690,10 @@ if __name__ == "__main__":
         # dispatch when either of them exits non-zero. Not 1, which
         # `--cleanup-due` spends on "not due".
         _fault(str(exc))
+    except Exception:
+        # A failure nothing above anticipated. Python would exit 1 for it, and
+        # 1 is `--cleanup-due`'s "not due": the tick would skip the cleanup and
+        # report nothing wrong, the fault FAULT_EXIT exists to tell apart. The
+        # traceback still goes to stderr, whole.
+        traceback.print_exc()
+        raise SystemExit(FAULT_EXIT)

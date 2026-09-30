@@ -107,7 +107,9 @@ bin/contract.py board.toml | tr '\0' '\n' | grep -A1 TEST_COMMAND
   `tests/test-no-target-specifics.sh` enforces it.
 - **Do not commit a render.** The mermaid in the markdown is the source.
 - **Do not weaken a gate.** Dispatched agents run with permissions bypassed. What
-  contains them is the throwaway worktree, the required checks, and the review.
+  contains them is the throwaway worktree, the Claude Code deny rules
+  `dispatch.sh` adds per role (they stop editing tools, not programs), the
+  required checks, and the review.
   Risk paths are a per-target gate; this repository leaves it empty by choice,
   not by omission.
 - **Keep this repository's `board.toml` `[risk].paths` empty.** An agent must not

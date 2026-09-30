@@ -19,6 +19,7 @@ handshake the test needs: read one line, and the stub is ready.
       "labels":   [{"id": "...", "name": "..."}, ...],
       "label_id_lies": {"<id>": "<name the round-trip query lies and returns>"},
       "issues":   [{"projectId": "...", "stateId": "...", "identifier": "...", ...}, ...],
+      "labels_page_size": <int, optional>,
       "fail_after": <int, optional>,
       "log": "<path, optional>"
     }
@@ -37,6 +38,13 @@ it). Each response carries `pageInfo.hasNextPage` and `pageInfo.endCursor`.
 A waiting card at index 100 is on page two, which is the page-two fixture.
 starved.py's walk counts as one request per page, so `fail_after: 1` is a
 later-page failure.
+
+`labels_page_size`: pages `query Labels` the way Linear does, at the smaller
+of this and the query's `first`, with the same offset cursor and `pageInfo`
+as the issues connection. Unset, the whole list comes back as one page with
+no `pageInfo`, which is what every scenario written before paging saw.
+resolve-ids.py asks for 250 a page, so a test that wants a label on page two
+sets this small rather than declaring 251 labels.
 
 Every request is routed by matching a fixed substring of its GraphQL document
 against the operation names resolve-ids.py's and starved.py's own query
@@ -84,12 +92,7 @@ def _todo_issues_page(scenario: dict, variables: dict) -> dict:
         for issue in scenario.get("issues", [])
         if issue.get("projectId") == project_id and issue.get("stateId") == state_id
     ]
-    if after in (None, ""):
-        start = 0
-    elif isinstance(after, str) and after.isdigit():
-        start = int(after)
-    else:
-        raise ValueError(f"stub: unreadable TodoIssues cursor {after!r}")
+    start = _cursor_start(after, "TodoIssues")
     page = nodes[start:start + TODO_PAGE_SIZE]
     end = start + len(page)
     return {
@@ -99,6 +102,31 @@ def _todo_issues_page(scenario: dict, variables: dict) -> dict:
             "endCursor": str(end) if page else None,
         },
     }
+
+
+def _labels_page(labels: list, page_size: int, variables: dict) -> dict:
+    """One cursor page of labels, in Linear's labels-connection shape."""
+    first = variables.get("first")
+    size = min(page_size, first) if isinstance(first, int) and first > 0 else page_size
+    start = _cursor_start(variables.get("after"), "Labels")
+    page = labels[start:start + size]
+    end = start + len(page)
+    return {
+        "nodes": page,
+        "pageInfo": {
+            "hasNextPage": end < len(labels),
+            "endCursor": str(end) if page else None,
+        },
+    }
+
+
+def _cursor_start(after: object, operation: str) -> int:
+    """The offset an `after` cursor names; absent or empty is the start."""
+    if after in (None, ""):
+        return 0
+    if isinstance(after, str) and after.isdigit():
+        return int(after)
+    raise ValueError(f"stub: unreadable {operation} cursor {after!r}")
 
 
 def _operation_name(document: str) -> str:
@@ -149,7 +177,10 @@ def main() -> int:
             return {"team": {"states": {"nodes": scenario.get("states", [])}}}
 
         if op == "query Labels":
-            return {"team": {"labels": {"nodes": all_labels()}}}
+            page_size = scenario.get("labels_page_size")
+            if page_size is None:
+                return {"team": {"labels": {"nodes": all_labels()}}}
+            return {"team": {"labels": _labels_page(all_labels(), page_size, variables)}}
 
         if op == "mutation CreateLabel":
             name = variables.get("name")

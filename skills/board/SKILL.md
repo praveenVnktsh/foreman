@@ -223,6 +223,16 @@ Two more things to know about the mode:
   machine. Run bare, it refuses with `FOREMAN_INSTANCE is unset`; the subshell
   above is the fix.
 
+**A non-zero exit from `reconcile.py` is a fault, never an answer**, in every
+mode. Exit 2 (`FAULT_EXIT`) is a config, contract value or `boards.toml` that
+will not load, a board name nobody declared, a usage error, or a failure nothing
+anticipated. Exit 3 is an agent registry it could not read, which the card mode
+and `--cleanup-due` refuse on. Either way the reason is on stderr and nothing is
+on stdout: no order, no slot count, no cards. Name the command, quote stderr in
+the report, and act on nothing that call would have told you. Exit 1 belongs to
+`--cleanup-due` alone, where it means "not due" ([8. Scheduled
+cleanup](#8-scheduled-cleanup)).
+
 **A slice ends at whichever comes first:**
 
 1. **No immediately actionable card.** Everything on this board is waiting on a
@@ -1345,6 +1355,14 @@ is the discriminator and not a timestamp.
     the fallback is a fresh `--role plan` dispatch **at the same attempt
     number**, handed the same `"$D/rp.md"`. Nothing failed here, so answering the
     operator must cost the ticket neither a plan attempt nor a build attempt.
+    **That fallback is still a round, and it is logged for you too.** It writes
+    a `spawn` row, not a `resume` row, and `reconcile.py` counts a plan spawn at
+    an attempt number the card already spawned as a round. The attempt number
+    is the whole signal, so never take the next one here, whatever
+    `dispatch.sh`'s refusal suggests: the next number is a new plan attempt,
+    charged against `MAX_PLAN_ATTEMPTS` and not counted as a round. A plan
+    agent re-dispatched at the same number after a `void` is not a round
+    either, because the `void` says that attempt never ran.
   - **`plan_rounds` has reached `MAX_PLAN_ROUNDS`** → the conversation is not
     converging. To `Needs Human` (`STATE_NEEDS_HUMAN`, matched by id) carrying
     `board-failed`, with the comments quoted, and
@@ -1694,7 +1712,8 @@ place the problem is visible at all.
 **Two numbers say "round", and only one of them bounds the loop.** The `round`
 here is a label on a comment, counted from the footers Linear actually holds.
 `MAX_PLAN_ROUNDS` gates on `reconcile.py`'s `plan_rounds`, counted from the
-card's `history.jsonl` — the board's own record of the resumes it made. They
+card's `history.jsonl` — the board's own record of the resumes it made, and of
+the fresh spawns it fell back to when a resume found no worktree. They
 diverge whenever a post fails after a resume or the operator deletes a plan
 comment, and the one that must bound the work is the board's, because it counts
 work done and a deleted comment cannot reset it.
@@ -1957,8 +1976,12 @@ The file was real, the path was right, and the answer was still false.
 
 ### 4. Merge, split by risk
 
-`reconcile.py` already computed `pr.risk` from `gh pr diff --name-only` — the
-**diff**, never the ticket text.
+`reconcile.py` already computed `pr.risk` from the pull request's files — the
+**diff**, never the ticket text. It reads `gh api
+repos/{owner}/{repo}/pulls/<n>/files` first, because that names the path a
+renamed file came **from**: a migration moved out of its directory changes that
+directory, and `gh pr diff --name-only` lists only where it went. That is the
+fallback when the files API fails.
 
 - **`risk: high`** — the diff touches a path the target declared under
   `board.toml`'s `[risk] paths` (`HIGH_RISK_PATHS` in `reconcile.py`, via
@@ -1972,13 +1995,16 @@ The file was real, the path was right, and the answer was still false.
   ([Who holds a slot](#who-holds-a-slot)). Do this **once**, the first tick a
   card parks; a card already parked with `needs-merge` needs no further action
   here.
-- **`risk: unknown`** — `gh pr diff` failed, so **the diff was never read** and
-  nothing is known about what it touches. Merge nothing. Leave the card where it
-  is, say the diff could not be read, and look again next tick; it usually reads
-  fine on the next one. Do not charge an attempt — this is a failure of the
-  lookup, not of the ticket. This value exists because folding an unreadable
-  diff into an empty file list made it `risk: low`, which is the autonomous
-  merge path — one `gh` blip away from merging a migration nobody read.
+- **`risk: unknown`** — **the diff was never read**, and `pr.risk_reason` says
+  why: both reads failed, or the files API stopped at its 3000-file cap before
+  the diff ended. Nothing is known about what it touches. Merge nothing. Leave
+  the card where it is, quote `risk_reason`, and look again next tick; a failed
+  read usually works on the next one, and a diff past the cap never does, so
+  that one is the operator's to read. Do not charge an attempt — this is a
+  failure of the lookup, not of the ticket. This value exists because folding an
+  unreadable diff into an empty file list made it `risk: low`, which is the
+  autonomous merge path — one `gh` blip away from merging a migration nobody
+  read.
 - **`risk: low`** and no blocking findings and `checks.passing` → merge it.
 
 Everything else merges autonomously: any path the target did not declare in
@@ -2260,10 +2286,12 @@ script reads it from the environment, `config.sh` does not export it, and a
 missing value silently weighs the default instead of this machine's number.
 
 This board is full when its entry under `tickets` has `MAX_CONCURRENT` cards;
-the machine is full when `--may-dispatch` prints a line. Ask immediately before
-each spawn and never reuse a count across a pass: every other board's slice
-dispatches in between. Whatever you counted, `dispatch.sh` counts again and
-refuses if you were wrong — quote its refusal, charge nothing, end the slice.
+the machine is full when `--may-dispatch` prints a line. It prints that line and
+exits 0; a non-zero exit prints nothing on stdout and is a fault, not a free
+machine, so dispatch nothing on it — `dispatch.sh` refuses on it too. Ask
+immediately before each spawn and never reuse a count across a pass: every other
+board's slice dispatches in between. Whatever you counted, `dispatch.sh` counts
+again and refuses if you were wrong — quote its refusal, charge nothing, end the slice.
 
 **Check dependencies before taking anything.** Read each `Todo` card with
 `get_issue(includeRelations: true)` — `list_issues` cannot return relations, so
@@ -2607,12 +2635,16 @@ runs on capacity the cards did not need.
 B=~/.foreman/install/skills/board
 D="${AGENT_TMP_ROOT:?source config.sh first}/dispatch"
 mkdir -p "$D"
-if $B/reconcile.py --cleanup-due <board>; then
-  SINCE="$($B/reconcile.py --cleanup-since <board>)" \
-    && $B/reconcile.py --cleanup-started <board> \
-    && $B/brief.py cleanup --board <board> --since "$SINCE" > "$D/c.md" \
-    && $B/dispatch.sh --ticket cleanup --role cleanup --attempt "$(date -u +%Y%m%d%H%M)" --prompt-file "$D/c.md"
-fi
+DUE_STATUS=0
+DUE="$($B/reconcile.py --cleanup-due <board>)" || DUE_STATUS=$?
+case "$DUE_STATUS" in
+  0) SINCE="$($B/reconcile.py --cleanup-since <board>)" \
+       && $B/reconcile.py --cleanup-started <board> \
+       && $B/brief.py cleanup --board <board> --since "$SINCE" > "$D/c.md" \
+       && $B/dispatch.sh --ticket cleanup --role cleanup --attempt "$(date -u +%Y%m%d%H%M)" --prompt-file "$D/c.md" ;;
+  1) printf 'cleanup not due: %s\n' "$DUE" ;;
+  *) printf 'cleanup-due FAILED (exit %s); its reason is on stderr above\n' "$DUE_STATUS" ;;
+esac
 ```
 
 **The `&&` is load-bearing, because your shell has no `set -e`.** Run those as
@@ -2629,9 +2661,23 @@ Name the command that failed and quote its message in the report, dispatch
 nothing, and do not delete the stamp to retry — `boardctl cleanup <board>` is
 the operator's gesture, not a recovery the tick performs on itself.
 
-**`--cleanup-due` answers with an exit code and a reason**, so the `if` branches
-on the code and the report quotes the line. Exit 0 prints `due`; exit 1 prints
-the first reason it is not, and every one of these has to hold:
+**`--cleanup-due` answers with an exit code and a reason**, so the `case`
+branches on the code and the report quotes the line. Three answers, and only
+two of them are about the cleanup:
+
+- **exit 0** prints `due`.
+- **exit 1** prints the first reason it is not due. Exit 1 means this and
+  nothing else.
+- **exit 2 or 3 is a fault**, with its reason on stderr and nothing on stdout.
+  Exit 2 (`FAULT_EXIT` in `reconcile.py`) is a config, a contract value or a
+  `boards.toml` that will not load, a board name nobody declared, a
+  `FOREMAN_INSTANCE` that names another board, or a failure nothing
+  anticipated. Exit 3 is an agent registry it could not read. **Report a fault
+  on the tick, naming the command and quoting stderr. It is never "not due".**
+  An `if` on the exit code folded both into the `else`, so a broken config
+  skipped the cleanup on every tick and the report said nothing was wrong.
+
+`due` needs every one of these to hold:
 
 - `CLEANUP_EVERY_DAYS` is above 0. Zero is the operator's off switch.
 - `$FOREMAN_HOME/instances/<board>/last-cleanup` is missing, or older than

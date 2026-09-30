@@ -68,8 +68,9 @@ the quality work that review no longer blocks on.
   adding one `board.toml`.
 - **Know what runs on your host.** Build agents run on your machine, in a
   throwaway git worktree, with permissions bypassed: they run the target's own
-  bootstrap and test command there. The worktree, the required checks and the
-  review are what contain them — not a sandbox. What never runs on your host is
+  bootstrap and test command there. The worktree, a per-role deny list, the
+  required checks and the review are what contain them — not a sandbox (see
+  [Security](#security)). What never runs on your host is
   CI: it runs on GitHub-hosted runners, and a merged commit reaches this machine
   only when foreman pulls it. foreman never merges a pull request from
   outside the repository it builds.
@@ -231,6 +232,27 @@ a pull request from outside the repository it builds, and it pins every merge
 to the one head the board judged, so a head that moved since is never merged.
 Build agents do run the target's bootstrap and tests on your host; see
 [Why foreman](#why-foreman) for what contains them.
+
+**The deny list is a partial layer.** Every card agent runs as your user with
+permissions bypassed. `skills/board/dispatch.sh` gives each one Claude Code
+`permissions.deny` rules, which Claude Code applies even in bypass mode.
+
+- **What it blocks:** Claude Code's file-editing tools, and the Bash commands it
+  recognises as file writes (redirections, `tee`, `sed -i`), on foreman's
+  install, `boards.toml`, `foreman.toml`, every `*.key`, the inbox, each board's
+  `HALT`, `ids.env` and `last-cleanup`, every `history.jsonl`, and every tracked
+  top-level entry of the board's main checkout with its `.git/config` and
+  `.git/hooks/`. Plan, build and cleanup agents are also kept off every card's
+  `cards/` directory, so no author can write its own review. A reviewer is not,
+  because it writes its review there.
+- **What it does not block:** any other program the agent runs. `python3 -c`, a
+  test script or a build step still writes wherever your user can.
+- **Claude only.** The Codex and OpenCode adapters drop `--settings`, so their
+  agents get no deny list.
+
+Full confinement means running the agents as a separate unix user that cannot
+write foreman's files. That is an infrastructure choice for the operator, and
+foreman does not make it for you.
 
 ## Contributing
 

@@ -1,6 +1,7 @@
-# foreman builds itself. This is instance #1 and the only proof the contract is
-# right: until a card walks from Todo to merged on a repository that is not the
-# one this code grew up in, the seam is a hypothesis.
+# foreman builds itself. The board runs this repository's own cards, so every
+# change to foreman walks from Todo to merged through foreman. That proves the
+# contract on one repository only: until a card does the same on a repository
+# that is not the one this code grew up in, the seam is a hypothesis.
 [linear]
 # The team NAME, not its key. bin/resolve-ids.py looks these up by name --
 # see bin/contract.py, which calls them LINEAR_TEAM_NAME and
@@ -8,8 +9,8 @@
 # "no team named 'PRA'". Never caught before because nothing had resolved this
 # repository's own ids.
 team = "Praveenvnktsh"
-# NOTE: this project does not exist in the workspace yet, so resolving these
-# ids fails. foreman cannot build itself until it is created.
+# The Linear project that holds this repository's cards, resolved by name
+# like the team.
 project = "foreman"
 
 [checks]

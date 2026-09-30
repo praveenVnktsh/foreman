@@ -2,7 +2,8 @@
 # Claim: bin/release.sh cuts a GitHub Release at origin/main -- naming the tag,
 # targeting main's commit, or the commit it is given when that commit is on
 # main -- refuses a tag that already exists, and skips a commit whose message
-# or pull request body carries the do-not-release marker on a line of its own.
+# or pull request body carries the do-not-release marker on a line of its own,
+# and never releases a commit at or behind the latest published release.
 #
 # The failure it prevents: a merge to main is not a deploy. Installations poll
 # the latest release, so a change reaches them only when a release is cut, and a
@@ -33,7 +34,9 @@ main_sha="$(git -C "$seed" rev-parse HEAD)"
 # The clone release.sh runs from, with the real script in its bin/, and a gh
 # stand-in that records the argv of every WRITE it was handed. `gh api` is
 # the read of the commit's pull requests: it prints GH_PR_BODY, and fails when
-# GH_API_FAIL is set.
+# GH_API_FAIL is set. `gh release list` is the read of the latest published
+# release: it prints GH_LATEST_TAG (empty is "no release yet"), and fails when
+# GH_LIST_FAIL is set.
 dep="$work/deployer"
 git_q clone -q "$origin" "$dep"
 mkdir -p "$dep/bin"
@@ -48,6 +51,11 @@ cat >"$stub/gh" <<'GH'
 if [[ "$1" == "api" ]]; then
   [[ -z "${GH_API_FAIL-}" ]] || { echo "HTTP 502" >&2; exit 1; }
   printf '%s\n' "${GH_PR_BODY-}"
+  exit 0
+fi
+if [[ "$1 $2" == "release list" ]]; then
+  [[ -z "${GH_LIST_FAIL-}" ]] || { echo "HTTP 502" >&2; exit 1; }
+  printf '%s\n' "${GH_LATEST_TAG-}"
   exit 0
 fi
 printf '%s\n' "$*" >> "${GH_LOG:?}"
@@ -168,6 +176,60 @@ else
   [[ ! -s "$GH_LOG" ]] && grep -q "not on origin/main" <<<"$out" \
     && ok "a commit that is not on main is refused" \
     || bad "off-main sha -> $out"
+fi
+
+# NEVER RELEASE BACKWARDS. The Action releases each CI run's commit in the
+# order the runs finish, so an older commit can arrive after a newer one has
+# been released. Tags on origin stand in for the published releases here; the
+# stub names which one is latest.
+git_q -C "$seed" checkout -q main
+older_sha="$(git -C "$seed" rev-parse HEAD)"
+git_q -C "$seed" commit -q --allow-empty -m "newer, released first"
+git_q -C "$seed" push -q origin main
+newer_sha="$(git -C "$seed" rev-parse HEAD)"
+git_q -C "$seed" tag v3.0.0 "$newer_sha"
+git_q -C "$seed" push -q origin v3.0.0
+
+: >"$GH_LOG"
+out="$(GH_LATEST_TAG=v3.0.0 RELEASE_SHA="$older_sha" "$release" 2>&1)" \
+  || bad "an older commit failed instead of skipping: $out"
+[[ ! -s "$GH_LOG" ]] && grep -q "already released at or past" <<<"$out" \
+  && ok "a commit behind the latest release is not released after it" \
+  || bad "older than latest -> $out; gh log: $(cat "$GH_LOG")"
+
+: >"$GH_LOG"
+out="$(GH_LATEST_TAG=v3.0.0 RELEASE_SHA="$newer_sha" "$release" 2>&1)" \
+  || bad "the latest release's own commit failed instead of skipping: $out"
+[[ ! -s "$GH_LOG" ]] && grep -q "already released at or past" <<<"$out" \
+  && ok "the latest release's own commit is not released twice" \
+  || bad "equal to latest -> $out; gh log: $(cat "$GH_LOG")"
+
+git_q -C "$seed" commit -q --allow-empty -m "past the latest release"
+git_q -C "$seed" push -q origin main
+past_sha="$(git -C "$seed" rev-parse HEAD)"
+: >"$GH_LOG"
+out="$(GH_LATEST_TAG=v3.0.0 RELEASE_SHA="$past_sha" "$release" --version v3.1.0 2>&1)" \
+  || bad "a commit past the latest release failed: $out"
+grep -qF "release create v3.1.0 --target $past_sha " "$GH_LOG" \
+  && ok "a commit past the latest release is released" \
+  || bad "newer than latest -> $out; gh log: $(cat "$GH_LOG")"
+
+: >"$GH_LOG"
+if out="$(GH_LIST_FAIL=1 RELEASE_SHA="$past_sha" "$release" 2>&1)"; then
+  bad "a failed release lookup released anyway: $out"
+else
+  [[ ! -s "$GH_LOG" ]] && grep -q "could not list the published releases" <<<"$out" \
+    && ok "a release lookup that fails refuses rather than releasing" \
+    || bad "failed release lookup -> $out"
+fi
+
+: >"$GH_LOG"
+if out="$(GH_LATEST_TAG=v404 RELEASE_SHA="$past_sha" "$release" 2>&1)"; then
+  bad "a latest release with no tag released anyway: $out"
+else
+  [[ ! -s "$GH_LOG" ]] && grep -q "has no tag on origin" <<<"$out" \
+    && ok "a latest release whose tag is missing refuses rather than releasing" \
+    || bad "missing latest tag -> $out"
 fi
 
 exit "$fail"
