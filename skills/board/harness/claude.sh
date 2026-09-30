@@ -203,15 +203,85 @@ spawn() {
   args+=("${PERMISSION_ARGS[@]}")
 
   # The CLI's own chatter would land on stdout beside the session id this verb
-  # promises, and every caller reads that id with a command substitution.
+  # promises, and every caller reads that id with a command substitution. Into
+  # a file rather than a substitution: `--bg` returns at once, and a substitution
+  # would wait for EOF from anything the CLI left holding the pipe.
+  local bg_out bg_id
+  bg_out="$(mktemp)" || die "spawn: mktemp failed"
   cd "$cwd"
-  claude "${args[@]}" "$prompt" >/dev/null
+  if ! claude "${args[@]}" "$prompt" >"$bg_out"; then
+    rm -f "$bg_out"
+    die "spawn: claude --bg exited non-zero for $name"
+  fi
+  bg_id="$(bg_agent_id "$bg_out")"
+  rm -f "$bg_out"
 
-  # `|| exit 1` for the reason lookup_session records: an unreadable registry
-  # must not arrive here as an empty string and be reported as "never registered".
-  session="$(lookup_session "$name")" || exit 1
-  [[ -n "$session" ]] || die "spawned $name but it never registered with claude agents"
-  printf '%s\n' "$session"
+  if session="$(await_session "$name")"; then
+    printf '%s\n' "$session"
+    return 0
+  fi
+  # STOP IT BEFORE DYING, as codex.sh and opencode.sh do. `claude --bg` has
+  # already started the agent in the worktree; a spawn that dies without
+  # stopping it leaves it running while dispatch.sh moves on to the next
+  # candidate or attempt and removes that worktree from under it.
+  if [[ -n "$bg_id" ]]; then
+    claude stop "$bg_id" >/dev/null 2>&1 || true
+    die "spawned $name but could not find it in claude agents (see above); stopped the agent claude --bg reported as $bg_id"
+  fi
+  die "spawned $name but could not find it in claude agents (see above), and claude --bg printed no id to stop it by; find it with: claude agents --all"
+}
+
+# How long spawn looks for the new agent in the registry. `--bg` can return
+# before the row is listed, and a registry read can fail while the daemon is
+# busy; either one used to kill a spawn whose agent was already running.
+_CLAUDE_REGISTER_POLLS=10
+_CLAUDE_REGISTER_POLL_SECONDS=0.5
+
+# The session id of the newest agent called <name>, polled until it is listed.
+# Exits 1 when it never is, with the last reason on stderr.
+await_session() { # <name>
+  local polls=0 session err
+  err="$(mktemp)" || die "spawn: mktemp failed"
+  while [[ "$polls" -lt "$_CLAUDE_REGISTER_POLLS" ]]; do
+    # `if`, not a bare assignment: lookup_session exits 1 on an unreadable
+    # registry, and that is a reason to look again, not to give up.
+    if session="$(lookup_session "$1" 2>"$err")" && [[ -n "$session" ]]; then
+      rm -f "$err"
+      printf '%s\n' "$session"
+      return 0
+    fi
+    sleep "$_CLAUDE_REGISTER_POLL_SECONDS"
+    polls=$(( polls + 1 ))
+  done
+  if [[ -s "$err" ]]; then
+    cat "$err" >&2
+  else
+    printf 'harness/claude: %s never registered with claude agents\n' "$1" >&2
+  fi
+  rm -f "$err"
+  return 1
+}
+
+# The id `claude --bg` printed, which is what `claude stop` takes.
+#
+# Observed on 2.1.286 (`claude --help` pins only that it "prints the id"):
+#
+#   backgrounded · a898e3d2 · foreman/board/ABC-1
+#     claude agents             list sessions
+#     claude attach a898e3d2    open in this terminal
+#     ...
+#     claude stop a898e3d2      stop this session
+#
+# The last word is "session", not the id. So this reads the id from the
+# `claude stop <id>` hint first, then from the `backgrounded · <id>` banner,
+# and prints nothing rather than a guess: a wrong id costs a `claude stop` on
+# some other session.
+bg_agent_id() { # <file holding what claude --bg printed>
+  awk '
+    $1 == "claude" && $2 == "stop" && $3 ~ /^[A-Za-z0-9_-]+$/ { stop = $3 }
+    $1 == "backgrounded" && $3 ~ /^[A-Za-z0-9_-]+$/ && banner == "" { banner = $3 }
+    END { if (stop != "") print stop; else if (banner != "") print banner }
+  ' "$1"
 }
 
 resume() {
@@ -394,9 +464,18 @@ transcript() { # <cwd> <session-id>
   # slug is the cwd with every '/' and '.' replaced by '-'. The file's mtime is
   # the agent's last activity, which is how liveness here tells "waiting for the
   # next tick" apart from "wedged mid-turn"; `state` alone cannot.
-  local slug
+  #
+  # EXIT 1 WHEN THE FILE IS NOT THERE. This composes a path for any session id
+  # at all, so exiting 0 claimed every agent on the installation. registry.sh
+  # asks each harness in turn and took this first answer, so a build that fell
+  # back to Codex was read through a Claude path that never existed. The path
+  # is still printed: registry.sh hands it on while failing, for supervise.sh,
+  # which reads a registered tick whose transcript is gone as a corpse.
+  local slug path
   slug="$(printf '%s' "$1" | tr './' '--')"
-  printf '%s/.claude/projects/%s/%s.jsonl\n' "$HOME" "$slug" "$2"
+  path="$HOME/.claude/projects/$slug/$2.jsonl"
+  printf '%s\n' "$path"
+  [[ -e "$path" ]] || die "transcript: no session file at $path; session $2 is not a Claude session or has written nothing yet"
 }
 
 skill_prompt() { # <name> [--loop-minutes K]

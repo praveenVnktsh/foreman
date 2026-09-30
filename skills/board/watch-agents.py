@@ -10,9 +10,8 @@ several minutes later.
 
 TWO RULES MAKE THIS SAFE.
 
-**It never reports the tick agent.** `foreman/<installation>/tick` (or
-`foreman/tick` on the legacy installation) runs the loop itself, so its turn
-ending is the board finishing work, not work arriving. Emitting that would wake
+**It never reports the tick agent.** `foreman/tick` runs the loop itself, so
+its turn ending is the board finishing work, not work arriving. Emitting that would wake
 the loop with news of itself and spin forever. Any name that is not
 `<BOARD_NAME_PREFIX>/<TICKET>/<role>-<attempt>` for THIS board is ignored for
 the same reason -- including another board's agents, which would otherwise
@@ -42,7 +41,7 @@ import time
 
 POLL_SECONDS = int(os.environ.get("WATCH_POLL_SECONDS", "15"))
 
-# INSTANCE, INSTALLATION and HARNESS_SH, reused from reconcile.py's own
+# BOARD_NAME_PREFIX and HARNESS_SH, reused from reconcile.py's own
 # `_load_config` rather than a second reader shelling out to config.sh on its
 # own -- two readers of the same setting is exactly the drift `_load_config`'s
 # docstring warns about, and this process already imports reconcile.py, so
@@ -52,26 +51,20 @@ POLL_SECONDS = int(os.environ.get("WATCH_POLL_SECONDS", "15"))
 # This file used to source config.sh a second time, in another `bash -c`, for
 # the two values reconcile.py had already exported at module scope. That cost
 # every arm of this Monitor a second shell and left two places that could
-# disagree about which installation this process watches.
+# disagree about which board this process watches.
 _SKILL_DIR = os.path.dirname(os.path.abspath(__file__))
 if _SKILL_DIR not in sys.path:
     sys.path.insert(0, _SKILL_DIR)
 import reconcile  # noqa: E402
 
 HARNESS_SH = reconcile.HARNESS_SH
-# `foreman/<installation>/<instance>` or, on the legacy installation,
-# `foreman/<instance>` -- config.sh decides which, and this process only reads
-# it. See _dispatched() for how a captured name is held against it.
+# `foreman/<board>` -- config.sh composes it, and this process only reads it.
+# See _dispatched() for how a captured name is held against it.
 BOARD_NAME_PREFIX = reconcile.BOARD_NAME_PREFIX
 
-# foreman/[<installation>/]<instance>/<TICKET>/<role>-<attempt>. The
-# installation segment is optional because the legacy installation's names
-# have none. The tick is foreman/[<installation>/]tick, which has no ticket
-# segment and therefore never matches.
-#
-# The optional group cannot misread one shape as the other: a TICKET needs an
-# uppercase key, a hyphen and digits, and a board or installation name may hold
-# no hyphen at all, so the segment count alone decides which group is empty.
+# foreman/<board>/<TICKET>/<role>-<attempt>, the shape config.sh's agent_name
+# builds. There is one foreman, so no name carries an installation segment. The
+# tick is foreman/tick, which has no ticket segment and therefore never matches.
 #
 # The team-key half of TICKET is `[A-Z0-9]+`, not `[A-Z]+`: nothing in this
 # codebase constrains a Linear team key to letters only -- bin/contract.py
@@ -92,12 +85,12 @@ BOARD_NAME_PREFIX = reconcile.BOARD_NAME_PREFIX
 #
 # The literal `cleanup` ticket segment is the same kind of agreement. A
 # scheduled cleanup run has no card to name until it files one, so its agent
-# is foreman/[<installation>/]<instance>/cleanup/cleanup-<attempt> -- the
+# is foreman/<board>/cleanup/cleanup-<attempt> -- the
 # ticket alternative and the role both have to spell that literal, and
 # dispatch.sh has to keep spelling it the same way, or a live cleanup agent
 # finishes silently and this Monitor never wakes the board for it.
 DISPATCHED = re.compile(
-    r"^foreman/(?:([^/]+)/)?([^/]+)/([A-Z0-9]+-\d+|cleanup)/(plan|build|review|cleanup)-(\w+)$"
+    r"^(foreman/[^/]+)/([A-Z0-9]+-\d+|cleanup)/(plan|build|review|cleanup)-(\w+)$"
 )
 
 # Phases that mean "this agent is no longer working". `done` is a completed turn;
@@ -118,11 +111,9 @@ def _dispatched(name: str) -> tuple[str, str, str] | None:
     m = DISPATCHED.match(name)
     if not m:
         return None
-    installation, instance = m.group(1), m.group(2)
-    owner = f"foreman/{instance}" if installation is None else f"foreman/{installation}/{instance}"
-    if owner != BOARD_NAME_PREFIX:
+    if m.group(1) != BOARD_NAME_PREFIX:
         return None
-    return m.group(3), m.group(4), m.group(5)
+    return m.group(2), m.group(3), m.group(4)
 
 
 def poll() -> dict[str, str]:

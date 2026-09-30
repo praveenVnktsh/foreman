@@ -62,6 +62,25 @@ if [[ -z "${_FOREMAN_SWEEP_LOCKED:-}" ]]; then
   exit "$status"
 fi
 
+# Delete <path> and everything under it, and say so on stderr when it cannot.
+#
+# A toolchain can leave a tree that `rm -rf` refuses: Go writes its module cache
+# read-only, so the first `rm -rf` of a build's scratch failed, and under
+# `set -e` that one failure ended the whole sweep -- every later worktree,
+# scratch dir and leaked ref stayed. So a refused delete is retried once the
+# tree is writable again, and one that still fails is named, held in
+# remove_status for the exit code, and the sweep goes on.
+remove_status=0
+force_remove() { # <path>
+  rm -rf "$1" 2>/dev/null && return 0
+  # Best effort: the retry below is what decides, and says so when it fails.
+  chmod -R u+w "$1" 2>/dev/null || true
+  rm -rf "$1" && return 0
+  printf 'foreman: could not remove %s (see above); it stays for a later sweep\n' "$1" >&2
+  remove_status=1
+  return 1
+}
+
 # Scratch lives beside the worktree and dies with it. It is reaped HERE, by the
 # sweep, and never by the agent itself: an agent only cleans up if it gets to
 # exit on its own terms, and the ones that most need cleaning are the ones
@@ -79,7 +98,7 @@ remove_agent_tmp() {
     printf 'DRY RUN: would remove scratch %s (%s)\n' "$tmp" "$(du -sh "$tmp" 2>/dev/null | cut -f1)"
     return 0
   fi
-  rm -rf "$tmp"
+  force_remove "$tmp" || return 0
   printf 'removed scratch %s\n' "$tmp"
 }
 
@@ -97,7 +116,9 @@ remove_tree() {
     printf 'DRY RUN: would remove worktree %s (branch %s)\n' "$path" "${branch:-detached}"
     return 0
   fi
-  git -C "$REPO" worktree remove -f -f "$path" 2>/dev/null || rm -rf "$path"
+  if ! git -C "$REPO" worktree remove -f -f "$path" 2>/dev/null; then
+    force_remove "$path" || return 0
+  fi
   # Only ever delete a local branch this skill created.
   case "$branch" in
     "$BOARD_NAME_PREFIX"/*) git -C "$REPO" branch -D "$branch" 2>/dev/null || true ;;
@@ -241,7 +262,29 @@ except Exception: sys.exit(3)
 for a in agents:
     if a.get("state") != "stopped":
         print(a.get("cwd",""))
-'
+' || return 1
+  dispatching_worktrees
+}
+
+# The worktrees a dispatch is still cutting or bootstrapping, one per line.
+#
+# Its agent is not registered yet, so the registry cannot protect the tree, and
+# a bootstrap can run for minutes. dispatch.sh holds a marker named for the
+# worktree and carrying its own pid (config.sh's dispatch_marker_for); the tree
+# is live while that pid is. A marker whose pid is gone was left by a killed
+# dispatch, protects nothing, and is removed. Hidden files are temporaries
+# dispatch.sh is still writing, so the glob skips them.
+dispatching_worktrees() {
+  local marker pid
+  for marker in "$(dispatch_marker_dir)"/*; do
+    [[ -f "$marker" ]] || continue
+    pid="$(head -n 1 "$marker" 2>/dev/null || true)"
+    if [[ "$pid" =~ ^[0-9]+$ ]] && kill -0 "$pid" 2>/dev/null; then
+      printf '%s/.claude/worktrees/%s\n' "$REPO" "$(basename -- "$marker")"
+    elif [[ -z "$BOARD_DRY_RUN" ]]; then
+      rm -f "$marker"
+    fi
+  done
 }
 
 # Release the card's concurrency slot, here rather than in prose.
@@ -262,10 +305,33 @@ for a in agents:
 # succeeded" -- both board-failed exits release exactly as much as Done does.
 # Writing it twice is harmless: `card_holds_slot` reads the LAST entry, so a
 # second release is a no-op rather than a corruption.
+#
+# NOT WHILE AN AGENT OF THE CARD STILL RUNS. The sweep leaves a working agent
+# alone, and leaves an idle one whose stop did not land; either still uses the
+# machine. Releasing its slot anyway let the next dispatch run beside it, one
+# past the ceiling. The slot is kept, the sweep says why, and a later sweep of
+# the card -- or HOST_SLOT_STALE_MINUTES -- releases it once the agent is gone.
 release_slot() {
   local ticket="$1"
+  if card_has_live_agent "$ticket"; then
+    printf 'foreman: keeping the slot for %s -- an agent of the card is still running (see above)\n' \
+      "$ticket" >&2
+    return 0
+  fi
   [[ -n "$BOARD_DRY_RUN" ]] && { printf 'DRY RUN: would release the slot for %s\n' "$ticket"; return 0; }
   card_log "$ticket" '{"action":"released","by":"sweep"}'
+}
+
+# Whether the registry still lists an agent of <ticket> that is running: idle
+# or anything else, i.e. not exited. A registry that cannot be read answers yes,
+# because a slot released under a live agent is the failure this guards.
+card_has_live_agent() { # <ticket>
+  local listing kind rest
+  listing="$(card_sessions "$(card_agents_prefix "$1")")" || return 0
+  while IFS="$FIELD_SEP" read -r kind rest; do
+    case "$kind" in idle|other) return 0 ;; esac
+  done <<<"$listing"
+  return 1
 }
 
 # Settle a terminal card's sessions: stop the idle ones, forget the exited ones.
@@ -375,6 +441,12 @@ in_words() { case " $1 " in *" $2 "*) return 0 ;; esac; return 1; }
 # The transcript's path is asked for BEFORE the forget. A detached harness's
 # transcript is its log, which the forget deletes along with the record the
 # path is read from.
+#
+# A transcript no harness has on disk is nothing to remove, not a failure.
+# registry.sh exits non-zero when no adapter finds the file -- claude.sh no
+# longer answers with a path it only composed -- and a session that exited
+# before it wrote anything has none. Counting that as a failed forget failed
+# every sweep of such a card.
 forget_session() {
   local id="$1" name="$2" cwd="$3" session="$4" transcript=""
   if [[ -n "$cwd" && -z "$session" ]]; then
@@ -382,9 +454,9 @@ forget_session() {
       "$name" "$id" >&2
   fi
   if [[ -n "$cwd" && -n "$session" ]] \
-      && ! transcript="$("$HARNESS_SH" transcript "$cwd" "$session")"; then
-    printf 'foreman: could not find the transcript of session %s (%s); it stays\n' "$name" "$id" >&2
-    forget_status=1
+      && ! transcript="$("$HARNESS_SH" transcript "$cwd" "$session" 2>/dev/null)"; then
+    printf 'foreman: no harness has a transcript on disk for session %s (%s); there is none to remove\n' \
+      "$name" "$id" >&2
     transcript=""
   fi
   if [[ -n "$BOARD_DRY_RUN" ]]; then
@@ -503,7 +575,7 @@ remove_transcripts() {
     printf 'DRY RUN: would remove transcripts %s\n' "$dir"
     return 0
   fi
-  rm -rf "$dir"
+  force_remove "$dir" || return 0
   printf 'removed transcripts %s\n' "$dir"
 }
 
@@ -601,3 +673,5 @@ find "$BOARD_HOME"/cards/*/reviews -type f -mtime +"$SWEEP_RETENTION_DAYS" -dele
   || die "could not forget every exited session of these cards (see above); a finished session may still be listed"
 [[ "$stop_status" -eq 0 ]] \
   || die "a terminal card's agent did not stop (see above); its worktree, record and transcripts are left for a later sweep"
+[[ "$remove_status" -eq 0 ]] \
+  || die "could not remove every tree this sweep reaped (see above); they are left for a later sweep"
