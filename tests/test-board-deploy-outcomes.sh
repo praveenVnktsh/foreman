@@ -13,11 +13,10 @@
 # So these are all one assertion, stated eleven ways: an answer the board could
 # not read is never the same as an answer it read.
 #
-# Everything the board reasons over is stubbed rather than reached, because the
-# subject is the reasoning. `lib/board-outcome-cases.py` replaces `reconcile.run`
-# and `reconcile.run_json` outright; the `supervise.sh` case below puts a fake
-# `claude` on PATH, which is the only way to exercise a decision that lives in a
-# shell script's inline python.
+# Only the outside world is stubbed. `lib/board-outcome-cases.py` puts
+# `lib/gh-scenario-stub.py` first on PATH as `gh` and builds a real origin for
+# git, so reconcile's own `run` and `run_json` start every command for real.
+# The `supervise.sh` case below puts a fake `claude` on PATH the same way.
 
 set -euo pipefail
 
@@ -36,14 +35,14 @@ fail() {
 }
 
 # `reconcile` (imported by both board-outcome-cases.py and waitfor.py) shells
-# out to config.sh at import time, which since Task 2/3 requires a
-# FOREMAN_INSTANCE and an instance declaring a REPO whose board.toml loads.
-# Nothing below reads REPO or the contract's values -- every gh/git call is
-# stubbed -- so one fixture target and one instance, reused everywhere in this
-# file, is enough.
+# out to config.sh at import time, which requires a FOREMAN_INSTANCE and an
+# instance declaring a REPO whose board.toml loads. board-outcome-cases.py
+# makes REPO a checkout of the origin it builds, and reads the one risk path
+# declared here, so one fixture target and one instance serve this whole file.
 fixture_repo="$work_dir/target"
 mkdir -p "$fixture_repo"
 fixture_board_toml "$fixture_repo"
+printf '[risk]\npaths = ["db/migrations/"]\n' >> "$fixture_repo/board.toml"
 py_home="$work_dir/py-home"
 fixture_add_instance "$py_home" demo "$fixture_repo"
 
@@ -52,7 +51,7 @@ fixture_add_instance "$py_home" demo "$fixture_repo"
 # home as the parent of the install root -- this repository's own parent, whose
 # boards.toml is not a fixture's. An explicit home is what that derivation
 # yields to, and it is how this file stays pointed at its temporary directory.
-echo "==> what the board concludes from gh, without asking gh"
+echo "==> what the board concludes from gh and git, with only gh stubbed"
 HOME="$py_home" FOREMAN_HOME="$py_home/.foreman" FOREMAN_INSTANCE=demo \
   python3 "$here/lib/board-outcome-cases.py" \
   || fail "board-outcome-cases.py"

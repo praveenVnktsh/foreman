@@ -50,10 +50,13 @@ git -C "$ROOT" rev-parse --git-dir >/dev/null 2>&1 \
 command -v gh >/dev/null 2>&1 \
   || die "gh is required to cut a release; install it and run 'gh auth login'"
 
-GIT_SSH_COMMAND="ssh -o BatchMode=yes -o ConnectTimeout=15 -o ServerAliveInterval=10 -o ServerAliveCountMax=3" \
-GIT_TERMINAL_PROMPT=0 \
-  git -C "$ROOT" fetch --quiet origin main \
-  || die "git fetch origin main failed or timed out"
+fetch_origin() { # <refspec>
+  GIT_SSH_COMMAND="ssh -o BatchMode=yes -o ConnectTimeout=15 -o ServerAliveInterval=10 -o ServerAliveCountMax=3" \
+  GIT_TERMINAL_PROMPT=0 \
+    git -C "$ROOT" fetch --quiet origin "$1"
+}
+
+fetch_origin main || die "git fetch origin main failed or timed out"
 MAIN="$(git -C "$ROOT" rev-parse FETCH_HEAD)"
 if [[ -z "$SHA" ]]; then
   NEW="$MAIN"
@@ -65,6 +68,31 @@ else
 fi
 NEW_SHORT="$(git -C "$ROOT" rev-parse --short "$NEW")"
 SUBJECT="$(git -C "$ROOT" log -1 --format=%s "$NEW")"
+
+# NEVER RELEASE BACKWARDS. The Action runs this once per CI run that passes on
+# main, at that run's commit, one job at a time but in the order the runs
+# FINISH. Two merges close together can finish CI out of order. The older
+# commit then released second, and "latest release" -- what every
+# installation follows -- pointed back at it, undoing the newer one.
+#
+# So the latest published release is the floor. A commit at or behind it has
+# already shipped, and this exits 0 without cutting, which the Action reads as
+# a no-op. With no release yet there is no floor. A lookup that fails refuses:
+# guessing "no release yet" is the one answer that can ship backwards.
+LATEST_TAG="$(cd "$ROOT" && gh release list --exclude-drafts --exclude-pre-releases \
+  --limit 1 --json tagName --jq '.[0].tagName // ""')" \
+  || die "could not list the published releases (gh release list); nothing cut"
+if [[ -n "$LATEST_TAG" ]]; then
+  fetch_origin "refs/tags/$LATEST_TAG" \
+    || die "the latest release $LATEST_TAG has no tag on origin that this clone can fetch; nothing cut"
+  LATEST="$(git -C "$ROOT" rev-parse --verify --quiet "FETCH_HEAD^{commit}")" \
+    || die "the latest release $LATEST_TAG does not tag a commit; nothing cut"
+  if git -C "$ROOT" merge-base --is-ancestor "$NEW" "$LATEST"; then
+    printf 'release: already released at or past %s (%s is at %s); nothing to do.\n' \
+      "$NEW_SHORT" "$LATEST_TAG" "$(git -C "$ROOT" rev-parse --short "$LATEST")"
+    exit 0
+  fi
+fi
 
 # A COMMIT CAN OPT OUT OF RELEASING ITSELF. `.github/workflows/release.yml`
 # runs this script after CI passes on main, so a merge releases unless it says

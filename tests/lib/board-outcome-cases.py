@@ -1,29 +1,39 @@
 #!/usr/bin/env python3
-"""What the board concludes from `gh`, without asking `gh` anything.
+"""What the board concludes from `gh` and `git`, with only GitHub replaced.
 
 Run by `tests/test-board-deploy-outcomes.sh`, which owns the description of
-why these cases exist. Every case replaces `reconcile.run` and
-`reconcile.run_json` outright, so nothing here touches the network, a checkout,
-or GitHub — the subject is the *reasoning*, and the reasoning is what has been
-wrong. Each defect below shipped and was found by a reviewer or by production.
+why these cases exist. Each defect below shipped and was found by a reviewer or
+by production.
 
-Importing `reconcile` shells out to `config.sh`, which since Task 2/3 refuses
-to load without a FOREMAN_INSTANCE and an instance directory declaring a
-REPO whose board.toml passes `bin/contract.py`. The caller sets that up
-(see tests/lib/instance-fixture.sh) before running this file.
+`reconcile.run` and `reconcile.run_json` run for real. Every `gh` they start is
+`tests/lib/gh-scenario-stub.py`, first on PATH, answering from the scenario
+the case's `World` writes. Every `git` is real git, in a checkout of a small
+real origin built below. So the argv reconcile builds, the exit codes it reads
+and the JSON it parses are all under test, not only the reasoning over them.
+
+Importing `reconcile` shells out to `config.sh`, which refuses to load without
+a FOREMAN_INSTANCE and an instance directory declaring a REPO whose board.toml
+passes `bin/contract.py`. The caller sets that up (see
+tests/lib/instance-fixture.sh) before running this file, and declares
+`db/migrations/` as the one risk path.
 """
 
 from __future__ import annotations
 
+import atexit
 import io
 import json
 import os
+import shutil
+import subprocess
 import sys
+import tempfile
 from contextlib import redirect_stdout
 
 HERE = os.path.dirname(os.path.abspath(__file__))          # tests/lib
 REPO_ROOT = os.path.dirname(os.path.dirname(HERE))
 BOARD = os.path.join(REPO_ROOT, "skills", "board")
+GH_STUB = os.path.join(HERE, "gh-scenario-stub.py")
 sys.path.insert(0, BOARD)
 
 import reconcile  # noqa: E402
@@ -31,8 +41,12 @@ import waitfor  # noqa: E402
 
 FAILURES: list[str] = []
 
-# Captured before any case runs, so `World.install()` can put it back.
-REAL_COMMIT_ON_MAIN = reconcile.commit_on_main
+# The one risk path the fixture's board.toml declares. Read through config.sh
+# like any other target's, so the risk scan below reads a real contract.
+RISK_PATH = "db/migrations/"
+if reconcile.HIGH_RISK_PATHS != [RISK_PATH]:
+    sys.exit(f"board-outcome-cases: the fixture must declare [risk] paths = "
+             f"[{RISK_PATH!r}]; config.sh gave {reconcile.HIGH_RISK_PATHS}")
 
 
 def check(ok: bool, what: str, detail: str = "") -> None:
@@ -41,6 +55,103 @@ def check(ok: bool, what: str, detail: str = "") -> None:
         return
     FAILURES.append(f"{what}{': ' + detail if detail else ''}")
     print(f"    FAIL: {what} {detail}")
+
+
+# --- the git world ------------------------------------------------------------
+#
+# A real origin with main at BASE -> A -> B. SIDE is cut from BASE and LATE
+# from B, each on a branch of its own. REPO is a checkout of it, which is where
+# reconcile runs git.
+
+SCRATCH = tempfile.mkdtemp(prefix="board-outcomes-")
+atexit.register(shutil.rmtree, SCRATCH, ignore_errors=True)
+ORIGIN = os.path.join(SCRATCH, "origin.git")
+# Where REPO's origin points while a case needs `git fetch` to fail.
+UNREACHABLE = os.path.join(SCRATCH, "no-such-origin.git")
+AUTHOR = os.path.join(SCRATCH, "author")
+
+
+def git(cwd: str, *args: str) -> str:
+    """git in `cwd`, with an identity and no signing, whatever the machine says."""
+    done = subprocess.run(
+        ["git", "-c", "user.name=test", "-c", "user.email=test@example.invalid",
+         "-c", "commit.gpgsign=false", "-c", "init.defaultBranch=main", *args],
+        cwd=cwd, capture_output=True, text=True, check=True)
+    return done.stdout.strip()
+
+
+def commit(message: str) -> str:
+    with open(os.path.join(AUTHOR, "log.txt"), "a", encoding="utf-8") as f:
+        f.write(message + "\n")
+    git(AUTHOR, "add", "log.txt")
+    git(AUTHOR, "commit", "-q", "-m", message)
+    return git(AUTHOR, "rev-parse", "HEAD")
+
+
+# REPO holds only the fixture's board.toml. Refuse anything that is already a
+# checkout: this file rewrites its origin, and a real one is not a fixture.
+if os.path.exists(os.path.join(reconcile.REPO, ".git")):
+    sys.exit(f"board-outcome-cases: REPO {reconcile.REPO} is already a git "
+             f"checkout; point it at an empty fixture directory")
+git(SCRATCH, "init", "-q", "--bare", ORIGIN)
+git(ORIGIN, "symbolic-ref", "HEAD", "refs/heads/main")
+os.makedirs(AUTHOR)
+git(AUTHOR, "init", "-q", "-b", "main")
+git(AUTHOR, "remote", "add", "origin", ORIGIN)
+BASE = commit("base")
+A = commit("the card's merge commit")
+B = commit("a merge that overtook it two minutes later")
+git(AUTHOR, "push", "-q", "origin", "main")
+git(AUTHOR, "checkout", "-q", "-b", "side", BASE)
+SIDE = commit("a commit that does not carry the card's")
+git(AUTHOR, "push", "-q", "origin", "side")
+# On origin under a branch of its own, and later made main's tip by one case.
+git(AUTHOR, "checkout", "-q", "-b", "late", B)
+LATE = commit("a merge after B")
+git(AUTHOR, "push", "-q", "origin", "late")
+git(reconcile.REPO, "init", "-q")
+git(reconcile.REPO, "remote", "add", "origin", ORIGIN)
+git(reconcile.REPO, "fetch", "-q", "origin")
+# A head no checkout has: git answers 128 for it, never 0 or 1.
+GHOST = "f" * 40
+
+# --- the gh world ---------------------------------------------------------------
+
+STUB_BIN = os.path.join(SCRATCH, "bin")
+SCENARIO = os.path.join(SCRATCH, "scenario.json")
+CALLS = os.path.join(SCRATCH, "calls.jsonl")
+os.makedirs(STUB_BIN)
+with open(os.path.join(STUB_BIN, "gh"), "w", encoding="utf-8") as f:
+    f.write(f'#!/bin/sh\nexec "{sys.executable}" "{GH_STUB}" "$@"\n')
+os.chmod(os.path.join(STUB_BIN, "gh"), 0o755)
+os.environ["PATH"] = STUB_BIN + os.pathsep + os.environ.get("PATH", "")
+os.environ["GH_STUB_SCENARIO"] = SCENARIO
+os.environ["GH_STUB_LOG"] = CALLS
+
+TICKET = "ACME-1"
+
+
+GH_FAILED = {"exit": 1, "stderr": "HTTP 502: Bad Gateway\n"}
+
+
+def answer(value) -> dict:
+    """A scenario answer: None is gh failing, a str is raw output, else JSON."""
+    if value is None:
+        return GH_FAILED
+    if isinstance(value, str):
+        return {"stdout": value}
+    return {"stdout": json.dumps(value)}
+
+
+def listing(rows) -> dict:
+    """A list answer: None is gh failing, any other iterable is the rows."""
+    return GH_FAILED if rows is None else answer(list(rows))
+
+
+def exited(result: tuple[int, str]) -> dict:
+    """A raw answer, as `(exit code, stdout)`."""
+    code, out = result
+    return {"exit": code, "stdout": out}
 
 
 # A run with no DEPLOY_STEP in it: what a skipped deploy job looks like once the
@@ -84,99 +195,101 @@ def log_fetches(w: "World") -> list[list[str]]:
     return [c for c in w.calls if c[:2] == ["gh", "api"] and c[2].endswith("/logs")]
 
 
-class World:
-    """The only `gh` and `git` these functions get to see.
+# What the pull request files API prints through reconcile's `--jq`: one JSON
+# list per file. Spelled here rather than read from reconcile, because the
+# scripted answer is only what gh prints if the program is this one.
+FILES_JQ = '.[] | [.filename, (.previous_filename // "")] | @json'
 
-    `views` maps a run id to what `gh run view` answers; a missing id answers
-    None, which is the lookup FAILING rather than the run having no deploy step.
-    `logs` maps a job id to its raw log; a missing id is `gh api` failing.
+# The world the last `install()` set up, so the next one can settle it.
+_installed: "World | None" = None
+
+
+class World:
+    """What `gh` answers, and whether git can reach origin, for one case.
+
+    `views` maps a run id to what `gh run view` answers, and `logs` maps a job
+    id to its raw log; None is gh failing. An id missing from either is not
+    scripted at all, and a call for it fails the case: a case about a failed
+    read says so with None. `deploy_runs`, `ci_runs` and `attempt` of None are
+    the list or the counter failing to read.
     """
 
-    def __init__(self, *, deploy_runs=(), views=None, ancestors=(),
-                 ci_runs=(), attempt=1, prs=(), diff=(0, ""),
-                 ls_remote=(2, ""), compare=(0, "[]"), logs=None,
-                 files=(1, ""), fetch=0, unplaceable=()):
-        self.deploy_runs = deploy_runs
-        self.views = views or {}
-        self.logs = logs or {}
-        self.ancestors = set(ancestors)
-        self.ci_runs = ci_runs
-        self.attempt = attempt
-        self.prs = prs
-        self.diff = diff
-        # A card with no branch on origin is the default, so a case about
-        # something else never has to say anything about the plan.
-        self.ls_remote = ls_remote
-        self.compare = compare
-        # The pull request files API, which pr_for reads only when `gh pr diff`
-        # failed. It fails too unless a case says otherwise.
-        self.files = files
-        # What `git fetch` exits with, and the run heads `git merge-base` has
-        # never heard of (it exits 128 for those, as git does).
-        self.fetch = fetch
-        self.unplaceable = set(unplaceable)
-        self.calls: list[list[str]] = []
+    def __init__(self, *, deploy_runs=(), views=None, ci_runs=(), attempt=1,
+                 prs=(), diff=(0, ""), files=(1, ""), logs=None,
+                 ticket=TICKET, origin_reachable=True):
+        self.origin_reachable = origin_reachable
+        self.settled = False
+        workflow = reconcile.DEPLOY_WORKFLOW
+        runs = "{owner}/{repo}/actions"
+        self.scenario = {
+            f"run list --workflow {workflow} *": listing(deploy_runs),
+            f"run list --workflow {reconcile.CI_WORKFLOW} --branch main *":
+                listing(ci_runs),
+            # The branch is spelled out, not taken from reconcile.branch_for:
+            # a pull request looked up on any other branch is unscripted.
+            f"pr list --head foreman/{reconcile.INSTANCE}/{ticket} --state all --json *":
+                listing(prs),
+        }
+        for rid, view in (views or {}).items():
+            self.scenario[f"run view {rid} --json jobs"] = answer(view)
+        for job_id, text in (logs or {}).items():
+            self.scenario[f"api repos/{runs}/jobs/{job_id}/logs"] = answer(text)
+        for r in ci_runs or ():
+            self.scenario[f"api repos/{runs}/runs/{r['databaseId']} --jq .run_attempt"] = \
+                answer(attempt)
+        for p in prs or ():
+            n = p["number"]
+            self.scenario[f"pr diff {n} --name-only"] = exited(diff)
+            self.scenario[f"api repos/{{owner}}/{{repo}}/pulls/{n}/files "
+                          f"--paginate --jq {FILES_JQ}"] = exited(files)
 
-    def run_json(self, args, cwd=None):
-        self.calls.append(args)
-        if args[:3] == ["gh", "run", "list"]:
-            return self.ci_runs if "--branch" in args else self.deploy_runs
-        if args[:3] == ["gh", "run", "view"]:
-            return self.views.get(int(args[3]))
-        if args[:2] == ["gh", "api"]:
-            return self.attempt
-        if args[:3] == ["gh", "pr", "list"]:
-            return self.prs
-        raise AssertionError(f"unstubbed run_json: {args}")
+    def _logged(self) -> list[dict]:
+        if not os.path.exists(CALLS):
+            return []
+        with open(CALLS, encoding="utf-8") as f:
+            return [json.loads(line) for line in f if line.strip()]
 
-    def run(self, args, cwd=None):
-        self.calls.append(args)
-        if args[:2] == ["git", "fetch"]:
-            return (self.fetch, "")
-        if args[:2] == ["git", "merge-base"]:
-            if args[4] in self.unplaceable:
-                return (128, "")
-            return (0, "") if (args[3], args[4]) in self.ancestors else (1, "")
-        if args[:3] == ["gh", "pr", "diff"]:
-            return self.diff
-        if args[:2] == ["git", "ls-remote"]:
-            return self.ls_remote
-        # Matched on the compare path, not on `gh api` alone: a later `gh api`
-        # asking something else must still hit the AssertionError below rather
-        # than quietly collect this answer.
-        if args[:2] == ["gh", "api"] and "/compare/" in args[2]:
-            return self.compare
-        if args[:2] == ["gh", "api"] and args[2].endswith("/files"):
-            return self.files
-        # The exact path reconcile.selection_reason asks for, so a reader that
-        # fetched some other job's log, or the run's, hits the AssertionError.
-        prefix, suffix = "repos/{owner}/{repo}/actions/jobs/", "/logs"
-        if (len(args) == 3 and args[:2] == ["gh", "api"]
-                and args[2].startswith(prefix) and args[2].endswith(suffix)):
-            job_id = int(args[2][len(prefix):-len(suffix)])
-            return (0, self.logs[job_id]) if job_id in self.logs else (1, "")
-        raise AssertionError(f"unstubbed run: {args}")
+    @property
+    def calls(self) -> list[list[str]]:
+        """Every gh call this case made, in order, as its full argv."""
+        return [["gh", *e["argv"]] for e in self._logged()]
 
-    def install(self):
-        reconcile.run_json = self.run_json
-        reconcile.run = self.run
-        # Reset the one reader a case can replace on its own. Two cases below
-        # monkeypatch `commit_on_main` and nothing used to put it back, so a
-        # deploy case appended after them would inherit "git cannot answer"
-        # forever: it would return {"done": False} and pass whatever it asserted
-        # about waiting, with the on-main check never running. Coverage that
-        # reads as real is worse than none.
-        reconcile.commit_on_main = REAL_COMMIT_ON_MAIN
+    def settle(self) -> None:
+        """Fail the case if gh was asked anything its scenario did not script."""
+        if self.settled:
+            return
+        self.settled = True
+        for e in self._logged():
+            if e["exit"] == 97:
+                what = "gh " + " ".join(e["argv"])
+                FAILURES.append(f"unscripted call: {what}")
+                print(f"    FAIL: unscripted call: {what}")
+
+    def install(self) -> "World":
+        global _installed
+        if _installed is not None:
+            _installed.settle()
+        with open(SCENARIO, "w", encoding="utf-8") as f:
+            json.dump(self.scenario, f)
+        open(CALLS, "w").close()
+        git(reconcile.REPO, "remote", "set-url", "origin",
+            ORIGIN if self.origin_reachable else UNREACHABLE)
+        _installed = self
         return self
+
+
+def _settle_last() -> None:
+    """Name the unscripted call even when a case crashed on its answer."""
+    if _installed is not None:
+        _installed.settle()
+
+
+atexit.register(_settle_last)
 
 
 def gh_run(rid, head, status="completed", conclusion="success", event="workflow_run"):
     return {"databaseId": rid, "headSha": head, "status": status,
             "conclusion": conclusion, "url": f"https://gh/run/{rid}", "event": event}
-
-
-A = "a" * 40   # the card's merge commit
-B = "b" * 40   # a merge that overtook it two minutes later
 
 
 # --- deploy_verdict ---------------------------------------------------------
@@ -193,7 +306,6 @@ print("==> a descendant's deploy that BROKE is this commit's answer, and it is f
 World(
     deploy_runs=[gh_run(2, B), gh_run(1, A)],
     views={2: deploy_job("failure"), 1: deploy_job("skipped")},
-    ancestors={(A, B)},
 ).install()
 v = reconcile.deploy_verdict(A)
 check(v["terminal"] and v["outcome"] == "deploy-failed",
@@ -204,7 +316,6 @@ print("==> a stale-revision stand-down with a descendant still running is not fi
 World(
     deploy_runs=[gh_run(2, B, status="in_progress", conclusion=""), gh_run(1, A)],
     views={1: deploy_job("skipped")},
-    ancestors={(A, B)},
 ).install()
 v = reconcile.deploy_verdict(A)
 check(not v["terminal"] and v["step_conclusion"] == "skipped",
@@ -223,7 +334,6 @@ print("==> a run that never deployed is not final while a descendant's deploy is
 World(
     deploy_runs=[gh_run(2, B, status="in_progress", conclusion=""), gh_run(1, A)],
     views={1: NO_DEPLOY_STEP},
-    ancestors={(A, B)},
 ).install()
 v = reconcile.deploy_verdict(A)
 check(not v["terminal"] and not v["verified"],
@@ -232,12 +342,13 @@ check(B[:12] in v["reason"], "it names the descendant still deploying", v["reaso
 
 print("==> a run git cannot place is not a run that does not carry the commit")
 # `merge-base --is-ancestor` exits 128 for a head this checkout never fetched.
-# Read as "not an ancestor", B's successful deploy of A was skipped, and A's own
-# run -- which completed with no deploy job -- ended the wait as final.
+# Read as "not an ancestor", the successful deploy of a descendant was skipped,
+# and A's own run -- which completed with no deploy job -- ended the wait as
+# final. Here origin cannot be reached, so the head stays one git never saw.
 World(
-    deploy_runs=[gh_run(2, B), gh_run(1, A)],
+    deploy_runs=[gh_run(2, GHOST), gh_run(1, A)],
     views={2: deploy_job("success"), 1: NO_DEPLOY_STEP},
-    fetch=1, unplaceable={B},
+    origin_reachable=False,
 ).install()
 v = reconcile.deploy_verdict(A)
 check(not v["terminal"] and not v["verified"],
@@ -246,7 +357,7 @@ check("2" in v["reason"] and "git fetch origin failed" in v["reason"],
       "it names the run and the failed fetch", v["reason"])
 
 print("==> a run `gh run view` could not read teaches nothing and stops nothing")
-World(deploy_runs=[gh_run(1, A)], views={}).install()
+World(deploy_runs=[gh_run(1, A)], views={1: None}).install()
 v = reconcile.deploy_verdict(A)
 check(not v["terminal"], "an unreadable run keeps the wait open", json.dumps(v))
 check("could not read" in v["reason"], "it says the run was unreadable", v["reason"])
@@ -262,7 +373,6 @@ print("==> a terminal failure wins over a NEWER stand-down, whatever the list or
 World(
     deploy_runs=[gh_run(2, B), gh_run(1, B)],
     views={2: deploy_job("skipped"), 1: deploy_job("failure")},
-    ancestors={(A, B)},
 ).install()
 v = reconcile.deploy_verdict(A)
 check(v["terminal"] and v["outcome"] == "deploy-failed",
@@ -273,13 +383,12 @@ print("==> a successful deploy still wins over a newer failure")
 World(
     deploy_runs=[gh_run(3, B), gh_run(2, A)],
     views={3: deploy_job("failure"), 2: deploy_job("success")},
-    ancestors={(A, B)},
 ).install()
 v = reconcile.deploy_verdict(A)
 check(v["verified"] and v["terminal"], "an own successful deploy verifies", json.dumps(v))
 
 print("==> a descendant that does not carry this commit is never consulted")
-w = World(deploy_runs=[gh_run(9, B)], views={9: deploy_job("failure")}).install()
+w = World(deploy_runs=[gh_run(9, SIDE)], views={9: deploy_job("failure")}).install()
 v = reconcile.deploy_verdict(A)
 check(not v["terminal"] and v["reason"].endswith("yet"),
       "an unrelated failure is not this commit's", json.dumps(v))
@@ -320,7 +429,7 @@ check((v.get("selection_reason") or "").startswith("stand-down:"),
 print("==> a skipped deploy whose log cannot be read never reads as queued")
 w = World(deploy_runs=[gh_run(1, A)],
           views={1: selection_job(77, "success", "skipped")},
-          logs={}).install()
+          logs={77: None}).install()
 v = reconcile.deploy_verdict(A)
 check(not v["terminal"] and v.get("outcome") != "deploy-queued",
       "an unreadable log keeps the wait open", json.dumps(v))
@@ -347,7 +456,6 @@ w = World(
     views={3: selection_job(79, "success", "skipped"),
            2: selection_job(78, "success", "success")},
     logs={79: job_log(QUEUED)},
-    ancestors={(A, B)},
 ).install()
 v = reconcile.deploy_verdict(A)
 check(v["verified"] is True, "the scheduled descendant deploy verifies", json.dumps(v))
@@ -364,7 +472,6 @@ w = World(
     views={2: selection_job(78, "success", "skipped"),
            1: selection_job(77, "success", "failure")},
     logs={78: job_log(QUEUED)},
-    ancestors={(A, B)},
 ).install()
 v = reconcile.deploy_verdict(A)
 check(v["terminal"] and v["outcome"] == "deploy-failed" and "run 1" in v["reason"],
@@ -387,7 +494,6 @@ print("==> a deploy that ran and failed is exit 3 and never `satisfied`")
 World(
     deploy_runs=[gh_run(2, B), gh_run(1, A)],
     views={2: deploy_job("failure"), 1: deploy_job("skipped")},
-    ancestors={(A, B)},
 ).install()
 state = waitfor.deploy_state(A)
 check(not state.get("done") and state.get("stop"), "the state stops the wait", json.dumps(state))
@@ -405,14 +511,17 @@ check(code == 0 and out["satisfied"] is True and out["outcome"] == "satisfied",
       "a real deploy satisfies the wait", json.dumps(out))
 
 print("==> a commit that is not on main stops the wait without satisfying it")
+# SIDE is on origin, on a branch of its own, and never reached main.
 World(deploy_runs=[]).install()
-reconcile.commit_on_main = lambda sha: False
-code, out = wait_once(waitfor.deploy_state(A))
+code, out = wait_once(waitfor.deploy_state(SIDE))
 check(code == 3 and out["outcome"] == "not-on-main",
       "not-on-main is its own outcome", json.dumps(out))
+# The same world with a commit that IS on main. git answers both, so a stop
+# on the first is git's answer and not the absence of a deploy run.
 World(deploy_runs=[]).install()
-check(reconcile.commit_on_main is REAL_COMMIT_ON_MAIN,
-      "installing a world restores the reader the last case replaced")
+state = waitfor.deploy_state(A)
+check(not state.get("done") and not state.get("stop"),
+      "a commit on main with no deploy run yet keeps waiting", json.dumps(state))
 
 print("==> a budget that expires is still exit 1")
 code, out = wait_once({"done": False})
@@ -420,11 +529,16 @@ check(code == 1 and out["satisfied"] is False and out["outcome"] == "budget-expi
       "the timeout outcome is unchanged", json.dumps(out))
 
 print("==> git failing to answer keeps the wait open rather than stopping it")
-World(deploy_runs=[]).install()
-reconcile.commit_on_main = lambda sha: None
-state = waitfor.deploy_state(A)
+# The defect commit_on_main's docstring names: main moved to LATE, the fetch
+# failed, and the stale `origin/main` says LATE is not on it. This checkout has
+# LATE from origin's `late` branch, so is-ancestor answers 1, not 128. Only the
+# fetch's own exit code tells that "no" apart from the truth.
+git(AUTHOR, "push", "-q", "origin", f"{LATE}:refs/heads/main")
+World(deploy_runs=[], origin_reachable=False).install()
+state = waitfor.deploy_state(LATE)
 check(not state.get("done") and not state.get("stop"),
       "an unanswerable git keeps waiting", json.dumps(state))
+git(AUTHOR, "push", "-q", "--force", "origin", f"{B}:refs/heads/main")
 
 print("==> a queued deploy is exit 0 and satisfied, named deploy-queued")
 World(deploy_runs=[gh_run(1, A)],
@@ -440,8 +554,7 @@ print("==> a stand-down on main keeps waiting")
 World(deploy_runs=[gh_run(1, A)],
       views={1: selection_job(77, "success", "skipped")},
       logs={77: job_log(STAND_DOWN)}).install()
-# On main, so the not-on-main stop cannot be what keeps this from `done`.
-reconcile.commit_on_main = lambda sha: True
+# A is on main, so the not-on-main stop cannot be what keeps this from `done`.
 state = waitfor.deploy_state(A)
 check(not state.get("done") and not state.get("stop"),
       "a stand-down neither satisfies nor stops the wait", json.dumps(state))
@@ -533,7 +646,7 @@ World(
           "mergeStateStatus": "BEHIND", "statusCheckRollup": []}],
     diff=(1, ""),
 ).install()
-pr = reconcile.pr_for("PRA-1")
+pr = reconcile.pr_for(TICKET)
 check(pr["risk"] == "unknown", "the diff is unknown", json.dumps(pr.get("risk")))
 check(pr["needs_update"] is True and pr["is_draft"] is True,
       "needs_update and is_draft survive the unreadable path", json.dumps(pr))
@@ -543,26 +656,23 @@ print("==> a diff GitHub will not render is read from the files API, renames and
 # risk stayed `unknown` on every tick. The files API pages instead, and it names
 # where a renamed file came from: moving a migration out of its directory
 # changes that directory.
-real_paths = reconcile.HIGH_RISK_PATHS
-reconcile.HIGH_RISK_PATHS = ["db/migrations/"]
 open_pr = {"number": 5, "state": "OPEN", "isCrossRepository": False,
            "statusCheckRollup": []}
 World(prs=[dict(open_pr)], diff=(1, ""),
       files=(0, '["README.md", ""]\n["archive/001.sql", "db/migrations/001.sql"]\n')).install()
-pr = reconcile.pr_for("PRA-1")
-check(pr["risk"] == "high" and pr["risk_paths"] == ["db/migrations/"],
+pr = reconcile.pr_for(TICKET)
+check(pr["risk"] == "high" and pr["risk_paths"] == [RISK_PATH],
       "a file renamed out of a risk path is high risk", json.dumps(pr.get("risk_paths")))
 check(pr["files_changed"] == 2, "a rename is one changed file",
       json.dumps(pr.get("files_changed")))
 World(prs=[dict(open_pr)], diff=(1, ""), files=(0, '["README.md", ""]\n')).install()
-pr = reconcile.pr_for("PRA-1")
+pr = reconcile.pr_for(TICKET)
 check(pr["risk"] == "low", "the files API alone can clear a card", json.dumps(pr.get("risk")))
 World(prs=[dict(open_pr)], diff=(1, ""), files=(1, "")).install()
-pr = reconcile.pr_for("PRA-1")
+pr = reconcile.pr_for(TICKET)
 check(pr["risk"] == "unknown" and "pulls/5/files" in pr.get("risk_reason", ""),
       "both failing is unknown, and says which reads to try by hand",
       json.dumps(pr.get("risk_reason")))
-reconcile.HIGH_RISK_PATHS = real_paths
 
 print("==> a fork's pull request is never the card's, even on the card's exact branch name")
 # `--head` matches a branch by NAME -- gh: '"<owner>:<branch>" syntax not
@@ -576,7 +686,7 @@ World(prs=[
     {"number": 5, "state": "OPEN", "isCrossRepository": False, "statusCheckRollup": []},
     {"number": 9, "state": "OPEN", "isCrossRepository": True, "statusCheckRollup": []},
 ]).install()
-pr = reconcile.pr_for("PRA-1")
+pr = reconcile.pr_for(TICKET)
 check(pr is not None and pr.get("number") == 5,
       "the board's own #5 is the card's, not the newer fork #9",
       json.dumps(pr and pr.get("number")))
@@ -584,7 +694,7 @@ check(pr is not None and pr.get("number") == 5,
 World(prs=[
     {"number": 9, "state": "OPEN", "isCrossRepository": True, "statusCheckRollup": []},
 ]).install()
-check(reconcile.pr_for("PRA-1") is None,
+check(reconcile.pr_for(TICKET) is None,
       "a card whose only matching pull request is a fork's has no pull request")
 
 # A row that does not say where it came from is dropped, not trusted: pr_for
@@ -592,11 +702,11 @@ check(reconcile.pr_for("PRA-1") is None,
 World(prs=[
     {"number": 5, "state": "OPEN", "statusCheckRollup": []},
 ]).install()
-check(reconcile.pr_for("PRA-1") is None,
+check(reconcile.pr_for(TICKET) is None,
       "a row with no isCrossRepository is not assumed to be this repository's")
 
 w = World(prs=[]).install()
-reconcile.pr_for("PRA-1")
+reconcile.pr_for(TICKET)
 asked = [c for c in w.calls if c[:3] == ["gh", "pr", "list"]]
 fields = asked[0][asked[0].index("--json") + 1] if asked and "--json" in asked[0] else ""
 check("isCrossRepository" in fields.split(","),
@@ -608,19 +718,18 @@ print("==> pr_for's --head branch carries this instance's namespace, not just th
 # wrong and reconcile never finds the pull request for any card again. The
 # fixture's home has no installation.toml, so its names are legacy and the
 # branch is foreman/<board>/<ticket>: the branch an un-migrated machine's open
-# pull requests sit on. The World stub's
-# dispatch on `run_json` matches only on args[:3] (["gh", "pr", "list"]) and
-# answers the same `prs` regardless of `--head`, so this has to inspect the
-# recorded call directly rather than trust the stub to notice a wrong branch.
-w = World(prs=[]).install()
-reconcile.pr_for("PRA-7")
+# pull requests sit on. The World scripts `gh pr list` on that branch alone, so
+# any other one is an unscripted call. The check below reads the logged call
+# as well, so the failure names the branch that was asked for.
+w = World(prs=[], ticket="ACME-7").install()
+reconcile.pr_for("ACME-7")
 pr_list_calls = [c for c in w.calls if c[:3] == ["gh", "pr", "list"]]
 check(len(pr_list_calls) == 1, "exactly one gh pr list call", str(pr_list_calls))
 head = None
 if pr_list_calls and "--head" in pr_list_calls[0]:
     head = pr_list_calls[0][pr_list_calls[0].index("--head") + 1]
-check(head == f"foreman/{reconcile.INSTANCE}/PRA-7",
-      "the --head value is the instance-scoped branch, not board/PRA-7", head)
+check(head == f"foreman/{reconcile.INSTANCE}/ACME-7",
+      "the --head value is the instance-scoped branch, not board/ACME-7", head)
 
 print("==> reconcile()'s worktree field finds the instance-scoped worktree dispatch.sh actually creates")
 # `worktree = os.path.join(REPO, ".claude", "worktrees",
@@ -629,16 +738,18 @@ print("==> reconcile()'s worktree field finds the instance-scoped worktree dispa
 # card's reported worktree reads as absent. Only a directory at the CORRECT
 # name is created, so a reversion to the old `board-{ticket}` shape (or any
 # other mismatch) reports `None` here instead of the real path.
-World(prs=[]).install()
+World(prs=[], ticket="ACME-8").install()
 wt_dir = os.path.join(
     reconcile.REPO, ".claude", "worktrees",
-    f"foreman-{reconcile.INSTANCE}-PRA-8")
+    f"foreman-{reconcile.INSTANCE}-ACME-8")
 os.makedirs(wt_dir, exist_ok=True)
-record = reconcile.reconcile("PRA-8", [])
+record = reconcile.reconcile("ACME-8", [])
 check(record["worktree"] == wt_dir,
       "the worktree path reconcile() looks for is the one dispatch.sh creates",
       record["worktree"])
 
+
+_settle_last()
 
 if FAILURES:
     print("\nFAILED:")

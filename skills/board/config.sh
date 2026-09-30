@@ -641,6 +641,11 @@ WAIT_BUILD_SECONDS="${WAIT_BUILD_SECONDS:-0}"
 # registers a Remote Control session, so only harness/claude.sh forwards it;
 # the codex and opencode adapters accept it and drop it, because nothing on
 # those harnesses registers with a claude.ai account for it to turn off.
+#
+# This is the BASE, not the whole of it. dispatch.sh adds the board's `env` and
+# a `permissions.deny` list per role (see "THE CARD AGENT'S DENY LIST" there),
+# appending to any deny list written here rather than replacing it. Being
+# dropped on codex and opencode means those agents get no deny list either.
 CARD_AGENT_SETTINGS='{"disableRemoteControl":true}'
 
 # When set, mutating operations print what they would do and exit.

@@ -403,13 +403,145 @@ print(json.dumps(settings))
 PY
 )" || die "could not build $NAME's settings; refusing to dispatch it"
 
+# The scratch dir paired with this worktree. Named once here, because the deny
+# list below must prove it never covers it, and the spawn path creates it.
+AGENT_SCRATCH="$(agent_tmp_for "$WORKTREE")"
+
+# THE CARD AGENT'S DENY LIST. Every card agent runs as the operator's user with
+# permissions bypassed, so before this nothing stopped a build agent writing its
+# own passing review under cards/<T>/reviews/, rewriting history.jsonl, editing
+# the main checkout's board.toml, or editing foreman's own install. Claude Code
+# applies `permissions.deny` in every mode, bypassPermissions included, to its
+# file-editing tools and to the Bash commands it recognises as file writes
+# (redirections, tee, sed -i). One `Edit(...)` rule covers every built-in
+# file-editing tool. An absolute path is written with a leading `//`.
+#
+# PARTIAL, AND SAID SO. A rule stops a tool, not a process: `python3 -c`, a
+# test script or any other program the agent runs still writes wherever the
+# operator's user can. Full confinement is a separate unix user for the agents,
+# which is the operator's infrastructure choice; README.md says the same.
+#
+# CLAUDE ONLY. The settings reach `claude --settings`. codex.sh and opencode.sh
+# take `--settings` and drop it (detached.sh's parser), so an agent on those
+# harnesses gets no deny list at all.
+#
+# Per role:
+#   - every role: foreman's install (FOREMAN_HOME/install and the root this
+#     script runs from), boards.toml, foreman.toml, every key, the inbox, each
+#     board's HALT, ids.env and last-cleanup, every history.jsonl; and each
+#     TRACKED top-level entry of the board's main checkout, plus its .git/config
+#     and .git/hooks/ (a hook is code the next git command runs). Not .claude,
+#     which holds the worktrees, and not the rest of .git, which holds every
+#     worktree's own git metadata and objects.
+#   - build, plan and cleanup: all of cards/, so no author can forge a review.
+#   - review: not cards/, because the reviewer writes its own review file there.
+#
+# Paths are symlink-resolved, and a glob character in one is escaped, so a rule
+# means the one path it names. A rule that would cover this agent's own
+# worktree or scratch dir refuses the dispatch: a deny list that blocks every
+# build is worse than none, and it fails the same way for every card.
+AGENT_SETTINGS="$(python3 - "$AGENT_SETTINGS" "$ROLE" "$FOREMAN_HOME" "$REPO" \
+  "$KEY_FILE" "$BOARD_HOME" "$SKILL_DIR/../.." "$WORKTREE" "$AGENT_SCRATCH" <<'PY'
+import json, os, re, subprocess, sys
+
+(settings_json, role, foreman_home, repo, key_file, board_home, install_root,
+ worktree, scratch) = sys.argv[1:]
+AUTHOR_ROLES = ("build", "plan", "cleanup")
+GLOB_CHARS = "\\*?["
+BOARD_FILES = ("HALT", "ids.env", "last-cleanup")
+
+def literal(path):
+    """A path as a gitignore pattern matching only itself."""
+    return "".join("\\" + c if c in GLOB_CHARS else c for c in path)
+
+def segment_regex(segment):
+    out, i = [], 0
+    while i < len(segment):
+        c = segment[i]
+        if c == "\\" and i + 1 < len(segment):
+            out.append(re.escape(segment[i + 1]))
+            i += 2
+            continue
+        out.append({"*": "[^/]*", "?": "[^/]"}.get(c, re.escape(c)))
+        i += 1
+    return re.compile("".join(out) + r"\Z")
+
+def reaches(pattern, path):
+    """Whether pattern matches path, an ancestor of it, or anything under it."""
+    pattern_segments = pattern.strip("/").split("/")
+    path_segments = path.strip("/").split("/")
+    for p, s in zip(pattern_segments, path_segments):
+        if p == "**":
+            return True
+        if not segment_regex(p).match(s):
+            return False
+    return True
+
+home = literal(os.path.realpath(foreman_home))
+checkout = os.path.realpath(repo)
+patterns = [
+    literal(os.path.realpath(os.path.join(foreman_home, "install"))) + "/**",
+    literal(os.path.realpath(install_root)) + "/**",
+    home + "/boards.toml",
+    home + "/foreman.toml",
+    home + "/*.key",
+    home + "/inbox/**",
+] + [home + "/instances/*/" + name for name in BOARD_FILES] + [
+    home + "/instances/*/cards/**/history.jsonl",
+]
+key = os.path.realpath(key_file)
+if not any(reaches(p, key) for p in patterns):
+    patterns.append(literal(key))
+cards_roots = [home + "/instances/*/cards"]
+board_cards = os.path.realpath(board_home) + "/cards"
+if not reaches(cards_roots[0], board_cards):
+    cards_roots.append(literal(board_cards))
+    patterns.append(literal(board_cards) + "/**/history.jsonl")
+if role in AUTHOR_ROLES:
+    patterns += [root + "/**" for root in cards_roots]
+
+tree = subprocess.run(["git", "-C", checkout, "ls-tree", "-z", "HEAD"],
+                      capture_output=True, text=True)
+if tree.returncode != 0:
+    sys.exit(f"foreman: cannot list {checkout}'s tracked files: {tree.stderr.strip()}")
+for entry in filter(None, tree.stdout.split("\0")):
+    meta, name = entry.split("\t", 1)
+    if name == ".claude":
+        continue
+    kind = meta.split()[1]
+    patterns.append(literal(checkout + "/" + name) + ("" if kind == "blob" else "/**"))
+patterns += [literal(checkout) + "/.git/config", literal(checkout) + "/.git/hooks/**"]
+
+for label, own in (("worktree", worktree), ("scratch dir", scratch)):
+    own = os.path.realpath(own)
+    for p in patterns:
+        if reaches(p, own):
+            sys.exit(f"foreman: the deny rule Edit(/{p}) would cover this agent's {label} {own}")
+
+settings = json.loads(settings_json)
+permissions = settings.setdefault("permissions", {})
+deny = permissions.get("deny", []) if isinstance(permissions, dict) else None
+if not isinstance(deny, list):
+    sys.exit("foreman: CARD_AGENT_SETTINGS' permissions.deny is not a list")
+for rule in ("Edit(/" + p + ")" for p in patterns):
+    if rule not in deny:
+        deny.append(rule)
+permissions["deny"] = deny
+print(json.dumps(settings))
+PY
+)" || die "could not build $NAME's deny list (the reason is above); refusing to dispatch it.
+This is NOT a failure of ticket $TICKET and must not consume its attempt budget.
+Repair the board's paths (FOREMAN_HOME, REPO, the scratch root), then dispatch again at the same attempt number."
+
 if [[ -n "$RESUME" ]]; then
   # Resuming into a deleted working directory produces a silent failure, so
-  # this refuses instead. The caller's fallback is a FRESH dispatch at the
-  # next attempt number, which rebuilds the worktree from origin/main — the
-  # agent loses its context but the card keeps moving. See SKILL.md step 2.
+  # this refuses instead. The caller's fallback is a FRESH dispatch, which
+  # rebuilds the worktree from origin/main — the agent loses its context but
+  # the card keeps moving. It keeps the SAME attempt number unless the ticket
+  # itself failed: a plan revision's respawn at the same number is how
+  # reconcile.py counts it as a round, not an attempt. See SKILL.md step 2.
   [[ -d "$WORKTREE" ]] || die "worktree $WORKTREE is gone; cannot resume $NAME.
-Dispatch fresh (drop --resume, use the next attempt number) instead."
+Dispatch fresh (drop --resume) instead, at the same attempt number unless the ticket itself failed (SKILL.md step 2)."
   # RESUMED ON THE HARNESS THAT SPAWNED IT. A tier may name a harness, so a
   # card's agent can run on codex while this installation's default is claude,
   # and the default adapter has no session of that name to resume -- the resume
@@ -577,15 +709,15 @@ fi
 # disks. NO_TMPDIR strips it from the preflight call above and the resume and
 # spawn calls below, so all three measure the same /tmp this script itself
 # inherited.
-mkdir -p "$(agent_tmp_for "$WORKTREE")"
+mkdir -p "$AGENT_SCRATCH"
 
 # The adapter resolves and prints the session id itself -- see its header --
 # so a "never registered" failure surfaces as ITS non-zero exit, not a second
 # lookup here.
 #
-# `--settings` is CARD_AGENT_SETTINGS plus this board's `env`, on every card
-# agent and never the tick; config.sh records why the first, and the note above
-# the resume path why the second.
+# `--settings` is CARD_AGENT_SETTINGS plus this board's `env` and this role's
+# deny list, on every card agent and never the tick; config.sh records why the
+# first, and the notes above the resume path why the other two.
 #
 # bash 3.2 + `set -u`: "${arr[@]}" on an EMPTY array is an unbound-variable
 # error, not an empty expansion. The `+` form below is the portable way to say
