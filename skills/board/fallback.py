@@ -57,6 +57,16 @@ every build that follows, so the card waits instead. When every allowed tier is
 limited, the answer is the lowest allowed tier with `floor_reached` true. The
 dispatch still spawns on it, so the board voids exactly as it did before this
 file existed.
+
+REVIEW NEVER FALLS BELOW SONNET UNLESS FOREMAN.TOML SAYS SO. An empty
+REVIEW_FLOOR is the one empty value read as a default, not as "no floor":
+bin/installation.py emits "" when foreman.toml sets no floor, so an operator
+who wrote nothing got a review that could fall to haiku. Found auditing the
+board on 2026-09-30. The review is the board's one check on a diff before it
+merges, and a model too weak to find a bug approves it. An operator who wants
+the old walk sets `[fallback.floor] review` to the last tier. The default
+applies only when its model is a tier, so a harness whose tiers the operator
+typed keeps no floor.
 """
 
 from __future__ import annotations
@@ -93,6 +103,10 @@ STAGE_VARS = {
     "review": ("REVIEW_MODEL", "REVIEW_FLOOR"),
     "cleanup": ("CLEANUP_MODEL", "PLAN_FLOOR"),
 }
+
+# The floor a stage gets when its *_FLOOR is empty. See REVIEW NEVER FALLS
+# BELOW SONNET above.
+DEFAULT_FLOORS = {"review": "sonnet"}
 
 
 def die(message: str) -> NoReturn:
@@ -202,7 +216,7 @@ def read_stage(name: str) -> Stage:
     model_var, floor_var = STAGE_VARS[name]
     first_choice = required(model_var)
     tiers = tuple(required("FALLBACK_TIERS").split())
-    floor = required(floor_var) or None
+    floor = required(floor_var) or default_floor(name, tiers)
 
     # installation.py refuses both of these in installation.toml. They are
     # checked again here because the environment wins over that file, and a
@@ -215,6 +229,12 @@ def read_stage(name: str) -> Stage:
         die(f"{floor_var} is {floor!r}, which is not in FALLBACK_TIERS "
             f"({' '.join(tiers) or 'empty'}); expected one of the tiers, or empty for no floor")
     return Stage(name, first_choice, tiers, floor)
+
+
+def default_floor(name: str, tiers: tuple[str, ...]) -> str | None:
+    """The floor <name> gets when none is declared, or None where it has none."""
+    floor = DEFAULT_FLOORS.get(name)
+    return floor if floor in tiers else None
 
 
 def allowed_models(stage: Stage) -> tuple[str, ...]:

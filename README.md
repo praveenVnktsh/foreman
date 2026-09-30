@@ -31,14 +31,25 @@ that happens without you.
 
 ```mermaid
 flowchart LR
-  You(["You move a card<br/>Backlog → Todo"]) --> Plan["Plan<br/><small>draw the change, post it on the card</small>"]
-  Plan --> Build["Build<br/><small>fresh worktree · implement · test · open PR</small>"]
-  Build --> Review["Review<br/><small>a session that did not write it reads the diff</small>"]
-  Review -->|blocking finding| Fix["Fix<br/><small>one round</small>"] --> Gate
+  You(["You move a card<br/>Backlog → Todo"]) -->|needs-plan| Plan["Plan<br/><small>draw the change, post it, wait for sign-off</small>"]
+  You -->|no label| Build
+  Plan -->|signed off| Build["Build<br/><small>fresh worktree · judge size · implement · test · open PR</small>"]
+  Build --> Review["Review<br/><small>one light pass by a session that did not write it</small>"]
+  Review -->|blocking finding| Fix["Fix<br/><small>once · merges on green checks</small>"] --> Gate
   Review -->|clean| Gate{"Evidence gate<br/><small>CI green · no risky paths</small>"}
   Gate -->|pass| Merge(["Merged · deploy watched · Done"])
   Gate -->|risky path| Human(["Parked for a human"])
 ```
+
+- **Small cards skip planning.** A card without the `needs-plan` label goes
+  straight to a build agent. It judges the size itself: a small change is
+  implemented directly, and a larger one is planned as a graph on the card and
+  then built in the same session. Add `needs-plan` to a card you want to sign
+  off before anything is built.
+- **Review is light.** One reviewer reads the diff once and files findings as
+  `blocking` or `note`. Only a concrete bug, a security hole, a weakened check,
+  data loss or a broken build blocks. A blocking finding buys one fix, and that
+  fix merges on green checks without a second review.
 
 Every few days a cleanup agent reads `main` and files one planned card for
 the quality work that review no longer blocks on.
@@ -54,14 +65,23 @@ the quality work that review no longer blocks on.
 - **It holds no state.** Each tick re-derives every card's position from Linear,
   `gh` and `git`. Kill it, restart it or upgrade it mid-build and nothing is lost.
 - **It lives outside the project it builds.** A repository becomes buildable by
-  adding one `board.toml`. Nothing a pull request runs ever executes on your host.
+  adding one `board.toml`.
+- **Know what runs on your host.** Build agents run on your machine, in a
+  throwaway git worktree, with permissions bypassed: they run the target's own
+  bootstrap and test command there. The worktree, the required checks and the
+  review are what contain them — not a sandbox. What never runs on your host is
+  CI: it runs on GitHub-hosted runners, and a merged commit reaches this machine
+  only when foreman pulls it. foreman never merges a pull request from
+  outside the repository it builds.
 
 ## Features
 
 ### The loop
 - **Plan → Build → Review → Merge** as Linear columns, each stage a detached
-  agent in its own git worktree.
-- **Adversarial review** that gates on blocking findings, with one fix round.
+  agent in its own git worktree. Planning is a separate stage only for cards
+  labelled `needs-plan`.
+- **A light review** by a session that did not write the diff: one round, one
+  reviewer, gating only on blocking findings, with one fix.
 - **Evidence-based merges**: required checks, risky paths from the diff, and
   deploy step conclusions, read from GitHub.
 - **Deploy watching**, including queued deploys and a `fast-track` label copied
@@ -207,7 +227,10 @@ One tick end to end, with every file it touches, is drawn in
 
 foreman is public, so CI runs only on GitHub-hosted runners and a merged commit
 reaches your machine only when foreman pulls it. foreman never merges
-a pull request from outside the repository it builds.
+a pull request from outside the repository it builds, and it pins every merge
+to the one head the board judged, so a head that moved since is never merged.
+Build agents do run the target's bootstrap and tests on your host; see
+[Why foreman](#why-foreman) for what contains them.
 
 ## Contributing
 

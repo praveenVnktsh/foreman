@@ -102,7 +102,7 @@ CONFIG_KEYS = (
 # quietly when it is absent, so an empty value here means "never resolved".
 IDS_ENV_KEYS = ("LINEAR_PROJECT_ID", "STATE_TO_PICK_UP")
 
-# first: 100 with no cursor (PRA-461) hid a waiting card past the first page.
+# first: 100 with no cursor hid a waiting card past the first page.
 # starved.py then reported the board as not starved, and supervise.sh left
 # the stuck tick running. Walk every page; refuse when pageInfo or a later
 # page is unreadable. A partial walk as "not starved" is the same silence.
@@ -114,7 +114,6 @@ query TodoIssues($projectId: ID!, $stateId: ID!, $after: String) {{
       identifier
       priority
       createdAt
-      labels {{ nodes {{ name }} }}
       history(first: 50) {{ nodes {{ createdAt toState {{ id }} }} }}
       inverseRelations {{ nodes {{ type issue {{ identifier state {{ type }} }} }} }}
     }}
@@ -478,7 +477,10 @@ def routed_identifiers(nodes: list) -> list[str]:
     """The Todo cards that can be ranked, from queue.py.
 
     Asked of queue.py rather than re-derived, so a card the tick would never
-    dispatch -- one with no priority -- never reads as starved.
+    dispatch -- one whose priority is missing or cannot be read -- never
+    reads as starved. Priority 0, Linear's "No priority", is not that card:
+    queue.py ranks it, last, and the tick dispatches it once nothing outranks
+    it, so a waiting one can be starved like any other.
     """
     done = run([QUEUE_PY], "queue.py", stdin=json.dumps(nodes))
     # 3 is "nothing ranked" with an empty stdout; queue.py names each card on

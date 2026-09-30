@@ -23,7 +23,7 @@
 # those words are the check, not leftover prose, but everything else in this
 # file is ordinary prose and stays covered by that scan.
 set -euo pipefail
-# Run directly, too, in a card agent: clear the board it inherits (PRA-586).
+# Run directly, too, in a card agent: clear the board it inherits.
 # shellcheck source=lib/without-board.sh
 source "$(dirname -- "${BASH_SOURCE[0]}")/lib/without-board.sh"
 
@@ -229,19 +229,20 @@ else
 $review_prompt"
 fi
 
-# The skill grades CRITICAL/WARNING/NOTE and the board parses
-# blocking/warning/note. Without the mapping spelled out, a reviewer writes the
-# skill's own grade into the JSON and the board reads a severity it does not
-# recognise.
-mapping=1
-for pair in 'CRITICAL is `blocking`' 'WARNING is `warning`' 'NOTE is `note`'; do
-  case "$review_prompt" in
-    *"$pair"*) ;;
-    *) bad "the review prompt does not map the skill's grade onto this board's severity: $pair"
-       mapping=0 ;;
-  esac
-done
-[[ "$mapping" == 1 ]] && ok "the review prompt maps CRITICAL/WARNING/NOTE onto blocking/warning/note"
+# The skill grades CRITICAL/WARNING/NOTE; a light review reads exactly two
+# severities. Without that spelled out, a reviewer writes the skill's own grade
+# into the JSON and the board reads a severity it does not recognise -- which
+# severity.py then counts as blocking, so an unmapped WARNING costs a fix.
+case "$review_prompt" in
+  *'two severities, `blocking` and `note`'*)
+    ok "the review prompt asks for exactly blocking or note" ;;
+  *) bad "the review prompt does not ask for exactly two severities, blocking and note" ;;
+esac
+case "$review_prompt" in
+  *'WARNING is `warning`'*)
+    bad "the review prompt still offers a third severity, warning" ;;
+  *) ok "the review prompt offers no third severity" ;;
+esac
 
 # ============================================================================
 # Part 2 -- quote_untrusted: agent-written text must still be wrapped in a tag

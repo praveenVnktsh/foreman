@@ -145,6 +145,11 @@ and misconfigured still costs one test. Then name the skipped boards in the
 report — a halted board and a board with nothing to do look identical from the
 outside, and only one of them is waiting for an operator.
 
+**`dispatch.sh` refuses on `HALT` too**, so a board halted mid-pass spawns
+nothing even when a slice already started. The refusal names the `HALT` file and
+says it is **NOT a failure of the ticket**, in the same voice as the ceiling
+refusals. Charge nothing, move nothing, and end that board's slice.
+
 ### Round-robin: one slice per board per pass
 
 Work the boards **round-robin** — one slice each, in turn, then round again.
@@ -158,10 +163,13 @@ reports. Round-robin is what makes the difference visible — every board is
 either worked or named as skipped.
 
 **The order of a pass comes from `reconcile.py --board-order`**, never from the
-order `boards.py --list` printed:
+order `boards.py --list` printed. It sources `config.sh`, so ask it inside a
+board subshell — any board that is not halted:
 
 ```bash
-~/.foreman/install/skills/board/reconcile.py --board-order
+( export FOREMAN_INSTANCE=<board>
+  . ~/.foreman/install/skills/board/config.sh
+  ~/.foreman/install/skills/board/reconcile.py --board-order )
 ```
 
 It prints
@@ -212,7 +220,8 @@ Two more things to know about the mode:
   catch.
 - **It does not stop wanting `FOREMAN_INSTANCE`.** It sources `config.sh` like
   every other `reconcile.py` call, even though the question is about the whole
-  machine. Ask it as any board.
+  machine. Run bare, it refuses with `FOREMAN_INSTANCE is unset`; the subshell
+  above is the fix.
 
 **A slice ends at whichever comes first:**
 
@@ -234,9 +243,12 @@ by it — and it is what stops the busiest board owning the tick.
   `board.toml`.
 - **`HOST_MAX_CONCURRENT` caps the machine**, across every board on it.
 
-One tick now sees every board, so the machine ceiling is yours to hold directly
-rather than something several ticks each estimated separately. Check it in
-step 6, before every dispatch, on top of that board's own free-slot count.
+**`dispatch.sh` holds both ceilings, and it is the authority.** It refuses a
+fresh dispatch that either ceiling would not allow, however it is called, with a
+message saying the refusal is **NOT a failure of the ticket**. Anything the tick
+counts first only saves writing a brief that would be refused. On 2026-09-01 a
+tick adopted five cards and dispatched a build for each against a
+`MAX_CONCURRENT` of 1, because the arithmetic was prose and prose is not a gate.
 
 **A board's share of the machine is reserved only while it is asking for work.**
 `reconcile.py --may-dispatch` gives each board a floor — its priority's share of
@@ -255,6 +267,33 @@ boards only when the board has asked for a slot within `DEMAND_STALE_MINUTES`.
 - **A board this tick stops reading is a board that stops asking**, and its
   floor goes with it. Local state cannot tell that apart from an empty column,
   which is why `starved.py` reads Linear itself, from outside the tick.
+
+### Who holds a slot
+
+This is the one statement of the rule. Every other mention of `released` or of
+`HOST_SLOT_STALE_MINUTES` in this file points here.
+
+- **A card holds a slot from its first entry in `history.jsonl` — `dispatch.sh`
+  writes one at every spawn — until the card's last entry is
+  `{"action":"released",...}`.** `reconcile.py --host-slots`
+  reads exactly that, for every board `boards.toml` declares, and prints
+  `{"instances": {<board>: n, ...}, "tickets": {<board>: [...]}, "total": N}`.
+  `dispatch.sh` asks it before every fresh spawn.
+- **A card that already holds a slot takes no second one.** A resume, a fix and
+  a reviewer for a card in flight pass both ceilings.
+- **You write `released` at every exit that leaves no agent working**: `Done`,
+  every `board-failed` exit, and every park for the operator. `sweep.sh` writes
+  it for a card it sweeps. A card that is released and later resumed — a parked
+  plan the operator answered — holds a slot again, and its next park needs its
+  own `released`.
+- **`HOST_SLOT_STALE_MINUTES` is a backstop, not a release.** A card with no new
+  entry for that long stops counting even without the marker, so one forgotten
+  marker cannot wedge every board for good. It is counted in hours, so a
+  forgotten marker still costs the machine a slot for most of a day — and a card
+  parked for a plan sign-off can legitimately wait for days.
+- **The machine ceiling is `reconcile.py --may-dispatch <board>`.** It is what
+  `dispatch.sh` asks after the board's own count, and its answer is the line to
+  quote when it refuses.
 
 ## Config
 
@@ -304,12 +343,12 @@ A number carried from one slice into the next is the previous board's answer.
 | `CLEANUP_MAX_PLAN_NODES` | the node count above which a cleanup card's plan waits for the operator: over it, the cleanup agent adds `needs-plan` to the card it just filed |
 | `MIN_FREE_*`, `PROBE_*`, `QUICK_PROBE_MB` | environment thresholds enforced by `preflight.py` — declared per-target in `board.toml`'s `[limits]`, not here. **foreman's own defaults are sized for foreman's own cheap suite**; a target with a heavy build (a real test suite, a large `node_modules`, …) that declares no `[limits]` silently inherits them and can pass this preflight while still dying mid-build the way two consecutive attempts on one card did on 2026-08-02 — see `bin/contract.py`. |
 | `HOST_MAX_CONCURRENT` | cards holding a slot, summed across **every** board on this machine |
-| `HOST_SLOT_STALE_MINUTES` | how long a card may go without a fresh `history.jsonl` entry before `--host-slots` stops counting it even with no `released` marker — a backstop, not the primary release mechanism |
+| `HOST_SLOT_STALE_MINUTES` | the backstop for a missing `released` marker — see *Who holds a slot* |
 | `DEMAND_STALE_MINUTES` | how long a board's ask for a slot keeps its share of `HOST_MAX_CONCURRENT` reserved. Derived from `TICK_INTERVAL_MINUTES`, because the tick is what refreshes the ask — see *Two ceilings* |
 | `PLAN_MODEL`, `BUILD_MODEL`, `REVIEW_MODEL` | the model each dispatched role runs on — see *One model per stage* below |
 | `CLEANUP_MODEL` | the model the cleanup agent runs on, defaulting to `PLAN_MODEL` — same section |
 | `FALLBACK_TIERS`, `FALLBACK_COOLDOWN_MINUTES` | the models a rate-limited stage falls down through, strongest first, and how long a limit is believed — `foreman.toml` `[fallback]`, see *A rate-limited model* in step 2. A tier may name its harness (`opencode:foundry/gpt-5.6-sol`), so one tick falls back across CLIs and not only across models. Empty tiers turn fallback off |
-| `PLAN_FLOOR`, `BUILD_FLOOR`, `REVIEW_FLOOR` | the weakest model each stage may fall back to, from `[fallback.floor]`; empty means the bottom of the tiers. Cleanup uses `PLAN_FLOOR` |
+| `PLAN_FLOOR`, `BUILD_FLOOR`, `REVIEW_FLOOR` | the weakest model each stage may fall back to, from `[fallback.floor]`. Empty means the bottom of the tiers, except for review: an empty `REVIEW_FLOOR` stops at `sonnet` whenever `sonnet` is a tier, because the one review a diff gets must not run on a model too weak to find the bug. Cleanup uses `PLAN_FLOOR` |
 | `BOARD_DRY_RUN` | print every mutation instead of performing it |
 
 `MAX_CONCURRENT` counts **cards, not processes** — a card in review adds up to
@@ -317,17 +356,8 @@ A number carried from one slice into the next is the previous board's answer.
 
 `HOST_MAX_CONCURRENT` bounds the same thing across boards: two boards each
 dispatching up to their own `MAX_CONCURRENT` can still jointly exceed what one
-machine's RAM and disk can sustain. `$B/reconcile.py --host-slots` counts it for
-every board `boards.toml` declares, reading each one's
-`instances/<board>/cards/`, and reports
-`{"instances": {<board>: n, ...}, "total": N}`. The machine is what
-`HOST_MAX_CONCURRENT` is a number for, so check `total` against it in step 6,
-alongside that board's own free-slot count, before dispatching anything. A card stops
-counting when its history's last entry is `{"action":"released",...}` — logged
-at `Done` and at every `board-failed` exit, see steps 2, 3 and 5 — or, failing
-that, once `HOST_SLOT_STALE_MINUTES` has passed with no new entry at all. The
-marker is what should release a slot; the timer is what keeps a missed marker
-from wedging every board on the machine forever.
+machine's RAM and disk can sustain. How a card holds and releases a slot is in
+[Who holds a slot](#who-holds-a-slot).
 
 ### One model per stage
 
@@ -337,8 +367,8 @@ and no dispatch can be given the wrong one by omission:
 
 | `--role` | Knob | What that agent does |
 |---|---|---|
-| `plan` | `PLAN_MODEL` | draws the change as one graph with the `graphplan` skill |
-| `build` | `BUILD_MODEL` | executes the plan, runs the tests, opens the pull request |
+| `plan` | `PLAN_MODEL` | draws a `needs-plan` card's change as one graph with the `graphplan` skill, posts it and stops |
+| `build` | `BUILD_MODEL` | judges the card's size, plans it with `graphplan` when it is not small, implements, runs the tests, opens the pull request |
 | `review` | `REVIEW_MODEL` | reads a pushed diff adversarially |
 | `cleanup` | `CLEANUP_MODEL` | reads `origin/main` and files one planned card — step 8 |
 
@@ -356,7 +386,9 @@ before any code exists, and every build agent afterwards is only as good as the
 graph it was handed — a node whose label is wrong is wrong in every file that
 node owns. `skills/graphplan/SKILL.md` therefore caps a node's own tier at
 `opus` and forbids `fable` as a node tier: the strongest model is spent on the
-design, not on typing it out.
+design, not on typing it out. That holds for a `needs-plan` card. A card without
+the label is planned, if at all, by its build agent on `BUILD_MODEL`; a card
+that deserves the plan stage's model and a sign-off is one the operator labels.
 
 **A first choice is not a guarantee.** When a stage's model is rate-limited,
 `dispatch.sh` spawns on the next tier down instead, never below that stage's
@@ -372,14 +404,14 @@ out. With that, more than one harness's agents can be live at once, so every
 the tiers and stage models, and routes `stop`/`transcript` to the adapter that
 owns the agent. A tier without a prefix runs on foreman's own harness.
 
-**`--role plan` is a dispatch step 6 makes.** Planning and building are two
-agents: the plan agent draws the graph, posts it to the Linear card as a comment
-and stops, and a build agent is dispatched afterwards — fresh from `origin/main`
-— with that graph rendered into its prompt (step 2). What made the split
-impossible before was where the plan lived. It was a file pushed on the card's
-own branch, and a `--role build` dispatched after a `--role plan` resets that
-branch to `origin/main` and throws the plan away. The plan lives on the card
-now, so nothing has to survive in git between the two dispatches.
+**The plan stage is only for a card that carries `needs-plan`.** Step 6 routes
+every other `Todo` card straight to a build, and the build agent judges the
+card's size itself (step 6 says how). A `needs-plan` card still gets two agents:
+the plan agent draws the graph, posts it to the Linear card as a comment and
+stops, and after the operator signs it off a build agent is dispatched — fresh
+from `origin/main` — with that graph rendered into its prompt (step 2). The plan
+lives on the card, not on a branch, because a `--role build` dispatch resets
+the card's branch to `origin/main` and would throw a pushed plan away.
 
 ## Scope
 
@@ -417,7 +449,7 @@ filter is also what keeps one board's slice out of another board's cards.
 | `needs-merge` | `LABEL_NEEDS_MERGE` | you | green and reviewed, high-risk — **the operator's** merge |
 | `board-failed` | `LABEL_BOARD_FAILED` | you | out of attempts or rounds, moved to `Needs Human`, needs re-triage |
 | `cleanup` | `LABEL_CLEANUP` | the cleanup agent | the one card it filed this run — step 8 |
-| `needs-plan` | `LABEL_NEEDS_PLAN` | the operator, or the cleanup agent — **never the tick**, which neither adds nor removes it | park in `Plan` until the operator removes it — step 2 |
+| `needs-plan` | `LABEL_NEEDS_PLAN` | the operator, or the cleanup agent — **never the tick**, which neither adds nor removes it | route the card through the plan stage (step 6), and park it in `Plan` until the operator removes it (step 2). A `Todo` card without it goes straight to a build |
 
 `needs-merge` and `board-failed` are the board's own: you write them and a human
 reads them.
@@ -493,12 +525,17 @@ reading of that column. Nothing reaches it on a report; see step 5.
 Exported in the tick's own environment it covers every board, because each
 board's `config.sh` inherits it. There is no per-board dry run.
 
-`dispatch.sh` and `sweep.sh` enforce it themselves. Linear and `gh` cannot — so
-it is on you:
+`dispatch.sh`, `sweep.sh`, `merge.py` and `card_log` enforce it themselves.
+`merge.py` makes no `gh` write at all and exits 6 (step 4); `card_log` writes
+nothing and prints `DRY RUN: would append ...` to stderr. Linear and bare `gh`
+cannot — so it is on you:
 
 - Linear MCP: **read only.** No state change, no comment, no label, no new issue.
-- `gh`: no `pr merge`, no `pr comment`, no `update-branch`, no pushes.
+- `gh`: no `pr merge`, no `pr ready`, no `pr comment`, no `update-branch`, no
+  `run rerun`, no pushes.
 - No `"$HARNESS_SH" stop`.
+- `card_log` is safe to call: under `BOARD_DRY_RUN` it leaves the card's real
+  `history.jsonl` alone. Report each entry as a `WOULD:` line as well.
 
 Instead, print one line per intended action, in order, prefixed `WOULD:` — the
 card, the action, and the evidence that justifies it. Then stop. Reading
@@ -569,23 +606,21 @@ re-derives the whole picture from Linear, `gh` and `"$HARNESS_SH" list`. That is
 what makes a lost edge survivable, and it is why the fallback exists rather than
 being tuned away.
 
-**The heartbeat's pace is picked when you type the `/loop` invocation, not
-fixed by this skill** — there is no config knob for it, because it is a
-property of how you run the loop, not of the target. Pick something faster
-than the `/loop` skill's own 1200–1800s default if cards get added
-interactively and should be picked up reasonably quickly, since a card
-entering `Todo` is the one transition no agent completion can ever report.
-One operator settled on 7 minutes on 2026-08-02, after finding 2 minutes too
-frequent — do not tighten a working pace back down without a reason as
-concrete as that one.
+**On Claude the heartbeat has no interval to pick.** `/loop /board` with no
+interval — what `supervise.sh` types, through the adapter's `skill-prompt` —
+lets `/loop` pace itself between passes. An interval would switch it into
+fixed-interval cron mode, which polls and never arms the Monitor (see
+[Restarting after the session dies](#restarting-after-the-session-dies)). An
+operator settled on a 7-minute interval on 2026-08-02, in the polling design
+this replaced; that number belongs to that design and not to this one.
+**`TICK_INTERVAL_MINUTES` is the cadence only on Codex and OpenCode**, where the
+adapter's `--loop-minutes` wrapper sleeps that long between sessions. On every
+harness it is also what `supervise.sh` measures a tick's liveness against.
 
 This is a *fallback*, not a cadence. Nothing waits on it that the Monitor
-reports: an agent finishing wakes the board instantly whatever this is set to.
-It is affordable at all only because step 0 uses `preflight.py --quick`; at the
-full preflight's 1GB probe, a heartbeat this short would write tens of GB to
-tmpfs per hour. If you ever restore the full probe to step 0, raise this with it.
-`--quick` costs no network at all: it is a disk check, and the fetch it used to
-make computed a staleness number nothing read.
+reports: an agent finishing wakes the board instantly. A frequent heartbeat is
+affordable because step 0 uses `preflight.py --quick`, which writes the small
+`QUICK_PROBE_MB` probe and touches no network.
 
 ### Restarting after the session dies
 
@@ -605,8 +640,7 @@ directory is needed: each slice `cd`s into its own board's `$REPO`, and every
 path this skill names is absolute. The first tick re-lists the boards and
 re-derives every card's position from Linear, `gh` and `"$HARNESS_SH" list` —
 including agents an earlier session spawned, because the adapter's registry is
-per-foreman, not per-session. Then arm one Monitor per board and set the
-heartbeat as above.
+per-foreman, not per-session. Then arm one Monitor per board.
 
 Type it with **no interval**. An interval switches `/loop` into fixed-interval
 cron mode, which polls and never arms the Monitor — that is the polling design
@@ -741,9 +775,11 @@ and starts no replacement beside it, then asks again on the next fire. Dying
 there marked `foreman.service` failed every ten minutes and fixed nothing, and
 the tick whose stop is slowest to land is the wedged one the watchdog is for.
 
-**A running tick keeps reading the skill it started with.** So
-`git -C ~/.foreman/install pull` changes nothing by itself, and
-`--restart` is what makes the new install take effect.
+**A running tick keeps reading the skill it started with.** Update foreman with
+`bin/self-update.sh`: it fast-forwards the clone to the latest release and runs
+`--restart` for you. A hand `git -C ~/.foreman/install pull` changes nothing by
+itself, and leaves the machine reporting healthy on a version nobody chose until
+something restarts the tick.
 
 `systemctl --user restart foreman.service` is **not** this gesture: it re-runs
 the watchdog, which finds a healthy tick and does nothing.
@@ -762,7 +798,8 @@ one of it alive. The per-card agent names carry the board, which is what stops
 two boards reaping each other's work. If you also
 type `/board` in an interactive session while the loop is running, you are the
 second tick — for every board at once — and nothing stops you, so don't, unless the loop is
-stopped or you are running `BOARD_DRY_RUN=1`.
+stopped or you are running `BOARD_DRY_RUN=1` and following [Dry run](#dry-run) to
+the letter: no `card_log`, because it writes the live history.
 
 The knobs are in `config.sh`: `TICK_INTERVAL_MINUTES`, `TICK_STALL_MINUTES`,
 `TICK_DEAD_MINUTES`, `TICK_MAX_AGE_HOURS`. `TICK_DEAD_MINUTES` must exceed the
@@ -794,18 +831,20 @@ next pass, which is one trip round the board list away. A card that goes
 build → checks → review → merge → deployed should cost one tick, not five ticks
 that are idle in between.
 
-So the shape of a tick is:
+So the shape of a tick is below. These are the tick's own phases, lettered so
+they are never confused with a slice's numbered steps 0–9 further down.
 
-0. **Read the inbox**, once, at the top: everything in `$FOREMAN_HOME/inbox/`.
-   See [The inbox](#the-inbox) below.
-1. List the boards, once, at the top: `boards.py --list`.
-2. A **pass** is one slice for each board in turn, skipping halted ones, in the
-   order `reconcile.py --board-order` prints for that pass. A slice is steps 0–9
-   for that board, ending as soon as it has moved one card forward or found
-   nothing immediately actionable. Stamp the board with `reconcile.py --served
-   <board>` as the slice opens, so the next pass knows it was reached.
-3. If a pass **changed any card's state on any board**, run another pass.
-4. Stop when a whole pass changes nothing anywhere, or the budget is spent.
+- **A. Read the inbox**, once, at the top: everything in `$FOREMAN_HOME/inbox/`.
+  See [The inbox](#the-inbox) below.
+- **B. List the boards**, once, at the top: `boards.py --list`.
+- **C. Run a pass**: one slice for each board in turn, skipping halted ones, in
+  the order `reconcile.py --board-order` prints for that pass. A slice is steps
+  0–9 for that board, ending as soon as it has moved one card forward or found
+  nothing immediately actionable. Stamp the board with `reconcile.py --served
+  <board>` as the slice opens, so the next pass knows it was reached.
+- **D. Repeat C** while a pass **changed any card's state on any board**.
+- **E. Stop** when a whole pass changes nothing anywhere, or the budget is
+  spent.
 
 Re-list the boards at the top of each tick, not each pass. A board added
 mid-tick is the next tick's, and re-listing inside the loop would let a
@@ -889,8 +928,11 @@ every poll. **Three exit codes, not two**, and the JSON names which one it was i
   open. Not an error, just the signal to end the tick and report.
 - **3** — the condition is *settled and did not hold*, and waiting longer is
   exactly what will not help. `outcome` names which: `deploy-failed`,
-  `deploy-never-ran`, `deploy-selection-failed`, `not-on-main`. Never read this as satisfied — a failed
-  deploy came back as `satisfied: true` for as long as `done` meant both.
+  `deploy-never-ran`, `deploy-selection-failed`, `not-on-main`,
+  `no-merge-commit`, or `not-deployed` for a settled verdict that carried no
+  name of its own. Step 5 says what each means. Never read this as satisfied —
+  a failed deploy came back as `satisfied: true` for as long as `done` meant
+  both.
 - **2** — **you called it wrong.** argparse's own code, and what an unusable
   invocation returns: a missing flag, or a `--sha` that arrived empty because the
   merge commit was not known yet. It prints no JSON at all, which is why it is
@@ -964,26 +1006,26 @@ full one fails all of them for the same reason, and repeating the same
 diagnosis per board buries it. Name the check, name the repair, and stop the
 tick.
 
-**Use `--quick` for the routine tick.** The heartbeat runs every couple of
-minutes and almost always finds nothing to do; writing a gigabyte each time to
-prove a machine it is not about to build on is healthy is tens of GB of tmpfs
-churn per hour for nothing. `--quick` writes a small probe, reads free space, and
-fetches — which still catches a hard-broken box, because a quota at its limit
-refuses 16MB as readily as 1GB. What it skips is the gigabyte, not the network.
-The authoritative gate has not moved: `dispatch.sh` runs the
-**full** preflight before spawning anything, so nothing reaches a broken machine
-on the strength of the quick check.
+**Use `--quick` for the routine tick.** It is a disk and memory check and
+nothing else: it writes a `QUICK_PROBE_MB` probe instead of the full
+`PROBE_TMP_MB` one, reads free space, and **touches no network at all**.
+`bin/contract.py` defaults them to 4 and 16, and a target with a heavy build
+raises them in its `[limits]`. The small probe still catches a hard-broken box,
+because a quota at its limit refuses a small write as readily as a large one.
+The authoritative gate has not moved: `dispatch.sh` runs the **full** preflight
+before spawning anything, so nothing reaches a broken machine on the strength
+of the quick check.
 
 An unfit machine is not a card failure. Do not move anything to `Needs Human`,
 do not add `board-failed`, and do not count an attempt against any ticket. Say
 which check failed and what it would take to repair.
 
-**`--quick` does not touch the network at all.** It is a disk check. It used
-to fetch, to report `behind_origin_main` — how far this checkout trailed
-`origin/main` — and that number was removed because nothing read it: it was
-advisory in both modes, this skill never parsed it, and the prose below forbade
-acting on it. A fetch every seven minutes into a `.git` shared with every live
-build worktree, for a number nobody consumed, is not telemetry; it is a habit.
+**Why `--quick` stopped fetching.** It used to fetch to report
+`behind_origin_main` — how far this checkout trailed `origin/main` — and that
+number was removed because nothing read it: it was advisory in both modes, this
+skill never parsed it, and the prose below forbade acting on it. A fetch on
+every heartbeat into a `.git` shared with every live build worktree, for a
+number nobody consumed, is not telemetry; it is a habit.
 
 **The full gate still fetches, and there the fetch is fatal.** `dispatch.sh`
 cannot cut a worktree from a ref this machine cannot reach, so a full
@@ -1029,8 +1071,8 @@ work it just did, and name an innocent commit as the breakage.
   nothing** until it concludes. Do not re-run it again; `rerunnable` is already
   false. Name no commit: the re-run exists precisely because the first verdict
   was not trustworthy enough to act on.
-- `untested` → **nothing ever tested `main`.** `cancelled`, `startup_failure`,
-  `stale`, `skipped`, `action_required` — a self-hosted runner dropped, someone
+- `untested` → **nothing ever tested `main`.** `cancelled`, `timed_out`,
+  `startup_failure`, `stale`, `skipped`, `action_required` — a self-hosted runner dropped, someone
   hit cancel, GitHub cancelled it during an incident. No commit broke anything,
   so **name no commit and report no breakage**: this is the board's own
   infrastructure, and reporting it as a breakage is how a ticket collects
@@ -1184,12 +1226,22 @@ Both columns hold only the cards foreman owns — see
 [1. Adopt](#1-adopt). A sibling's card in either of them is none of your
 business, however stalled it looks.
 
-**One step, two agents.** A plan agent draws the graph and posts it to the card;
-a build agent, dispatched fresh from `origin/main` afterwards, executes it. They
-share no session and no worktree. Everything below the column moves — phase
-classification, stalls, environmental write-offs, attempts, resume — reads
-identically for both, because both are dispatched agents that can stall, die and
-be resumed.
+**Two ways into `In Progress`.** Step 6 sends a `Todo` card **without**
+`needs-plan` straight there with a build agent, and no plan stage at all. A card
+**with** `needs-plan` goes through `Plan` first: a plan agent draws the graph and
+posts it to the card, and after sign-off a build agent, dispatched fresh from
+`origin/main`, executes it. The two agents share no session and no worktree.
+Everything below the column moves — phase classification, stalls, environmental
+write-offs, attempts, resume — reads identically for every agent, because each
+is a dispatched agent that can stall, die and be resumed.
+
+**An `In Progress` card with no plan attempt and no plan comment is normal.** It
+skipped the plan stage. `plan_attempts` is 0 and `plan_rounds` is 0, and neither
+means anything is missing. Its build agent may still post a graph on the card —
+it plans a card it judges not small — and that comment ends with the board's
+footer, so `plancomments.py` lists it in `plan_comments`. On a card in
+`In Progress` that changes nothing: judge the build agent on its pull request,
+exactly as below.
 
 **The evidence that planning finished is a comment on the card.** It is not
 anything in git: a plan agent pushes no commit, cuts no branch and opens no
@@ -1197,12 +1249,18 @@ pull request, so a branch and a diff say nothing at all about whether this card
 has a plan. `plancomments.py` computes it — `plan_comments` names the board's
 own plan comments on that card, recognised by the footer each one ends with.
 Read the card's comments with Linear MCP, write them out as the JSON Linear
-returned, and pipe them in, once per card in `Plan`:
+returned to `"$D/comments.json"`, and pipe them in, once per card in `Plan`:
 
 ```bash
 B=~/.foreman/install/skills/board
-$B/plancomments.py < /tmp/comments.json > /tmp/plan.json
+D="${AGENT_TMP_ROOT:?source config.sh first}/dispatch"
+mkdir -p "$D"
+$B/plancomments.py < "$D/comments.json" > "$D/plan.json"
 ```
+
+`$D` is this board's scratch, the same root the merge and queue blocks use: see
+[6. Dispatch](#6-dispatch) for why it is never a fixed name under `/tmp`. Every
+dispatch block below defines it the same way.
 
 See [The plan comment protocol](#the-plan-comment-protocol) for why the footer
 is the discriminator and not a timestamp.
@@ -1218,12 +1276,14 @@ is the discriminator and not a timestamp.
 
     ```bash
     B=~/.foreman/install/skills/board
+    D="${AGENT_TMP_ROOT:?source config.sh first}/dispatch"
+    mkdir -p "$D"
     $B/brief.py build --ticket <T> --title "<title>" --body-file <ticket-body> \
-      --plan-file /tmp/plan.md > /tmp/b.md
-    $B/dispatch.sh --ticket <T> --role build --attempt <n> --prompt-file /tmp/b.md
+      --plan-file "$D/plan.md" > "$D/b.md"
+    $B/dispatch.sh --ticket <T> --role build --attempt <n> --prompt-file "$D/b.md"
     ```
 
-    `/tmp/plan.md` holds the body of one comment, written out verbatim: the plan
+    `"$D/plan.md"` holds the body of one comment, written out verbatim: the plan
     comment whose footer reads `round=<round>`, with `round` taken from
     `plancomments.py`. Pick it by that number and never by position — the order
     Linear returns comments in is not a promise, and a card that went several
@@ -1241,18 +1301,20 @@ is the discriminator and not a timestamp.
     attempts still starts its build at 1.
 
     **A card that was parked takes a slot back here.** The operator signs a plan
-    off by removing `needs-plan`, which drops the card into this bullet with the
-    `released` marker it wrote when it parked still standing — so check the
-    ceilings before this dispatch, exactly as step 6 does before a fresh one. A
-    card that was never parked has held its slot since it entered `Plan` and
-    takes no second one.
+    off by removing `needs-plan`, and the card arrives here released, so this
+    dispatch needs a free slot like any fresh one. A card whose plan agent never
+    parked still holds its own, and a card the cleanup agent filed holds none
+    yet. `dispatch.sh` tells these apart itself ([Who holds a
+    slot](#who-holds-a-slot)).
   - **`needs-plan`, nothing unconsumed** → **park it.** The plan is already on
     the card — the plan agent posted it, and that comment is how you knew to
     look at the label at all — so parking writes no comment and dispatches no
     build. Leave the card in `Plan` and say the slot is free:
     `card_log <T> '{"action":"released","reason":"parked: awaiting plan sign-off"}'`.
-    Do this **once**, on the tick it parks — a card already parked with its plan
-    posted needs nothing further here. There is no timeout and no next step to
+    Do this **once per park**, on the tick it parks — a card already parked with
+    its plan posted needs nothing further here, but a card that parks again
+    after a revision round needs a new entry ([Who holds a
+    slot](#who-holds-a-slot)). There is no timeout and no next step to
     take: the card waits for the operator as long as it takes, exactly as a
     `needs-merge` card does.
   - **`needs-plan`, unconsumed comments, `plan_rounds` under
@@ -1262,28 +1324,27 @@ is the discriminator and not a timestamp.
 
     ```bash
     B=~/.foreman/install/skills/board
-    $B/brief.py replan --ticket <T> --comments-file /tmp/plan.json > /tmp/rp.md
-    $B/dispatch.sh --ticket <T> --role plan --attempt <n> --resume --prompt-file /tmp/rp.md
-    card_log <T> '{"action":"resume","role":"plan","round":"<n>"}'
+    D="${AGENT_TMP_ROOT:?source config.sh first}/dispatch"
+    mkdir -p "$D"
+    $B/brief.py replan --ticket <T> --comments-file "$D/plan.json" > "$D/rp.md"
+    $B/dispatch.sh --ticket <T> --role plan --attempt <n> --resume --prompt-file "$D/rp.md"
     ```
 
-    Four things about those four lines. `/tmp/plan.json` is `plancomments.py`'s
+    Four things about those lines. `"$D/plan.json"` is `plancomments.py`'s
     own output, unedited: `brief.py replan` takes the operator's words and the
     footer for the next round out of that one file, so the round it quotes and
     the round it posts under cannot disagree. **`--role plan`, because the agent
     being resumed is the plan agent** — `dispatch.sh` builds the name it resumes
     out of the role, so `--role build` here looks for an agent that was never
-    spawned and refuses. **The `card_log` line is not optional:** the row
-    `dispatch.sh` logs for a plan resume does not say it was a revision round,
-    so `reconcile.py` counts `plan_rounds` from this explicit entry and nothing
-    else — a round you do not log is a round `MAX_PLAN_ROUNDS` never sees. And
-    the card **released** its slot when it parked, so this resume takes one
-    again: check the ceilings first, as step 6 does before a fresh dispatch.
-    `dispatch.sh` refuses at the ceiling however it is called. If the worktree is
-    gone, `--resume` refuses and the fallback is a fresh `--role plan` dispatch
-    **at the same attempt number**, handed the same `/tmp/rp.md`. Nothing failed
-    here, so answering the operator must cost the ticket neither a plan attempt
-    nor a build attempt.
+    spawned and refuses. **The round is logged for you:** `dispatch.sh` writes
+    `"role"` on every `resume` row, and `reconcile.py` counts `plan_rounds` from
+    the rows with `action: resume` and `role: plan`. Write no `card_log` for it;
+    a second entry would count the round twice. And the card **released** its
+    slot when it parked, so this resume takes one again, and `dispatch.sh`
+    refuses it at the ceiling. If the worktree is gone, `--resume` refuses and
+    the fallback is a fresh `--role plan` dispatch **at the same attempt
+    number**, handed the same `"$D/rp.md"`. Nothing failed here, so answering the
+    operator must cost the ticket neither a plan attempt nor a build attempt.
   - **`plan_rounds` has reached `MAX_PLAN_ROUNDS`** → the conversation is not
     converging. To `Needs Human` (`STATE_NEEDS_HUMAN`, matched by id) carrying
     `board-failed`, with the comments quoted, and
@@ -1295,8 +1356,8 @@ is the discriminator and not a timestamp.
 
   **Every other bullet in step 2 reads identically for a parked card** — phase
   classification, stalls, environmental write-offs, attempts, deaths. A parked
-  card's agent is idle and alive, and telling those two apart is exactly what
-  `phase` is for. The one thing not to misread is the ended-turn verdict below:
+  card's agent has finished its turn, and telling that apart from a dead agent
+  is exactly what `phase` is for. The one thing not to misread is the ended-turn verdict below:
   a parked card has no pull request because nobody has asked it for one yet, so
   "no PR → the attempt failed" is not the answer here. Charging an attempt for
   waiting on a human is how a card reaches `board-failed` for the operator being
@@ -1311,7 +1372,9 @@ is the discriminator and not a timestamp.
   `brief.py plan` tells the plan agent to post its graph and stop, and building
   is a separate dispatch that this step makes. The board withholds that dispatch
   for as long as `needs-plan` is on the card, so a parked card has no build
-  agent that could run ahead of its operator.
+  agent that could run ahead of its operator. A card **without** `needs-plan`
+  plans and builds in one session on purpose: nobody was asked to sign it off,
+  so there is no gate to leak.
 - **card in `Plan` with no plan comment** → nothing has landed yet, so judge the
   agent, not the card. Classify it on `phase` exactly as below; a plan agent
   that is still running is left alone like any other. **A plan agent whose turn
@@ -1360,9 +1423,11 @@ attempt to a card whose plan may be sitting on it.
 
 Two things make the obvious reading wrong. `--bg --resume` *forks* — the new
 session inherits the name — so several agents share one name and only the newest
-is live. And a background agent **does not exit when its turn ends**; it idles
-with its pid intact. So `alive` says almost nothing: an agent that finished an
-hour ago is still `alive: true`. Use `phase`.
+is live. And a finished agent's row does not say whether the process is gone.
+On current Claude Code a background agent **exits** when its turn ends, and its
+row reads `state: done` with `pid: null`; an older CLI left it idling with its
+pid intact. Both are `turn-complete`. So `alive` answers a question the tick
+never needs to ask. Use `phase`.
 
 - **`running`**, `idle_minutes` under `STALL_MINUTES` → leave it. Say nothing.
   Agents legitimately sit quiet while polling CI.
@@ -1373,6 +1438,10 @@ hour ago is still `alive: true`. Use `phase`.
   permission it cannot get. `"$HARNESS_SH" stop <id>` and count an attempt; it will
   never move on its own.
 - **`terminal`** → already stopped. Look at the PR; if there is none, it failed.
+- **`unknown`** → the registry reported a `state` that `reconcile.py` does not
+  map, so nobody can say whether the agent is working. Treat the card as not
+  actionable this tick: do not stop the agent, do not charge an attempt, do not
+  re-dispatch. Report the agent's name and its raw `state`.
 - **no agent at all**, no PR, no branch → the tick that dispatched it died before
   it started. Re-dispatch, do not count an attempt.
 
@@ -1444,12 +1513,12 @@ Then, for an agent whose turn has ended:
 - **no PR** → the attempt failed. Classify it first, as above. If it was the
   ticket's fault and this attempt has not been retried, resume it once with
   `--reason retry` and what the transcript ends on. If it has, dispatch the
-  next attempt fresh while `build_attempts < MAX_BUILD_ATTEMPTS`; once
+  next attempt fresh while `build_attempts < MAX_BUILD_ATTEMPTS` — with the
+  plan-carrying block above for a card that went through `Plan`, and with
+  step 6's direct build block for a card that did not. Once
   `build_attempts >= MAX_BUILD_ATTEMPTS`, move the card to `Needs Human`
   (`STATE_NEEDS_HUMAN`, matched by id) carrying `board-failed` and the reason, and
-  `card_log <T> '{"action":"released","reason":"board-failed: attempts exhausted"}'`
-  — this card no longer holds a slot, and `--host-slots` (step 6) only knows
-  that if you say so.
+  `card_log <T> '{"action":"released","reason":"board-failed: attempts exhausted"}'`.
 
 **Resume needs its worktree, and sometimes it is gone.** `dispatch.sh --resume`
 refuses outright when the working directory has vanished, which is correct —
@@ -1486,6 +1555,8 @@ whose `death.rate_limited` is true, in this order:
 
 ```bash
 B=~/.foreman/install/skills/board
+D="${AGENT_TMP_ROOT:?source config.sh first}/dispatch"
+mkdir -p "$D"
 # Prefix every knob fallback.py reads. config.sh assigns them in this shell and
 # does not export them; a child would otherwise see them unset and refuse.
 # FOREMAN_HOME is already exported; repeating it keeps the child self-contained.
@@ -1507,9 +1578,9 @@ fb() {
 # FALLBACK_COOLDOWN_MINUTES answers, which is what happened before the field
 # existed.
 fb mark <model> [--minutes <death.rate_limit_minutes>]
-fb resolve <role> > /tmp/fallback.json
+fb resolve <role> > "$D/fallback.json"
 # ONE of the next two lines, never both. `until` is what `mark` printed.
-# `floor_reached` false in /tmp/fallback.json: `next` is its `model`.
+# `floor_reached` false in "$D/fallback.json": `next` is its `model`.
 card_log <T> '{"action":"fallback","role":"<role>","model":"<model>","until":"<until>","next":"<next>"}'
 # `floor_reached` true: no tier is left to fall to.
 card_log <T> '{"action":"fallback","role":"<role>","model":"<model>","until":"<until>","next":null,"floor_reached":true}'
@@ -1581,13 +1652,9 @@ that a card has been planned at all: `plan_comments` names the comments carrying
 a footer, and nothing else on the card is evidence of a plan.
 
 `plancomments.py` computes it. It holds no Linear key and opens no socket — read
-the card's comments with Linear MCP, write them to a file as the JSON Linear
-returned, and pipe them in:
-
-```bash
-B=~/.foreman/install/skills/board
-$B/plancomments.py < /tmp/comments.json > /tmp/plan.json
-```
+the card's comments with Linear MCP, write them to `"$D/comments.json"` as the
+JSON Linear returned, and pipe them in, exactly as step 2's block does. It
+prints:
 
 ```json
 {"round": 2, "next_round": 3,
@@ -1596,14 +1663,16 @@ $B/plancomments.py < /tmp/comments.json > /tmp/plan.json
  "plan_comments": ["a1b2c3"], "malformed_footers": []}
 ```
 
-`/tmp/plan.json` is what `brief.py replan --comments-file` reads, verbatim — it
+`"$D/plan.json"` is what `brief.py replan --comments-file` reads, verbatim — it
 takes `unconsumed` straight out of it, so nothing reshapes the file in between.
 
 **The footer goes into the prompt. The board does not post plan comments.** The
 plan agent posts its own, at the end of the turn that drew the graph, and the
 board's job is to hand it the exact string — through `brief.py plan --footer`
-for a first plan, and through the `--comments-file` that `brief.py replan` reads
-for every round after. Pass what `plancomments.py` printed and never retype it.
+for a first plan, through `brief.py build --footer` for a card that skipped the
+plan stage and whose build agent decides to plan, and through the
+`--comments-file` that `brief.py replan` reads for every round after. Pass
+what `plancomments.py` printed and never retype it.
 The format is exact (`round=` then `consumed=`, in that order, no spaces in the
 id list), and `brief.py` refuses a footer `plancomments.py` cannot parse rather
 than dispatching an agent whose comment will not be recognised. That refusal is
@@ -1638,20 +1707,32 @@ foreman owns ([1. Adopt](#1-adopt)).
 Each reviewer writes `$BOARD_HOME/cards/<T>/reviews/<round><slot>.json`:
 
 ```json
-{"findings":[{"severity":"blocking|warning|note","file":"…","summary":"…","failure":"…"}]}
+{"findings":[{"severity":"blocking|note","file":"…","summary":"…","failure":"…"}]}
 ```
 
-Only `blocking` gates. Gating on warnings trades shipped defects for
-unshippable builds. The `warning` and `note` findings stay in the file because
-the scheduled cleanup (step 8) reads them; nothing here acts on one.
+**The review is light: one round, one reviewer, two severities.** `brief.py
+review` asks for severity exactly `blocking` or `note`, and asks the reviewer to
+be brief. A finding is `blocking` only for one of five things: a concrete
+correctness bug with a failing scenario, a security hole, a weakened gate or
+check, data loss, or a broken build or test. Everything else is a `note`.
+
+**An unrecognised severity blocks.** `severity.py` decides, for `brief.py` and
+`reconcile.py` alike. A finding stops nothing only when its severity, trimmed
+and lower-cased, is one of `note`, `warning`, `nit`, `minor`, `low`, `info`,
+`suggestion` or `non-blocking`. A missing severity, a misspelt one, `high` or
+`critical` all block. A reviewer that invents a word must cost a fix, not ship
+the finding unread. The `note` findings stay in the file because the scheduled
+cleanup (step 8) reads them; nothing here acts on one.
 
 **One round per head, and one reviewer in it** — `REVIEWERS_PER_ROUND` of them,
 which is 1 on a board that declares nothing else. A blocking finding buys
-exactly one fix, and that fix merges on its own **checks** rather than on
-another reviewer: nothing here dispatches a second reviewer for a diff a round
-has already read. A later round exists for one reason only — the head moved, so
-no reviewer has read what would now merge — and `MAX_REVIEW_ROUNDS` is what
-bounds how often that may happen.
+exactly one fix, and **that fix merges on green checks without a second
+review.** That is the operator's choice, and it has a cost this document will
+not hide: nobody reads the fix. A fix that does not really close the finding,
+or that adds a new bug the checks do not catch, ships. A later round exists for
+one reason only — the head moved after a clean round, so no reviewer has read
+what would now merge — and `MAX_REVIEW_ROUNDS` is what bounds how often that may
+happen.
 
 **Read `reconcile.py`'s `review` object and act on its `verdict`.** It is the
 one place that joins the round's files, the sha each reviewer was dispatched
@@ -1681,10 +1762,18 @@ against, the pull request head and the build agent's phase — the four facts
 - **`mergeable`** → go to step 4 **in this same slice**. Reading a clean
   review moved no card, so the slice is not over; the merge is what ends it. A
   clean review that waits a whole pass for its merge is the exact delay this
-  design removes.
+  design removes. The verdict carries `merge_head`: the one sha step 4 may
+  merge, passed to `merge.py --head`. It is the reviewed head; or the head
+  `gh pr update-branch` made on top of it; or, after a fix, the fix head whose
+  checks are green. **An update-branch is not a head move.** When the head is a
+  merge commit whose first parent is the sha the clean round read, and whose
+  second parent is already on `origin/<default branch>`, the diff nobody read
+  is only `main`'s own, so the card stays `mergeable` with that merge commit as
+  `merge_head` and no new round.
 - **`head-moved`** → the round filed no blocking finding, but the head has moved
-  past the sha that reviewer read, so the clean verdict is about a diff that no
-  longer exists. **Dispatch a fresh round at the new head**, exactly as step 6
+  past the sha that reviewer read in any way other than the update-branch merge
+  above, so the clean verdict is about a diff that no longer exists.
+  **Dispatch a fresh round at the new head**, exactly as step 6
   shows, and end the slice; the verdict carries the number to use as
   `next_round`. Round 1 passes at sha A, a required check fails, the build is
   resumed and pushes B — and without this, B merges on round 1's verdict with
@@ -1694,6 +1783,7 @@ against, the pull request head and the build agent's phase — the four facts
 - **`mergeable` carrying `merged_after_fix`** → the same step 4, in this same
   slice, and **without dispatching another reviewer**: the round blocked, the
   fix is pushed past the sha the reviewer read, and every required check passed.
+  `merge_head` is that fix head.
   Log it on the card before you merge, so a later reader can tell this merge
   from one no finding ever touched:
   `card_log <T> '{"action":"merged-after-fix","round":1}'`.
@@ -1877,13 +1967,10 @@ The file was real, the path was right, and the answer was still false.
   merges autonomously. A parked card does **not** hold a concurrency slot —
   no agent is running on it, only a human's decision is outstanding — so say
   so the same way every `board-failed` exit above does:
-  `card_log <T> '{"action":"released","reason":"parked: high-risk paths"}'`.
-  Without this the marker is never written for a parked card, and
-  `reconcile.py --host-slots` (step 6) keeps counting it against
-  `HOST_MAX_CONCURRENT` for up to `HOST_SLOT_STALE_MINUTES` (12h) — a
-  backstop for a marker some terminal exit forgets, not a licence to skip
-  writing it here. Do this **once**, the first tick a card parks; a card
-  already parked with `needs-merge` needs no further action here.
+  `card_log <T> '{"action":"released","reason":"parked: high-risk paths"}'`
+  ([Who holds a slot](#who-holds-a-slot)). Do this **once**, the first tick a
+  card parks; a card already parked with `needs-merge` needs no further action
+  here.
 - **`risk: unknown`** — `gh pr diff` failed, so **the diff was never read** and
   nothing is known about what it touches. Merge nothing. Leave the card where it
   is, say the diff could not be read, and look again next tick; it usually reads
@@ -1921,16 +2008,19 @@ Before merging, three things that make a green PR lie:
 - **`needs_update: true`** (`mergeStateStatus == BEHIND`) — the `main` ruleset
   sets `strict: true`, so it will not merge however green it looks. Run
   `gh pr update-branch <n>`, then wait for checks to re-run on the new SHA.
-  Do not merge on the old SHA's green.
+  Do not merge on the old SHA's green. The update costs no review round: step 3
+  reads the merge commit it makes as the same reviewed diff, and reports it as
+  `merge_head` once its checks pass.
 - **A branch older than a day touching a sequentially-numbered high-risk
   path** (a migrations directory like `db/migrations/` is the usual case) —
   it can be green forever while `main` claims the next number underneath it.
   That path is high-risk anyway, so it parks; mention the collision if you
   see one.
 
-Merge through `merge.py`. Re-read the card from Linear this tick first, labels
-included: the operator may add the fast-track label after the pull request
-opened, and a card read before that misses it.
+Merge through `merge.py`, pinned to the `merge_head` step 3's verdict carried.
+Re-read the card from Linear this tick first, labels included: the operator may
+add the fast-track label after the pull request opened, and a card read before
+that misses it.
 
 ```bash
 B=~/.foreman/install/skills/board
@@ -1939,8 +2029,16 @@ mkdir -p "$M"
 cat > "$M/card.json" <<'JSON'
 { ... this card, re-read this tick, as the JSON Linear returned, labels included ... }
 JSON
-"$B/merge.py" <n> < "$M/card.json"; echo "--- exit: $? ---"
+"$B/merge.py" <n> --head "<merge_head>" < "$M/card.json"; echo "--- exit: $? ---"
 ```
+
+**`--head` is required, and it is the whole guard.** Before any label call,
+`merge.py` reads the pull request's `state`, `baseRefName` and `headRefOid`. It
+refuses unless the pull request is open, targets the repository's default
+branch, and still has exactly the head you passed. Then it merges with
+`gh pr merge <n> --squash --match-head-commit <merge_head>`, so GitHub itself
+refuses a head that moved in the seconds between. A push that lands after the
+review and before the merge therefore never merges unread.
 
 `merge.py` makes the pull request's fast-track label match the card right
 before it merges. The label is `[deploy] fast_track_label` in the target's
@@ -1950,15 +2048,14 @@ request's labels, adds it when the card carries a label of exactly that name,
 and removes it when the card does not but the pull request carries it anyway —
 left from an earlier tick whose merge failed, or put there by an agent or a
 person. When the target declares none, `merge.py` makes no label call at all,
-not even a read. It then runs `gh pr merge <n> --squash`. It never enables
-auto-merge.
+not even a read. It never enables auto-merge.
 
 **Never run a bare `gh pr merge` for a card instead.** That is how the label gets
 skipped: the pull request merges without it, and the target queues a deploy the
 operator asked to hurry.
 
 `merge.py` prints one JSON object (`pr`, `merged`, `fast_tracked`, `label`,
-`reason`) and exits one of five ways:
+`reason`) and exits one of seven ways:
 
 - **exit 0** — merged. `fast_tracked` says whether the label was on the pull
   request when it merged.
@@ -1984,8 +2081,18 @@ operator asked to hurry.
   `board-failed`, and put `reason` on the card and in the tick's report so the
   operator looks. If `reason` says the origin could not be established, that
   can be a transient `gh` failure; the operator decides, not the tick.
-- **exit 2** — called wrong or the card JSON was unreadable, and no JSON was
-  printed. Merge nothing. Fix the call and run it again.
+- **exit 5** — **not merged, and nothing was written**: the pull request is not
+  open, its base is not the default branch, or its head is no longer
+  `merge_head`. `reason` names which. Charge nothing, add no label, leave the
+  card where it is, and end the slice. The next pass reconciles the card
+  afresh, and step 3's verdict for the new head decides what happens — a moved
+  head is usually a fresh review round.
+- **exit 6** — `BOARD_DRY_RUN` is set, so `merge.py` made no `gh` write at all
+  and printed `merged: false` with `reason` `"dry run"`. Report it as a `WOULD:`
+  merge. It is not a failure.
+- **exit 2** — called wrong (a missing `--head` included) or the card JSON was
+  unreadable, and no JSON was printed. Merge nothing. Fix the call and run it
+  again.
 
 **Say it on the card.** When `merge.py` reports `fast_tracked: true`, the merge
 comment says the deploy was **fast-tracked** (label synced to match the card),
@@ -1993,8 +2100,8 @@ not queued.
 
 **From this board's `$REPO`, always.** `gh` takes the repository from the working
 directory, and a pull request number is only unique within one. Run from the
-wrong checkout, `gh pr merge <n> --squash` does not fail — it squashes a real,
-unrelated pull request. `merge.py` runs its own `gh` calls in `REPO` from
+wrong checkout, a bare `gh pr merge <n> --squash` does not fail — it squashes a
+real, unrelated pull request. `merge.py` runs its own `gh` calls in `REPO` from
 `config.sh`, so it is safe from any directory. The `cd "$REPO"` in the slice's
 subshell still protects the bare `gh pr ready`, `gh pr update-branch` and
 `gh run rerun` above.
@@ -2030,14 +2137,9 @@ thing between a merged card and its column, so do not leave it to the next
 `waitfor.py deploy --sha <merge-sha>` under
 [Waiting inside a tick](#waiting-inside-a-tick) once a whole pass moves nothing.
 
-Also `card_log <T> '{"action":"released","reason":"done"}'`. This is the
-signal `reconcile.py --host-slots` (step 6) reads to stop counting the card
-against `HOST_MAX_CONCURRENT`. Named `released`, not `finished` — the meaning
-is "this card no longer holds a slot", not "this card succeeded", and every
-`board-failed` exit releases a slot exactly as much as this one does.
-Without it, a card holds a slot in the host count until
-`HOST_SLOT_STALE_MINUTES` passes (`config.sh`) — a backstop for a marker some
-future terminal exit forgets to write, not a substitute for writing it here.
+Also `card_log <T> '{"action":"released","reason":"done"}'` ([Who holds a
+slot](#who-holds-a-slot)). Named `released`, not `finished`: the meaning is
+"this card no longer holds a slot", not "this card succeeded".
 
 **That wait has three endings, not two.** For as long as it had two, a deploy
 that ran and failed came back `satisfied: true` carrying `verified: false`, and
@@ -2068,7 +2170,7 @@ squash, so a tick that merged moments ago can reconcile with `merge_commit: ""`.
 That is not a failed deploy and must never be reported as one. Reconcile again on
 the next pass, by which time the merge commit exists.
 
-Four ways to end up at exit 3, and only the first three are about production:
+Six ways to end up at exit 3, and only the first three are about production:
 
 - `deploy-failed` — the deploy script ran on the deploy host and broke. **The
   merge is on `main` and production is not running it**, which is the state the
@@ -2093,6 +2195,13 @@ Four ways to end up at exit 3, and only the first three are about production:
 - `not-on-main` — the merge commit is not on `main` at all, so no deploy will
   ever carry it. Something is wrong with what was merged, not with the deploy
   host.
+- `no-merge-commit` — the verdict had no merge sha to look for. That is the
+  empty-`--sha` case above reaching the verdict by another route: not a failed
+  deploy. Reconcile again on the next pass.
+- `not-deployed` — a settled verdict that named no outcome of its own. Quote
+  its `reason` and the run URL in the report, leave the card, and treat it as a
+  foreman defect to report, because every settled verdict should carry a
+  name.
 
 A deploy that is merely *stale-revision skipped* is none of these: it is the
 normal stand-down of an overtaken merge, the descendant's deploy carries the
@@ -2114,61 +2223,36 @@ schedule deploys it.
 
 ### 6. Dispatch
 
-This board's free slots = its `MAX_CONCURRENT` − (its cards in `Plan`) − (its
-cards in `In Progress`) − (its cards in `In Review` with a live reviewer).
-Parked-for-the-operator cards do not count. `MAX_CONCURRENT` is that board's own
-number, from its own `board.toml`. Count only the cards foreman owns,
-in every one of those columns — a sibling's in-flight card is its own
-board's slot, not yours ([1. Adopt](#1-adopt)).
+**`dispatch.sh` decides whether there is a slot, and its answer is the one to
+act on.** It counts slots the way [Who holds a slot](#who-holds-a-slot) says:
+from `history.jsonl`, a card holding one until its last entry is `released`.
+It refuses a fresh spawn when this board already holds `MAX_CONCURRENT` cards,
+and otherwise asks `reconcile.py --may-dispatch <board>`,
+which weighs `HOST_MAX_CONCURRENT` and every board's reserved share. Column
+counts in Linear are not the rule: a card in `Plan` holds a slot while its plan
+agent works and none once it parks, and a card in `In Review` holds its slot
+until it is released.
 
-**A card in `Plan` holds an agent.** It was dispatched and its plan agent is
-running, reading the code and drawing the graph it will post to the card. That
-agent costs the machine what any other agent costs, so counting only
-`In Progress` would let a board dispatch a second card into a machine that is
-already full of planners.
+**Ask before you write a brief, and ask here, after steps 2–5.** A card that
+reached `Done` earlier in this slice has already released its slot, so the next
+card can start now rather than a pass from now. The same question, answered
+from the same counter:
 
-**Except a card parked for plan sign-off**, which holds no agent — its plan is
-posted and only a human's decision is outstanding, exactly as a `needs-merge`
-card in `In Review`. Step 2 says so with
-`card_log <T> '{"action":"released","reason":"parked: awaiting plan sign-off"}'`,
-and `--host-slots` reads a card's **last** history entry, so that entry is what
-stops it counting. Two things follow from that:
+```bash
+~/.foreman/install/skills/board/reconcile.py --host-slots
+HOST_MAX_CONCURRENT="$HOST_MAX_CONCURRENT" \
+  ~/.foreman/install/skills/board/reconcile.py --may-dispatch <board>
+```
 
-- **Once per park, not once per card.** A `needs-merge` park is terminal, so its
-  marker is written once and stands. A plan park is not: the operator comments,
-  step 2 resumes the agent, `dispatch.sh` appends a `resume` entry, and the card
-  holds a slot again — so when its revised plan lands it parks again, and the
-  next park needs its own `released` entry. Miss one and the card holds a slot
-  through every round after it.
-- **`HOST_SLOT_STALE_MINUTES` is the backstop for a marker some exit forgets,
-  not a licence to skip writing one** — and it matters more here than anywhere
-  else. Every other holder of a slot is an agent that will finish within the
-  hour; a card waiting on a plan sign-off can legitimately sit for days, so an
-  unwritten marker costs the whole machine that slot for the backstop's full
-  window, on a card nobody is building.
+`HOST_MAX_CONCURRENT` goes in on the call, as `dispatch.sh` passes it: the
+script reads it from the environment, `config.sh` does not export it, and a
+missing value silently weighs the default instead of this machine's number.
 
-**Recount here, after steps 2–5 have run.** A card that reached `Done` earlier in
-this same slice has already released its slot, and the whole point of running the
-phases in this order is that the next card starts now rather than a pass from
-now. Recounting is also what makes a converging tick safe: on a second pass the
-slot arithmetic reflects everything the first pass did, on every board.
-
-**Then check the machine, not just this board.** One tick sees every board, so
-`HOST_MAX_CONCURRENT` is a ceiling you hold directly rather than one several
-ticks each guessed at separately. `$B/reconcile.py --host-slots` sums cards
-holding a slot across every board `boards.toml` declares. If
-`total >= HOST_MAX_CONCURRENT`, this machine is at its ceiling regardless of how
-much room this board's `MAX_CONCURRENT` still has — do not dispatch, even into a
-free board slot, until some board's card releases one. This is the same reasoning
-as `MAX_CONCURRENT` itself, one level up: two boards each within their own limit
-can still jointly exceed what one machine's RAM and disk can sustain.
-
-**Read it in the slice, immediately before spawning.** `--host-slots` counts
-from `history.jsonl`, which `dispatch.sh` appends to, so your own dispatches
-show up on the next read — but a count taken at the top of a pass is already
-out of date, because every other board's slice dispatches in between. One count
-reused across a pass is how a machine ends up over its own ceiling with every
-individual check having passed.
+This board is full when its entry under `tickets` has `MAX_CONCURRENT` cards;
+the machine is full when `--may-dispatch` prints a line. Ask immediately before
+each spawn and never reuse a count across a pass: every other board's slice
+dispatches in between. Whatever you counted, `dispatch.sh` counts again and
+refuses if you were wrong — quote its refusal, charge nothing, end the slice.
 
 **Check dependencies before taking anything.** Read each `Todo` card with
 `get_issue(includeRelations: true)` — `list_issues` cannot return relations, so
@@ -2319,24 +2403,68 @@ in between.
 [9. Report](#9-report) carries these, so a board that read the column and found
 nothing to do never reads like a board that never read it.
 
-**Move the card to `Plan`, then spawn.** In that order: the card is the lock,
-and a spawn that precedes the move gets dispatched twice. There is no ownership
-label to write — there is one foreman, and leaving a card in `Todo` is safe
-because the next pass of the same foreman picks it up.
+**One label picks the route.** Read the card's labels and match
+`LABEL_NEEDS_PLAN` from `ids.env` by **id**, never by name:
+
+- **no `needs-plan`** → **straight to a build.** Move the card `Todo` →
+  `In Progress`, then dispatch a build agent with no plan. There is no plan
+  stage, no plan agent and no sign-off.
+- **`needs-plan`** → **the plan stage, exactly as before.** Move the card
+  `Todo` → `Plan`, then dispatch a plan agent. It posts its graph and stops, and
+  step 2 parks the card for the operator's sign-off.
+
+**Move the card first, then spawn.** In that order both times: the card is the
+lock, and a spawn that precedes the move gets dispatched twice. There is no
+ownership label to write — there is one foreman, and leaving a card in `Todo` is
+safe because the next pass of the same foreman picks it up.
 
 Never hand-write a prompt. `brief.py` renders every one of them, and it is the
-only thing that quotes agent-written text correctly:
+only thing that quotes agent-written text correctly. Both routes read the
+card's comments first, into `"$D/comments.json"` as the JSON Linear returned,
+because both hand the agent a footer.
+
+**The direct build**, for a card without `needs-plan`:
 
 ```bash
 B=~/.foreman/install/skills/board
-$B/plancomments.py < /tmp/comments.json > /tmp/plan.json
-FOOTER="$(python3 -c 'import json,sys;print(json.load(sys.stdin)["footer"])' < /tmp/plan.json)"
-$B/brief.py plan --ticket <T> --title "<title>" --body-file <ticket-body> \
-  --footer "$FOOTER" > /tmp/p.md
-$B/dispatch.sh --ticket <T> --role plan --attempt <n> --prompt-file /tmp/p.md
+D="${AGENT_TMP_ROOT:?source config.sh first}/dispatch"
+mkdir -p "$D"
+$B/plancomments.py < "$D/comments.json" > "$D/plan.json"
+FOOTER="$(python3 -c 'import json,sys;print(json.load(sys.stdin)["footer"])' < "$D/plan.json")"
+$B/brief.py build --ticket <T> --title "<title>" --body-file <ticket-body> \
+  --footer "$FOOTER" > "$D/b.md"
+$B/dispatch.sh --ticket <T> --role build --attempt <n> --prompt-file "$D/b.md"
 ```
 
-**This step starts a plan agent and nothing else.** It draws one graph, posts it
+**The build agent judges the card's size**, because nobody planned it. `brief.py
+build` without `--plan-file` tells it so, and requires `--footer` instead:
+
+- **SMALL** — one coherent change, a handful of files, no design decision. It
+  implements directly and draws no graph.
+- **Otherwise, PLANNED** — it invokes the `graphplan` skill, posts the graph as
+  a comment on the card ending with the footer, executes the graph itself, and
+  carries on to the pull request without stopping. The footer is what makes
+  that comment the board's own, exactly as for a plan agent.
+
+Either way it states its SMALL or PLANNED judgement in the pull request body.
+`<n>` is the build's own attempt number, from `build_attempts`; a fresh card
+starts at 1. The card never enters `Plan`, so `plan_attempts` stays 0, and step
+2 reads that as normal.
+
+**The plan dispatch**, for a card with `needs-plan`:
+
+```bash
+B=~/.foreman/install/skills/board
+D="${AGENT_TMP_ROOT:?source config.sh first}/dispatch"
+mkdir -p "$D"
+$B/plancomments.py < "$D/comments.json" > "$D/plan.json"
+FOOTER="$(python3 -c 'import json,sys;print(json.load(sys.stdin)["footer"])' < "$D/plan.json")"
+$B/brief.py plan --ticket <T> --title "<title>" --body-file <ticket-body> \
+  --footer "$FOOTER" > "$D/p.md"
+$B/dispatch.sh --ticket <T> --role plan --attempt <n> --prompt-file "$D/p.md"
+```
+
+**This starts a plan agent and nothing else.** It draws one graph, posts it
 to the card as a comment, and stops — no commit, no branch, no pull request.
 Step 2 dispatches the build afterwards, fresh from `origin/main`, with that
 graph in its prompt, so nothing has to survive in git between the two dispatches.
@@ -2344,7 +2472,7 @@ graph in its prompt, so nothing has to survive in git between the two dispatches
 a card nobody has planned yet starts at 1, whatever its `build_attempts` says.
 
 **`--footer` is read out of `plancomments.py`'s output, never retyped.** It is
-the line the plan comment must end with, and it is the only thing that will mark
+the line a plan comment must end with, and it is the only thing that will mark
 that comment as the board's own rather than as something the operator wrote.
 `brief.py` refuses a footer `plancomments.py` cannot parse instead of
 dispatching an agent whose plan comes back as operator input on every tick
@@ -2353,19 +2481,22 @@ after. A card nobody has commented on gives `round=1 consumed=` — an empty
 
 **Read the comments even when you expect none**, because that read is also how
 you find out there are some. Round 1's footer consumes every comment already on
-the card, and `brief.py plan` renders the ticket rather than the thread — so a
+the card, and `brief.py` renders the ticket rather than the thread — so a
 question the operator left on a `Todo` card before it was picked up is marked
-answered by a plan agent that never saw it. Name those comment ids in the
-report when there are any. That report line is the only place they are visible.
+answered by an agent that never saw it. Name those comment ids in the report
+when there are any. That report line is the only place they are visible.
 
 Reviewers are dispatched the same way at the PR head, `REVIEWERS_PER_ROUND` of
 them with slots `a`, `b`, …:
 
 ```bash
+B=~/.foreman/install/skills/board
+D="${AGENT_TMP_ROOT:?source config.sh first}/dispatch"
+mkdir -p "$D"
 $B/brief.py review --ticket <T> --pr <n> --round <r> \
-  --out $BOARD_HOME/cards/<T>/reviews/<r>a.json > /tmp/r.md
+  --out $BOARD_HOME/cards/<T>/reviews/<r>a.json > "$D/r.md"
 $B/dispatch.sh --ticket <T> --role review --attempt <r> --slot a \
-  --ref <headRefOid> --prompt-file /tmp/r.md
+  --ref <headRefOid> --prompt-file "$D/r.md"
 ```
 
 Sending a build back for a blocking finding is a **resume**, not a fresh
@@ -2373,8 +2504,11 @@ dispatch. The card already holds its slot, and the branch the fix has to land on
 is in that agent's worktree:
 
 ```bash
-$B/brief.py fix --ticket <T> --findings-file $BOARD_HOME/cards/<T>/reviews/<r>a.json > /tmp/f.md
-$B/dispatch.sh --ticket <T> --role build --attempt <n> --resume --reason fix --prompt-file /tmp/f.md
+B=~/.foreman/install/skills/board
+D="${AGENT_TMP_ROOT:?source config.sh first}/dispatch"
+mkdir -p "$D"
+$B/brief.py fix --ticket <T> --findings-file $BOARD_HOME/cards/<T>/reviews/<r>a.json > "$D/f.md"
+$B/dispatch.sh --ticket <T> --role build --attempt <n> --resume --reason fix --prompt-file "$D/f.md"
 ```
 
 `<n>` is the **build's** own attempt number, not the round: `dispatch.sh`
@@ -2385,12 +2519,13 @@ the same two lines with that subcommand and `--pr`/`--jobs` in place of
 rather than producing an empty prompt, so a `fix` that exits non-zero means
 there was nothing blocking — not that you should improvise one.
 
-**A fix merges on its checks, with no second review.** `brief.py fix` tells the
-agent to fix the finding and push, or to push nothing and say in its report
-which finding it could not resolve. Those are the two answers step 3 reads: a
-head that moved and went green is `mergeable`, and a head that never moved is
-`fix-unresolved` and a card for a person. Nothing dispatches a reviewer at the
-fix's head, so a finding the agent quietly left open ships.
+**A fix merges on its checks, with no second review** — see step 3 for what
+that choice costs. `brief.py fix` tells the agent to fix the finding and push,
+or to push nothing and say in its report which finding it could not resolve.
+Those are the two answers step 3 reads: a head that moved and went green is
+`mergeable`, and a head that never moved is `fix-unresolved` and a card for a
+person. Nothing dispatches a reviewer at the fix's head, so a finding the agent
+quietly left open ships.
 
 ### 7. Sweep
 
@@ -2418,8 +2553,9 @@ a card that is not terminal may still be diagnosed from its transcript
 foreman sessions (no pid, and not `working`) out after `SWEEP_RETENTION_DAYS`
 on every harness, and their worktrees follow on the next orphan pass.
 
-**Ticket mode also stops and forgets the card's sessions.** A background agent
-idles at `done` when its turn ends, and nothing else ever stops it. So a sweep
+**Ticket mode also stops and forgets the card's sessions.** A finished agent
+reads `done` whether it exited or is idling with a pid, and nothing else ever
+stops an idle one or forgets an exited one. So a sweep
 for a terminal card classifies every agent named `foreman/<board>/<T>/…` by
 its row in `"$HARNESS_SH" list`: one with a pid and state `done` or `blocked`
 is stopped and awaited, up to `AGENT_STOP_TIMEOUT_SECONDS`, for the adapter's
@@ -2458,17 +2594,19 @@ runs on capacity the cards did not need.
 
 ```bash
 B=~/.foreman/install/skills/board
+D="${AGENT_TMP_ROOT:?source config.sh first}/dispatch"
+mkdir -p "$D"
 if $B/reconcile.py --cleanup-due <board>; then
   SINCE="$($B/reconcile.py --cleanup-since <board>)" \
     && $B/reconcile.py --cleanup-started <board> \
-    && $B/brief.py cleanup --board <board> --since "$SINCE" > /tmp/c.md \
-    && $B/dispatch.sh --ticket cleanup --role cleanup --attempt "$(date -u +%Y%m%d%H%M)" --prompt-file /tmp/c.md
+    && $B/brief.py cleanup --board <board> --since "$SINCE" > "$D/c.md" \
+    && $B/dispatch.sh --ticket cleanup --role cleanup --attempt "$(date -u +%Y%m%d%H%M)" --prompt-file "$D/c.md"
 fi
 ```
 
 **The `&&` is load-bearing, because your shell has no `set -e`.** Run those as
 four separate lines and a `brief.py` that refuses still reaches `dispatch.sh` —
-`>` truncates `/tmp/c.md` before `brief.py` runs, and `dispatch.sh` rejects only
+`>` truncates `"$D/c.md"` before `brief.py` runs, and `dispatch.sh` rejects only
 a prompt file that is empty after stripping, so a prompt that came back short
 rather than empty is dispatched as if it were whole. By then
 `--cleanup-started` has stamped the board, and it is not due again for
@@ -2563,10 +2701,9 @@ line is exactly:
     released, freed by `sweep.sh cleanup`
 
 At `MAX_CONCURRENT` 1 that one unswept pseudo-card is the whole board: nothing
-is dispatched, not a cleanup and not a card, until `HOST_SLOT_STALE_MINUTES`
-expires. That backstop is counted in hours, not minutes — so a sweep nobody
-makes buys most of a day of a board that looks idle and is blocked, on work that
-finished in minutes.
+is dispatched, not a cleanup and not a card, until the backstop in [Who holds a
+slot](#who-holds-a-slot) expires — most of a day of a board that looks idle and
+is blocked, on work that finished in minutes.
 
 **What it files is an ordinary `Plan` card**, in this board's project, labelled
 `cleanup`, with its graph posted as the plan comment. Step 2 picks it up on a
@@ -2604,7 +2741,8 @@ tick, and spelling both the same way is how a starved board looks idle.
 `merge.py` exits 1 — a failed add, a failed read of the pull request's labels,
 or a failed removal — name the card, the label and the `gh` error in the tick's
 report. The card waits in `In Review` until the sync can succeed, and only the
-report tells the operator why.
+report tells the operator why. A `merge.py` exit 5 is reported the same way:
+the card, and the `reason` naming what differed from the head it was pinned to.
 
 **A card that keeps voiding is reported, though it never fails.** For every card
 whose `environmental_streak.count` is 3 or more, one line in the tick's report:
@@ -2638,22 +2776,26 @@ A tick where no board changed anything says so in one line and stops.
   a bare `gh pr ready <n>` or `gh pr update-branch <n>` acts on a same-numbered
   pull request in the wrong repository.
 - **Halting is per board.** `$FOREMAN_HOME/instances/<board>/HALT` skips that
-  board whole and stops nothing else. Say which boards were skipped.
-- **`HOST_MAX_CONCURRENT` is yours to hold.** One tick sees every board, so
-  check `reconcile.py --host-slots` against it in the slice, immediately before
-  each spawn. It is one number for the whole machine and counts every
-  cards, not only this board's. A board's own
-  `MAX_CONCURRENT` still caps that board, and both must allow the dispatch.
+  board whole and stops nothing else, and `dispatch.sh` refuses to spawn for a
+  halted board. Say which boards were skipped.
+- **Both ceilings hold, and `dispatch.sh` holds them.** A board's own
+  `MAX_CONCURRENT` and the machine's `HOST_MAX_CONCURRENT` must both allow a
+  fresh dispatch. Ask immediately before each spawn; `dispatch.sh` asks again
+  and its refusal is final ([Who holds a slot](#who-holds-a-slot)).
+- **`needs-plan` picks the route.** A `Todo` card without it goes straight to a
+  build, whose agent judges SMALL or PLANNED itself. A card with it goes through
+  the plan stage and waits for the operator's sign-off.
 - **The lock is the card, and every fresh dispatch takes it by moving the card
-  first.** There are two: `Todo` → `Plan`, then spawn the plan agent (step 6);
-  `Plan` → `In Progress`, then spawn the build agent (step 2). That order both
-  times, because a spawn that precedes the move leaves the card exactly where
-  the next tick will find it and dispatch it a second time. A resume takes no
+  first.** There are three: `Todo` → `In Progress`, then spawn the build agent
+  (step 6, no `needs-plan`); `Todo` → `Plan`, then spawn the plan agent (step 6,
+  `needs-plan`); `Plan` → `In Progress`, then spawn the build agent (step 2).
+  That order every time, because a spawn that precedes the move leaves the card
+  exactly where the next tick will find it and dispatch it a second time. A resume takes no
   lock, because the card already holds one: it stays where steps 2 and 3 put
   it, `In Progress`, and never goes back to `Plan`. The exception is a card
   parked for plan sign-off, which gave its slot up when it parked — a `replan`
   resume takes one back, and so does the build dispatch that follows the
-  sign-off, so both check the ceilings like any fresh dispatch. A `replan` still
+  sign-off, so both need a free slot like any fresh dispatch. A `replan` still
   moves no card: it answers the operator in `Plan`, where the card already is.
   Sending a *reviewed* card back to `Plan` is the thing that must never happen —
   it hands it to step 2's "card in `Plan` that already has a pull request"

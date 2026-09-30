@@ -39,11 +39,15 @@ repository could hand the tick a server of its choosing.
 **The running loop uses the installed clone, never a working tree** — including
 when the repository it is building is foreman itself. A board that reads its own
 uncommitted code cannot survive merging a broken change to itself: the tick that
-would notice is the tick that just replaced itself. `git -C
-~/.foreman/install pull` moves the pin, deliberately by hand.
+would notice is the tick that just replaced itself. Move the pin with
+`bin/self-update.sh` (see [Self-updating](#self-updating)):
 
-Pulling is only half of it. A running tick keeps reading the skill it started
-with, so the new install takes effect at the next restart:
+    ~/.foreman/install/bin/self-update.sh
+
+It fast-forwards the clone to the latest release and restarts the tick. Do not
+`git pull` the clone by hand: a running tick keeps reading the skill it started
+with, so the machine keeps reporting healthy on code nobody chose until
+something restarts it. The restart on its own, when you need one, is
 
     ~/.foreman/install/skills/board/supervise.sh --restart
 
@@ -164,17 +168,22 @@ is why it no longer does.
   stage tries it again. It defaults to 60 minutes.
 - **`[fallback.floor]`** names, per stage (`plan`, `build`, `review`),
   the weakest model that stage may fall back to. A stage with no floor may
-  fall all the way to the bottom of `tiers`. A floor must name a model in
+  fall all the way to the bottom of `tiers` — except review, whose default
+  floor is `sonnet` whenever `sonnet` is one of the tiers. The review is the one
+  read a diff gets before it merges, so it does not fall to a model too weak to
+  find the bug. Set `review` to the last tier to allow the whole walk.
+  A floor must name a model in
   `tiers`, and it must sit at or below the stage's own model in that list;
   fallback only walks down, so a floor above the stage's model would never be
   reached and foreman refuses to load a `foreman.toml` that declares one. The
   cleanup stage shares the plan stage's floor, because it shares its model.
 
-`install.sh` writes neither `tiers` nor `[fallback.floor]` — it takes only
-`--harness` and the four `--model-<stage>` flags. Both tables are hand-edited
-into `foreman.toml`, and every rule above is checked when that file is READ, so
-a floor nothing could reach stops the next command that loads the declaration
-rather than waiting for a rate limit to expose it.
+`install.sh` takes only `--harness` and the four `--model-<stage>` flags. It
+writes a `[fallback]` table holding the harness's default `tiers` and
+`cooldown_minutes`, and no `[fallback.floor]`. Edit either table by hand in
+`foreman.toml`. Every rule above is checked when that file is READ, so a floor
+nothing could reach stops the next command that loads the declaration rather
+than waiting for a rate limit to expose it.
 
 While a model is rate-limited, the stage runs on the strongest tier below it
 that is not, and the card's history and its Linear comment say which model was
@@ -188,16 +197,20 @@ than fall back past a model the operator declared safe.
 
 ## Self-updating
 
-foreman updates itself by pulling, not by anything inbound. Nothing a pull
-request runs ever executes on the host: CI runs on GitHub-hosted runners, and
-the only way a merged commit reaches a machine is foreman
-fetching it. That is deliberate now that this repository is public — a
-self-hosted runner would let a stranger's fork send code straight to an
-operator's machine.
+foreman updates itself by pulling, not by anything inbound. CI never runs on
+the host: it runs on GitHub-hosted runners, and the only way a merged commit
+reaches a machine is foreman fetching it. That is deliberate now that this
+repository is public — a self-hosted runner would let a stranger's fork send
+code straight to an operator's machine.
 
-`bin/self-update.sh` is the automated form of the `git pull` and
-`supervise.sh --restart` described above. It fast-forwards foreman's clone to
-the latest release and restarts the tick, leaving any
+Build agents are another matter. They run the target's own bootstrap and test
+command on this host, in a throwaway worktree with permissions bypassed. What
+contains them is the worktree, the required checks and the review, not a
+sandbox.
+
+`bin/self-update.sh` is the one way to update foreman: a fast-forward and a
+`supervise.sh --restart` in one refusal-checked step. It fast-forwards
+foreman's clone to the latest release and restarts the tick, leaving any
 in-flight card alone. It refuses rather than guess: a dirty clone, a clone
 that is not on `main`, or an `origin/main` that was force-pushed all stop it
 instead of producing a clone nobody asked for.

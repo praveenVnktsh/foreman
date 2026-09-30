@@ -5,27 +5,31 @@ description: "Draw the architecture of a proposed change as one mermaid diagram,
 
 # Graphplan
 
-Turn a task into one dependency graph, and stop there. `AGENTS.md` covers what
-happens after: implement and test. Review and merge belong to the board, not to
-you. This skill owns the plan and the contract it is written in.
+Turn a task into one dependency graph. `AGENTS.md` covers what happens after:
+implement and test, or stop at the card when a board's plan stage sent you.
+Review and merge belong to the board, not to you. This skill owns the plan and
+the contract it is written in.
 
 ## Plan
 
-**The plan is drawn by a `fable` agent.** That is where the strongest model is
-spent: once, on the design, before any code exists. Everything downstream is
-only as good as this graph — a node whose label is wrong is wrong in every file
-that node owns — and no build agent that runs a node ever gets to revisit it.
-The board launches its planning stage with `--model fable` for this reason
-(`PLAN_MODEL` in `skills/board/config.sh`).
+**The plan is drawn by a `fable` agent** on a Claude installation that sets
+nothing else. That is where the strongest model is spent: once, on the design,
+before any code exists. Everything downstream is only as good as this graph — a
+node whose label is wrong is wrong in every file that node owns — and no build
+agent that runs a node ever gets to revisit it. The board's plan stage runs on
+`PLAN_MODEL`, which comes from `[models] plan` in `foreman.toml`, read by
+`bin/installation.py`; `fable` is Claude's default there. A build agent that
+plans a card nobody labelled `needs-plan` draws its graph on `BUILD_MODEL`
+instead.
 
 **Read before you plan.** Name what you read: the task, the files it touches,
 `STYLEGUIDE.md`, `AGENTS.md`, and the surrounding code. A plan written before
 reading is a guess with a diagram attached.
 
-**The plan is one mermaid graph and nothing else.** Write it to
-`docs/plans/<date>-<topic>.md` as a single ```mermaid block. No prose above it,
-none below it. If something matters, it is a node or an edge. If it will not fit
-in the graph, it is not part of the plan.
+**The plan is one mermaid graph and nothing else**: a single ```mermaid block.
+No prose above it, none below it. If something matters, it is a node or an
+edge. If it will not fit in the graph, it is not part of the plan. Where it
+goes is in [Keep it](#keep-it).
 
 That constraint is the point. Prose lets a plan stay vague about what depends on
 what, and the vagueness is exactly what makes the work serial. A graph cannot be
@@ -153,12 +157,25 @@ priced.
 
 ### Keep it
 
-The graph is an artifact, not a checkpoint. Write it, commit it, and carry on.
-Nobody has to approve it.
+**On a board, the plan is a comment on the Linear card, never a commit.** Post
+the graph as a comment on the card, ending with the footer line your prompt
+gave you, exactly as given. The board reads the card's comments, not your
+branch, and the footer is how it tells your comment from the operator's.
+Whether anyone approves it depends on the card:
+
+- **A card labelled `needs-plan`** waits for the operator's sign-off. The board
+  parks it until they remove the label, and nothing builds it before then.
+- **Any other card** needs no approval. A build agent that planned its own card
+  posts the graph and carries on.
+
+**Outside a board**, keep the graph in a scratch file and commit nothing,
+unless the operator asks you to keep it in the repository.
+
+Check it before you post it:
 
 ```bash
-bin/check-plan-graph.py --max-label-chars <N> docs/plans/<file>.md
-bin/render-diagram.sh docs/plans/<file>.md && open docs/plans/<file>.html
+bin/check-plan-graph.py --max-label-chars <N> <plan>.md
+bin/render-diagram.sh <plan>.md && open <plan>.html
 ```
 
 `<N>` is the budget your prompt gave you. Leave the option off and the checker
@@ -170,10 +187,16 @@ and because nothing else says why the work was cut up this way.
 
 ## Execute the graph with the Workflow tool
 
-**Call the Workflow tool. Do not ask first, and do not execute the graph
-sequentially by hand when the tool is available.** Invoking this skill is the
-authorisation: building a graph one node at a time discards the only thing it
-was drawn for. The mapping is mechanical:
+**When a board's plan-stage brief dispatched you, post the graph and stop.**
+That brief is the authority on what happens next: a plan agent executes
+nothing, pushes nothing and opens no pull request. A build agent runs the graph
+later, in its own dispatch.
+
+**Otherwise — an interactive session, or a build agent planning a card it
+judged not small — call the Workflow tool. Do not ask first, and do not execute
+the graph sequentially by hand when the tool is available.** Invoking this
+skill is the authorisation: building a graph one node at a time discards the
+only thing it was drawn for. The mapping is mechanical:
 
 - a `NEW` or `CHANGE` node → `agent(prompt, {label, model, effort})`
 - an untouched node → context in the prompt, never an agent
@@ -220,4 +243,4 @@ it done.
 | "I will add an edge to be safe" | An edge is a claim about the system. A false one is a false claim. |
 | "Only the new parts belong in the graph" | Then it is a task list. Untouched components are how a stranger reads it. |
 | "Now let me work out the build order" | Read it off the diagram. That is what the diagram is for. |
-| "Should I use a workflow for this?" | Yes. Invoking this skill already answered that. |
+| "Should I use a workflow for this?" | Yes, unless a plan-stage brief told you to stop at the card. Invoking this skill already answered that. |

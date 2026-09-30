@@ -5,8 +5,9 @@
 
 Reads a JSON list of Linear issues on stdin -- whole issues, as the tick already
 has them from Linear MCP. Each item needs an "identifier" ("ABC-7") and a
-"priority"; every other key is ignored, because Linear keeps adding fields and
-the tick pipes issues through untouched.
+"priority". "createdAt", when present, orders cards that share a priority,
+oldest first. Every other key is ignored, because Linear keeps adding fields
+and the tick pipes issues through untouched.
 
     stdout  one identifier per line, most urgent first, and nothing else.
     stderr  one line per card skipped during ranking (its priority could not
@@ -75,6 +76,7 @@ import argparse
 import json
 import re
 import sys
+from datetime import datetime, timezone
 from typing import NoReturn
 
 # Linear's scale: 0 = No priority, 1 = Urgent, 2 = High, 3 = Medium, 4 = Low.
@@ -119,6 +121,11 @@ CALLED_WRONG = 2
 # A Linear identifier: a team key, a hyphen, a number. The team key admits no
 # hyphen, so the number is everything after the one hyphen.
 IDENTIFIER = re.compile(r"^[A-Za-z][A-Za-z0-9]*-[0-9]+$")
+
+# What a card with no readable `createdAt` sorts under in the date slot of its
+# key. `age_key` sorts every such card after the dated ones anyway, so this
+# only has to compare with a datetime.
+_NO_STAMP = datetime.min.replace(tzinfo=timezone.utc)
 
 EXPECTED_PRIORITY = (
     "expected an integer 0..4, or one of "
@@ -205,6 +212,41 @@ def band(value: object) -> int:
     )
 
 
+def created_at(item: dict) -> datetime | None:
+    """When Linear created this card, or None if the issue does not say.
+
+    Read only to order cards that share a priority band, never to refuse
+    one, so a stamp that is missing or will not parse costs the card its
+    place among the dated ones and nothing else.
+    """
+    raw = item.get("createdAt")
+    if not isinstance(raw, str):
+        return None
+    try:
+        stamp = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return stamp if stamp.tzinfo else stamp.replace(tzinfo=timezone.utc)
+
+
+def age_key(item: dict, identifier: str) -> tuple:
+    """The part of a card's sort key that puts the older card first.
+
+    Inside a band the card that has waited longest wins, or a stream of
+    equal-priority newcomers starves it. `createdAt` says which card is
+    older. The card NUMBER used to, and it only does inside one team: Linear
+    numbers each team key on its own, so ABC-3 can be a year younger than
+    XYZ-40, and a board over two teams ranked by a count that meant nothing.
+
+    Cards with no readable `createdAt` follow the dated ones in their band,
+    ordered by team key and then number, which is still their age inside one
+    team.
+    """
+    team, number = identifier.rsplit("-", 1)
+    stamp = created_at(item)
+    return (stamp is None, stamp or _NO_STAMP, team, int(number))
+
+
 def identifier_of(item: object) -> str:
     """The validated identifier of one issue."""
     if not isinstance(item, dict):
@@ -259,11 +301,7 @@ def main(argv: list[str]) -> int:
             report_skip(identifier, str(exc))
             unresolved = True
             continue
-        # Linear numbers increase with age, so the LOWER number is the older
-        # card and wins its band. Without this, a stream of equal-priority
-        # newcomers starves a card that has already waited.
-        number = int(identifier.rsplit("-", 1)[1])
-        keys.append((rank, number, identifier))
+        keys.append((rank, *age_key(item, identifier), identifier))
 
     if not keys:
         if unresolved:
@@ -280,8 +318,8 @@ def main(argv: list[str]) -> int:
 
     # The identifier is the final tiebreak, so the order is total: the same
     # input always prints the same lines, whatever order Linear returned.
-    for _, _, identifier in sorted(keys):
-        sys.stdout.write(f"{identifier}\n")
+    for key in sorted(keys):
+        sys.stdout.write(f"{key[-1]}\n")
     return 0
 
 

@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """Block until work the tick just started has finished, or a timeout expires.
 
-    waitfor.py reviews --ticket PRA-28 --round 1 --slots a,b [--timeout 300]
+    waitfor.py reviews --ticket ABC-28 --round 1 --slots a,b [--timeout 300]
     waitfor.py checks  --pr 136                              [--timeout 900]
     waitfor.py deploy  --sha <merge-sha>                     [--timeout 600]
-    waitfor.py agents  --ticket PRA-28 --role review --attempt 1 [--timeout 300]
+    waitfor.py agents  --ticket ABC-28 --role review --attempt 1 [--timeout 300]
 
 Exit 0 when the condition holds, 1 on timeout, 3 when the condition is settled
 and did NOT hold. Progress goes to stderr so a long wait is visible; the final
@@ -170,6 +170,19 @@ def deploy_state(sha: str) -> dict:
     return {"done": False, "verdict": verdict}
 
 
+def attempt_matches(agent_attempt: str, wanted: str) -> bool:
+    """Whether an agent's attempt segment belongs to attempt `wanted`.
+
+    dispatch.sh names a reviewer `<attempt><slot>` (`review-1a`, `review-1b`),
+    so round 1 has to match `1a` as well as `1`. A bare prefix test also
+    matched `10` and `12b`: waiting on round 1 read round 10's reviewers.
+    """
+    if not agent_attempt.startswith(wanted):
+        return False
+    slot = agent_attempt[len(wanted):]
+    return not slot or not slot[0].isdigit()
+
+
 def agents_state(ticket: str, role: str, attempt: str) -> dict:
     registry = reconcile.load_agents()
     if registry is None:
@@ -182,7 +195,7 @@ def agents_state(ticket: str, role: str, attempt: str) -> dict:
         return {"done": False, "reason": "could not read the agent registry"}
     agents = reconcile.agents_for(registry, ticket)
     want = [a for a in agents
-            if a["role"] == role and str(a["attempt"]).startswith(str(attempt))
+            if a["role"] == role and attempt_matches(str(a["attempt"]), str(attempt))
             and a["current"]]
     if not want:
         return {"done": False, "reason": f"no current {role} agent for {ticket}"}

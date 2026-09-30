@@ -317,21 +317,23 @@ case "$out" in
   *) bad "an unreadable pull request head waits as ref-unknown: $out $(cat "$work/err")" ;;
 esac
 
-# --- a clean round whose head has moved ---------------------------------------
+# --- a clean round whose head moved in a way git cannot read ------------------
 #
 # Round 1 read SHA1 and found nothing blocking. The head is SHA2, which no
-# reviewer has ever read -- a resumed build pushing a fix for a failing check
-# is enough to produce this. Merging on the round number alone ships code
-# nobody reviewed, so the answer is a fresh round, and `MAX_REVIEW_ROUNDS` is
-# what bounds how many times a moving head may ask for one.
+# reviewer has ever read -- unless all that moved it was `gh pr update-branch`,
+# which merges only `main`. Telling the two apart needs git, and this fixture
+# repository has no origin to fetch from, so the answer is "cannot judge": wait,
+# never merge and never spend a round. The moves git CAN read -- a real push is
+# `head-moved`, an update-branch merge stays `mergeable` -- are pinned by
+# test-a-review-survives-update-branch-but-not-a-push.sh against a real origin.
 reset_card
 history_line '{"action":"spawn","name":"foreman/demo/ACME-1/review-1a","role":"review","attempt":"1a","ref":"'"$SHA1"'"}'
 findings 1a.json warning
 write_pr "$SHA2" "COMPLETED:SUCCESS"
 out="$(verdict)"
 case "$out" in
-  "head-moved 0 False 2"*) ok "a clean round whose head has moved asks for round 2" ;;
-  *) bad "a clean round whose head has moved asks for round 2: $out $(cat "$work/err")" ;;
+  "ref-unknown 0 False 0"*) ok "a clean round whose head moved unreadably waits as ref-unknown" ;;
+  *) bad "a clean round whose head moved unreadably waits as ref-unknown: $out $(cat "$work/err")" ;;
 esac
 
 [[ "$fail" -eq 0 ]] && printf 'PASS: review runs once and a fix merges on its checks\n'

@@ -77,6 +77,8 @@ CHUNK = 8 * 1024 * 1024
 # lock that somehow never clears cannot hang a tick past its own budget.
 PROBE_LOCK_TIMEOUT_SECONDS = 60
 
+RUNNER_CHECK = "a runner is online"
+
 
 def _load_config() -> dict[str, str]:
     """Read settings from config.sh, the single source of truth.
@@ -261,8 +263,67 @@ def memory_check(min_mb: int) -> dict:
     return check
 
 
+def _gh_pages(repo: str, endpoint: str) -> tuple[list | None, str]:
+    """Every page `gh api --paginate <endpoint>` returns: (pages, "") or (None, why).
+
+    gh prints one JSON document per page, back to back, so they are decoded as
+    a stream rather than as one value.
+    """
+    try:
+        p = subprocess.run(
+            ["gh", "api", "--paginate", endpoint],
+            cwd=repo, capture_output=True, text=True, timeout=60,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        return None, f"could not run gh api {endpoint}: {exc}"
+    if p.returncode != 0:
+        tail = (p.stderr or p.stdout or "").strip().splitlines()
+        return None, f"gh api {endpoint} failed: {tail[-1] if tail else f'exit {p.returncode}'}"
+    decoder = json.JSONDecoder()
+    text = p.stdout.strip()
+    pages, at = [], 0
+    while at < len(text):
+        try:
+            page, at = decoder.raw_decode(text, at)
+        except json.JSONDecodeError:
+            return None, f"gh api {endpoint} answered something that is not JSON"
+        pages.append(page)
+        while at < len(text) and text[at].isspace():
+            at += 1
+    return pages, ""
+
+
+def _runners(repo: str, endpoint: str) -> tuple[list | None, str]:
+    """The runners every page of <endpoint> lists: (runners, "") or (None, why)."""
+    pages, why = _gh_pages(repo, endpoint)
+    if pages is None:
+        return None, why
+    runners = []
+    for page in pages:
+        listed = page.get("runners") if isinstance(page, dict) else None
+        if not isinstance(listed, list) or not all(isinstance(r, dict) for r in listed):
+            return None, f"gh api {endpoint} answered a page with no runner list"
+        runners += listed
+    return runners, ""
+
+
+def _owner_is_org(repo: str) -> tuple[bool | None, str]:
+    """Whether the repository's owner is an organization: (answer, "") or (None, why)."""
+    try:
+        p = subprocess.run(
+            ["gh", "api", "repos/{owner}/{repo}", "--jq", ".owner.type"],
+            cwd=repo, capture_output=True, text=True, timeout=60,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        return None, f"could not ask who owns the repository: {exc}"
+    answer = p.stdout.strip()
+    if p.returncode != 0 or answer not in ("Organization", "User"):
+        return None, f"could not tell whether the owner is an organization (answer {answer!r})"
+    return answer == "Organization", ""
+
+
 def runner_check(repo: str) -> dict:
-    """Every self-hosted runner this repository has is offline.
+    """Every self-hosted runner this repository can use is offline.
 
     A required check that no runner can ever pick up does not fail. It sits
     `queued` forever, and a board waiting on it is indistinguishable from a board
@@ -277,39 +338,53 @@ def runner_check(repo: str) -> dict:
 
     Only fires when the repository actually depends on self-hosted runners. A
     repository with none registered uses GitHub-hosted ones, where there is
-    nothing for this machine to be wrong about -- so `total_count == 0` is a pass,
-    not a failure. An API call that cannot be made at all is also a pass: the gh
-    check above already covers a dead token, and reporting the same fault twice
-    tells an operator nothing new.
+    nothing for this machine to be wrong about -- so no runners is a pass.
+
+    A LIST THAT COULD NOT BE READ IS "unknown", NOT A PASS. Found auditing the
+    board on 2026-09-30: a failed call (listing runners needs admin rights, so a
+    403 is common) read as "no runners registered", only the first page of 30
+    was read, and an organization's runners were never asked about. So every
+    page is read, an organization's runners count too, and a list that cannot
+    be read marks the check `unknown`. Unknown does not gate -- the token may
+    lack admin rights on a machine that builds fine -- but it never says pass.
+    Only a machine whose every readable list is all offline, with nothing
+    unread, fails.
     """
-    check = {"name": "a runner is online", "ok": True, "detail": "no self-hosted runners registered"}
-    try:
-        p = subprocess.run(
-            ["gh", "api", "repos/{owner}/{repo}/actions/runners"],
-            cwd=repo, capture_output=True, text=True, timeout=60,
+    check = {"name": RUNNER_CHECK, "ok": True, "detail": "no self-hosted runners registered"}
+    runners, unread = [], []
+    listed, why = _runners(repo, "repos/{owner}/{repo}/actions/runners")
+    if listed is None:
+        unread.append(f"repository runners: {why}")
+    else:
+        runners += listed
+    is_org, why = _owner_is_org(repo)
+    if is_org is None:
+        unread.append(f"organization runners: {why}")
+    elif is_org:
+        listed, why = _runners(repo, "orgs/{owner}/actions/runners")
+        if listed is None:
+            unread.append(f"organization runners: {why}")
+        else:
+            runners += listed
+
+    online = [str(r.get("name")) for r in runners if r.get("status") == "online"]
+    if online:
+        check["detail"] = "online: " + ", ".join(online)
+        return check
+    offline = ", ".join(str(r.get("name")) for r in runners)
+    if unread:
+        check["unknown"] = True
+        check["detail"] = (
+            "unknown: could not read every runner list, so whether a runner is "
+            "online is not known; " + "; ".join(unread)
+            + (f"; offline: {offline}" if offline else "")
         )
-    except (OSError, subprocess.SubprocessError) as exc:
-        check["detail"] = f"could not ask: {exc}"
         return check
-    if p.returncode != 0:
-        check["detail"] = "could not ask; see the gh check above"
-        return check
-    try:
-        body = json.loads(p.stdout or "{}")
-    except json.JSONDecodeError:
-        check["detail"] = "could not ask; unreadable response"
-        return check
-    runners = body.get("runners") or []
     if not runners:
         return check
-    online = [r.get("name") for r in runners if (r.get("status") or "") == "online"]
-    if online:
-        check["detail"] = "online: " + ", ".join(n for n in online if n)
-        return check
-    names = ", ".join(str(r.get("name")) for r in runners)
     check["ok"] = False
     check["detail"] = (
-        f"every registered runner is offline ({names}). A required check will "
+        f"every registered runner is offline ({offline}). A required check will "
         f"queue and never start, which reads as pending forever."
     )
     return check

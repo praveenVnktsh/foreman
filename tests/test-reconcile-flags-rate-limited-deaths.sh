@@ -52,19 +52,23 @@ export HOME="$work" FOREMAN_HOME="$fh" FOREMAN_INSTANCE=demo
 # shellcheck source=../skills/board/config.sh
 . "$root/skills/board/config.sh"
 
-# One stopped plan agent per ticket, its transcript written from stdin at the
-# path the claude adapter reports for its cwd and session.
-stopped_agent() {  # $1 ticket; transcript rows on stdin
-  local ticket="$1" cwd="/wt/$1" transcript
-  transcript="$("$root/skills/board/harness/claude.sh" transcript "$cwd" "s-$ticket")"
+# One plan agent per ticket, its transcript written from stdin at the path the
+# claude adapter reports for its cwd and session. `stopped` by default; a
+# second and third argument give it another state and pid.
+stopped_agent() {  # $1 ticket, [$2 state, $3 pid or null]; transcript rows on stdin
+  local ticket="$1" state="${2:-stopped}" pid="${3:-null}" cwd="/wt/$1" transcript
+  # The adapter prints the path and exits non-zero while the file is not there.
+  transcript="$("$root/skills/board/harness/claude.sh" transcript "$cwd" "s-$ticket" 2>/dev/null)"
   mkdir -p "$(dirname "$transcript")"
   cat > "$transcript"
-  python3 - "$work/agents.json" "$BOARD_NAME_PREFIX/$ticket/plan-1" "$cwd" "s-$ticket" <<'PY'
+  python3 - "$work/agents.json" "$BOARD_NAME_PREFIX/$ticket/plan-1" "$cwd" "s-$ticket" \
+    "$state" "$pid" <<'PY'
 import json, sys
-path, name, cwd, session = sys.argv[1:]
+path, name, cwd, session, state, pid = sys.argv[1:]
 agents = json.load(open(path))
-agents.append({"name": name, "id": session, "sessionId": session, "pid": None,
-               "state": "stopped", "startedAt": 1, "cwd": cwd, "status": None})
+agents.append({"name": name, "id": session, "sessionId": session,
+               "pid": json.loads(pid), "state": state, "startedAt": 1,
+               "cwd": cwd, "status": None})
 json.dump(agents, open(path, "w"))
 PY
 }
@@ -132,6 +136,53 @@ stopped_agent PRA-14 <<'ROWS'
 ROWS
 is "a finished agent that mentions a 429 in prose is not rate-limited" false "$(record PRA-14 "$death")"
 
+# --- a Claude agent that finished and exited ----------------------------------
+#
+# On the Claude Code harness a finished agent EXITS and keeps its row at
+# `done` with `pid: null`; it is never `stopped`. Only `stopped` agents were
+# diagnosed, so a Claude spawn refused by a rate limit was never flagged and the
+# tick never fell back a tier for it.
+stopped_agent PRA-16 done null <<'ROWS'
+{"type":"user","message":{"role":"user","content":"plan the card"}}
+{"type":"assistant","isApiErrorMessage":true,"error":"rate_limit","message":{"role":"assistant","content":[{"type":"text","text":"API Error: 429 rate_limit_error"}]}}
+ROWS
+is "a done agent with no pid that was refused a spawn is rate-limited" true \
+  "$(record PRA-16 "$death")"
+
+# The same transcript on an agent that is idle with its pid intact: its turn
+# ended but its process did not, so nothing is diagnosed.
+stopped_agent PRA-17 done 4242 <<'ROWS'
+{"type":"user","message":{"role":"user","content":"plan the card"}}
+{"type":"assistant","isApiErrorMessage":true,"error":"rate_limit","message":{"role":"assistant","content":[{"type":"text","text":"API Error: 429 rate_limit_error"}]}}
+ROWS
+is "a done agent whose process is still up is not diagnosed" null \
+  "$(record PRA-17 'r["agents"][0]["death"]')"
+
+# --- a transcript the diagnosis must survive -----------------------------------
+#
+# A tool call's `input` is whatever the transcript recorded. A string there
+# raised AttributeError, which took down the whole record for the card.
+stopped_agent PRA-18 <<'ROWS'
+{"type":"user","message":{"role":"user","content":"plan the card"}}
+{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","id":"t1","name":"Raw","input":"echo hi"}]}}
+ROWS
+is "a tool call whose input is a string is named as the unanswered one" \
+  '"Raw: \"echo hi\""' "$(record PRA-18 'r["agents"][0]["death"]["unanswered_tool"]')"
+
+# A reset time past the display cut. The text used to be cut to 400 characters
+# BEFORE its reset time was looked for, so a limit that said when it ended fell
+# back to the configured cooldown.
+reset_epoch="$(python3 -c 'import time; print(int(time.time()) + 3 * 3600)')"
+padding="$(python3 -c 'print("x" * 500)')"
+stopped_agent PRA-19 <<ROWS
+{"type":"user","message":{"role":"user","content":"plan the card"}}
+{"type":"assistant","isApiErrorMessage":true,"error":"rate_limit","message":{"role":"assistant","content":[{"type":"text","text":"$padding Claude AI usage limit reached|$reset_epoch"}]}}
+ROWS
+is "a reset time past the display cut is still read" true \
+  "$(record PRA-19 '170 <= r["agents"][0]["death"]["rate_limit_minutes"] <= 181')"
+is "and the error text is still cut for display" true \
+  "$(record PRA-19 'len(r["agents"][0]["death"]["rate_limit_error"]) <= 400')"
+
 # --- the agent's model comes from its newest spawn ---------------------------
 card_log PRA-10 "{\"action\":\"spawn\",\"name\":\"$BOARD_NAME_PREFIX/PRA-10/plan-1\",\"role\":\"plan\",\"attempt\":\"1\",\"model\":\"fable\",\"first_choice\":\"fable\"}"
 card_log PRA-10 "{\"action\":\"spawn\",\"name\":\"$BOARD_NAME_PREFIX/PRA-10/plan-1\",\"role\":\"plan\",\"attempt\":\"1\",\"model\":\"opus\",\"first_choice\":\"fable\"}"
@@ -191,5 +242,18 @@ history_of PRA-22 <<'H'
 H
 is "a card whose history ends without a void has no streak" null \
   "$(record PRA-22 'r["environmental_streak"]')"
+
+# A void that names no role still counts, and does not decide the role. It used
+# to set the role to "", which made every older void that named one look like
+# another stage's, so a run of three read as a run of one.
+history_of PRA-24 <<'H'
+2026-09-16T01:00:00Z {"action":"void","role":"plan","attempt":"1","reason":"first"}
+2026-09-16T01:01:00Z {"action":"spawn","role":"plan","attempt":"1"}
+2026-09-16T01:02:00Z {"action":"void","role":"plan","attempt":"1","reason":"second"}
+2026-09-16T01:03:00Z {"action":"void","attempt":"1","reason":"third, no role"}
+H
+is "a role-less void at the tail extends the run behind it" \
+  '{"role": "plan", "count": 3, "since": "2026-09-16T01:00:00Z", "last_reason": "third, no role"}' \
+  "$(record PRA-24 'r["environmental_streak"]')"
 
 exit "$fail"
