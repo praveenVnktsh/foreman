@@ -29,7 +29,9 @@ mode="$work/mode"
 cat >"$work/bin/claude" <<STUB
 #!/bin/bash
 case "\$1" in
-  --bg) printf 'agent-77\n' ;;
+  # What 2.1.286 prints: the id is in the banner and the stop hint, and the
+  # last word is "session" -- the old parser stopped an agent by that name.
+  --bg) printf 'backgrounded \302\267 agent-77 \302\267 x\n  claude agents             list sessions\n  claude stop agent-77      stop this session\n' ;;
   agents)
     reads="\$(cat "$work/reads" 2>/dev/null || echo 0)"
     echo \$(( reads + 1 )) >"$work/reads"

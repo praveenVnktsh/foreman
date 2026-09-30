@@ -264,12 +264,24 @@ await_session() { # <name>
 
 # The id `claude --bg` printed, which is what `claude stop` takes.
 #
-# ASSUMPTION -- the format is not pinned. `claude --help` on 2.1.286 says only
-# that --bg "prints the id that claude attach, logs, stop and rm take". So this
-# takes the last word of the last line that has one, and only if it looks like
-# an id. A wrong guess costs a `claude stop` that fails, which is ignored.
+# Observed on 2.1.286 (`claude --help` pins only that it "prints the id"):
+#
+#   backgrounded · a898e3d2 · foreman/board/ABC-1
+#     claude agents             list sessions
+#     claude attach a898e3d2    open in this terminal
+#     ...
+#     claude stop a898e3d2      stop this session
+#
+# The last word is "session", not the id. So this reads the id from the
+# `claude stop <id>` hint first, then from the `backgrounded · <id>` banner,
+# and prints nothing rather than a guess: a wrong id costs a `claude stop` on
+# some other session.
 bg_agent_id() { # <file holding what claude --bg printed>
-  awk 'NF { last = $NF } END { if (last ~ /^[A-Za-z0-9_-]+$/) print last }' "$1"
+  awk '
+    $1 == "claude" && $2 == "stop" && $3 ~ /^[A-Za-z0-9_-]+$/ { stop = $3 }
+    $1 == "backgrounded" && $3 ~ /^[A-Za-z0-9_-]+$/ && banner == "" { banner = $3 }
+    END { if (stop != "") print stop; else if (banner != "") print banner }
+  ' "$1"
 }
 
 resume() {
