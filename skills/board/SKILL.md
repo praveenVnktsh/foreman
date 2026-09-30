@@ -2543,6 +2543,7 @@ quietly left open ships.
 ```bash
 ~/.foreman/install/skills/board/sweep.sh <merged-or-abandoned tickets...>
 ~/.foreman/install/skills/board/sweep.sh --orphans
+~/.foreman/install/skills/board/sweep.sh --settle <tickets in Plan, In Progress or In Review...>
 ```
 
 **Inside the slice, one board at a time.** `sweep.sh` reads `FOREMAN_INSTANCE`
@@ -2564,9 +2565,30 @@ a card that is not terminal may still be diagnosed from its transcript
 foreman sessions (no pid, and not `working`) out after `SWEEP_RETENTION_DAYS`
 on every harness, and their worktrees follow on the next orphan pass.
 
+**`--settle` stops the finished turns a live card no longer needs.** A
+background agent does not exit when its turn ends; it idles at `done` with its
+pid and about 300 MB, and ticket mode only reaches a card once it is terminal,
+so every earlier role on a card in flight would keep its process for the card's
+whole life. Every slice, pass the board's in-flight tickets: the cards the slice
+read in Plan, In Progress and In Review. Pass them only when that Linear read
+succeeded — a failed read is not "nothing in flight", and would settle every
+card's agents as if the cards were gone. `--settle` stops each turn-complete
+agent whose turn a later role or attempt on the same card has superseded (a
+newer fork of the same name counts, a sibling review slot does not), and every
+turn-complete agent of a card no longer in flight. Once a row has exited it is
+forgotten, unless it is the build a fix round would resume. Resuming needs that
+row, and on a card in flight it is not even stopped: a `stopped` row no longer
+spares its worktree from `--orphans`, and the resume runs in that worktree. A
+card no longer in flight has its build stopped and kept. It never
+touches a `working` agent, the tick, the scheduled cleanup, or another board's
+agents, and never removes a transcript, a worktree or a slot. It exits non-zero
+when a stop does not land or the agent list cannot be read, so report that on
+the tick.
+
 **Ticket mode also stops and forgets the card's sessions.** A finished agent
-reads `done` whether it exited or is idling with a pid, and nothing else ever
-stops an idle one or forgets an exited one. So a sweep
+reads `done` whether it exited or is idling with a pid, and only a sweep of the
+card's end, or `--settle` for a card still in flight, stops an idle one or
+forgets an exited one. So a sweep
 for a terminal card classifies every agent named `foreman/<board>/<T>/…` by
 its row in `"$HARNESS_SH" list`: one with a pid and state `done` or `blocked`
 is stopped and awaited, up to `AGENT_STOP_TIMEOUT_SECONDS`, for the adapter's
