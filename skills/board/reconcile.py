@@ -33,7 +33,22 @@ import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from urllib.parse import unquote
+from typing import NoReturn
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+
+# The exit status of every fault that stops this process before it can answer:
+# a config.sh that will not load, a contract value that will not parse, a
+# `boards.toml` that will not load. Not 1, because `--cleanup-due` answers "not
+# due" with 1. A tick that read a broken config as "not due" skipped the
+# cleanup and reported nothing wrong, since both printed a line and exited 1.
+FAULT_EXIT = 2
+
+
+def _fault(message: str) -> NoReturn:
+    """Say what failed on stderr and exit FAULT_EXIT. Never returns."""
+    print(f"reconcile: {message}", file=sys.stderr)
+    raise SystemExit(FAULT_EXIT)
+
 
 def _load_config() -> dict[str, str]:
     """Read settings from config.sh — the single source of truth.
@@ -52,6 +67,7 @@ def _load_config() -> dict[str, str]:
         "FOREMAN_DEFAULT_HARNESS", "FOREMAN_HARNESSES",
         "BOARD_NAME_PREFIX", "BOARD_WORKTREE_PREFIX",
         "CLEANUP_EVERY_DAYS", "MAX_CONCURRENT", "REVIEWERS_PER_ROUND",
+        "HOST_MAX_CONCURRENT",
     )
     script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.sh")
     printf = 'printf "%s\\0" ' + " ".join(f'"${k}"' for k in keys)
@@ -65,7 +81,7 @@ def _load_config() -> dict[str, str]:
     )
     values = out.stdout.split("\0")
     if out.returncode != 0 or len(values) < len(keys):
-        raise SystemExit(f"reconcile: could not read {script}: {out.stderr.strip()}")
+        _fault(f"could not read {script}: {out.stderr.strip()}")
     return dict(zip(keys, values))
 
 
@@ -74,6 +90,9 @@ def _load_config() -> dict[str, str]:
 # here would read an empty directory the day fallback.py moved its own.
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import fallback  # noqa: E402  (see sys.path.insert above -- sibling module)
+# severity.py owns which findings block. brief.py reads the same rule, so a
+# round cannot block here and merge there.
+import severity  # noqa: E402  (sibling module, as above)
 
 _CFG = _load_config()
 # registry.sh, which HARNESS_SH points at, reads the harness set from the
@@ -107,8 +126,8 @@ DEPLOY_SELECTION_STEP = _CFG["DEPLOY_SELECTION_STEP"]
 # prevent: refuse instead, the same way a required scalar refuses everywhere
 # else in this codebase.
 if not _CFG["CI_WORKFLOW"]:
-    raise SystemExit(
-        "reconcile: CI_WORKFLOW is empty -- checks.ci_workflow is required in "
+    _fault(
+        "CI_WORKFLOW is empty -- checks.ci_workflow is required in "
         "board.toml and bin/contract.py refuses it blank, so this can only mean "
         "an environment override (CI_WORKFLOW=) blanked it out after the fact"
     )
@@ -160,10 +179,10 @@ def _int_setting(key: str) -> int:
     try:
         return int(raw)
     except ValueError:
-        raise SystemExit(
-            f"reconcile: {key} is {raw!r}, which is not an integer; "
+        _fault(
+            f"{key} is {raw!r}, which is not an integer; "
             f"bin/contract.py refuses that, so this is an environment override"
-        ) from None
+        )
 
 
 # How many days apart a board's scheduled cleanups run, 0 meaning off.
@@ -176,9 +195,20 @@ MAX_CONCURRENT = _int_setting("MAX_CONCURRENT")
 # a round that is fully dispatched from one the tick was interrupted part-way
 # through; a round short of its reviewers has not been reviewed yet.
 REVIEWERS_PER_ROUND = _int_setting("REVIEWERS_PER_ROUND")
+# The MACHINE's ceiling, across every board, read from config.sh like every
+# other setting here. config.sh takes it from the environment (dispatch.sh and
+# starved.py pass it in), defaults it to 4 and refuses anything but a positive
+# whole number. This file used to read the environment itself and fall back to
+# 4 on a value it could not parse, so a typo weighed a ceiling nobody declared.
+HOST_MAX_CONCURRENT = _int_setting("HOST_MAX_CONCURRENT")
 
 # An unreachable GitHub must not stall the whole tick.
 GH_TIMEOUT = 30
+
+# The branch every card branch is cut from and merges into. dispatch.sh cuts
+# each worktree from `origin/main`; commit_on_main and update_branch_only ask
+# the same ref.
+MAIN_BRANCH = "main"
 
 
 def run(args: list[str], cwd: str | None = None) -> tuple[int, str]:
@@ -272,7 +302,7 @@ PHASE = {
 
 def agents_for(agents: list[dict], ticket: str) -> list[dict]:
     # The trailing slash is load-bearing: without it "PRA-1" is a PREFIX MATCH
-    # for "PRA-10", "PRA-11", "PRA-100"... and one card would reap another's
+    # for "ABC-10", "ABC-11", "ABC-100"... and one card would reap another's
     # agents.
     #
     # The BOARD segment closes the same hole one level up. The registry this
@@ -329,6 +359,72 @@ def agents_for(agents: list[dict], ticket: str) -> list[dict]:
     return out
 
 
+# What a required check may conclude and still pass.
+CHECK_GREEN = frozenset({"SUCCESS", "NEUTRAL", "SKIPPED"})
+# A commit status (the rollup's `StatusContext`) has no `status` field. Its
+# `state` is PENDING or EXPECTED until the reporter posts an answer, and both
+# mean "not yet". Read as a conclusion, each one failed the check.
+STATUS_NOT_YET = frozenset({"PENDING", "EXPECTED"})
+
+
+def _check_answer(check: dict) -> tuple[str, str | None]:
+    """What one rollup entry says: (what to show, its conclusion or None).
+
+    None means the entry has not concluded. A running job reports conclusion
+    '', and folding that into `failing` is how a tick resumed a build agent to
+    fix a job that was merely still running -- burning an attempt and sending
+    it after a failure that did not exist. "Not yet" is its own answer.
+    """
+    status = (check.get("status") or "").upper()
+    verdict = (check.get("conclusion") or check.get("state") or "").upper()
+    if status and status != "COMPLETED" or not verdict or verdict in STATUS_NOT_YET:
+        return verdict or status or "PENDING", None
+    return verdict, verdict
+
+
+def _check_moment(check: dict) -> datetime | None:
+    """When one rollup entry last changed, or None if it carries no stamp.
+
+    The later of `startedAt` and `completedAt`, so a re-run in flight is newer
+    than the run it replaces. gh prints a stamp GitHub left null as
+    0001-01-01, and that is no stamp: read as a date, a QUEUED re-run is older
+    than the failure it re-runs, and the check reads as failing again.
+    """
+    moments = []
+    for key in ("startedAt", "completedAt"):
+        raw = check.get(key)
+        if not isinstance(raw, str) or not raw:
+            continue
+        try:
+            moment = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+        except ValueError:
+            continue
+        if moment.year <= 1:
+            continue
+        if moment.tzinfo is None:
+            moment = moment.replace(tzinfo=timezone.utc)
+        moments.append(moment)
+    return max(moments) if moments else None
+
+
+def _newest_runs(checks: list[dict]) -> list[dict]:
+    """The entries of one check name that answer for it now.
+
+    One name can appear several times in a rollup: a re-run, or two workflows
+    with a job of the same name. Reading them in rollup order made the verdict
+    depend on which one GitHub listed last, so a check that failed and then
+    passed on a re-run could read as failing, and the other way round. The
+    newest entry answers. When the stamps cannot say which is newest -- one is
+    missing, or two tie -- every candidate answers, and `check_rollup` reads
+    any pending one as pending and any failed one as failing.
+    """
+    moments = [_check_moment(c) for c in checks]
+    if any(m is None for m in moments):
+        return checks
+    newest = max(moments)
+    return [c for c, m in zip(checks, moments) if m == newest]
+
+
 def check_rollup(pr: dict) -> dict:
     """Required checks, by exact name, for this head SHA.
 
@@ -336,27 +432,26 @@ def check_rollup(pr: dict) -> dict:
     queued — so it is reported as its own state, not folded into `passing`.
     """
     rollup = pr.get("statusCheckRollup") or []
-    seen, pending = {}, []
+    by_name: dict[str, list[dict]] = {}
     for c in rollup:
+        if not isinstance(c, dict):
+            continue
         name = c.get("name") or c.get("context") or ""
-        if name not in REQUIRED_CHECKS:
-            continue
-        # A running job reports conclusion '' — it has not concluded anything.
-        # Folding that into `failing` is how a tick resumes a build agent to fix
-        # a job that was merely still running, burning an attempt and sending it
-        # to chase a failure that does not exist. "Not yet" is its own answer.
-        status = (c.get("status") or "").upper()
-        verdict = (c.get("conclusion") or c.get("state") or "").upper()
-        if status and status != "COMPLETED" or not verdict:
+        if name in REQUIRED_CHECKS:
+            by_name.setdefault(name, []).append(c)
+    seen, pending, concluded = {}, [], {}
+    for name, checks in by_name.items():
+        answers = [_check_answer(c) for c in _newest_runs(checks)]
+        waiting = [shown for shown, verdict in answers if verdict is None]
+        if waiting:
             pending.append(name)
-            seen[name] = verdict or status or "PENDING"
+            seen[name] = waiting[0]
             continue
-        seen[name] = verdict
-    concluded = {n: v for n, v in seen.items() if n not in pending}
+        verdicts = [verdict for _, verdict in answers]
+        bad = [v for v in verdicts if v not in CHECK_GREEN]
+        seen[name] = concluded[name] = bad[0] if bad else verdicts[0]
     missing = sorted(REQUIRED_CHECKS - set(seen))
-    failing = sorted(
-        n for n, v in concluded.items() if v not in ("SUCCESS", "NEUTRAL", "SKIPPED")
-    )
+    failing = sorted(n for n, v in concluded.items() if v not in CHECK_GREEN)
     return {
         "observed": seen,
         "missing": missing,
@@ -385,6 +480,57 @@ def branch_for(ticket: str) -> str:
     built every one of those cards again.
     """
     return f"{BOARD_NAME_PREFIX}/{ticket}"
+
+
+# One line per changed file from the pull request files API: the path it has
+# now, and the path it had before a rename ("" for anything else). JSON, because
+# a path may hold a tab or a newline.
+_FILES_JQ = '.[] | [.filename, (.previous_filename // "")] | @json'
+
+
+def changed_files(number: int) -> tuple[list[str] | None, list[str]]:
+    """The files a pull request changes, and every path the risk scan reads.
+
+    `(files, scanned)`. `files` is None when neither source could be read,
+    and then `scanned` is empty and means nothing.
+
+    `gh pr diff --name-only` answers first. It fails for good on some pull
+    requests -- GitHub refuses to render a diff past its size limit -- and a
+    card whose risk stayed `unknown` on every tick never merged and never said
+    why. So a failure falls back to the files API, which pages instead of
+    rendering. That API also names where a renamed file CAME FROM, and the
+    scan reads that path too: moving a file out of a risk path changes that
+    path as much as editing it does.
+    """
+    code, out = run(["gh", "pr", "diff", str(number), "--name-only"], cwd=REPO)
+    if code == 0:
+        files = [f for f in out.splitlines() if f.strip()]
+        return files, files
+    code, out = run(
+        ["gh", "api", f"repos/{{owner}}/{{repo}}/pulls/{number}/files",
+         "--paginate", "--jq", _FILES_JQ],
+        cwd=REPO,
+    )
+    if code != 0:
+        return None, []
+    files, scanned = [], []
+    for line in out.splitlines():
+        if not line.strip():
+            continue
+        # A line that is not a two-item JSON list is a read that went wrong,
+        # and half a file list is not a list: JSONDecodeError and a wrong item
+        # count are ValueErrors, a bare number is a TypeError.
+        try:
+            path, previous = json.loads(line)
+        except (TypeError, ValueError):
+            return None, []
+        if not isinstance(path, str) or not isinstance(previous, str) or not path:
+            return None, []
+        files.append(path)
+        scanned.append(path)
+        if previous:
+            scanned.append(previous)
+    return files, scanned
 
 
 def pr_for(ticket: str) -> dict | None:
@@ -471,17 +617,20 @@ def pr_for(ticket: str) -> dict | None:
     # `risk: unknown` is deliberately neither value: step 4 merges only `low`
     # and parks only `high`, so an unknown risk stops the card until the diff
     # can actually be read.
-    code, out = run(
-        ["gh", "pr", "diff", str(pr["number"]), "--name-only"], cwd=REPO
-    )
-    if code != 0:
+    files, scanned = changed_files(pr["number"])
+    if files is None:
         pr["files_changed"] = None
         pr["risk"] = "unknown"
         pr["risk_paths"] = []
-        pr["risk_reason"] = "gh pr diff failed; the diff was never read"
+        pr["risk_reason"] = (
+            f"gh pr diff {pr['number']} --name-only and gh api "
+            f"repos/{{owner}}/{{repo}}/pulls/{pr['number']}/files both failed, "
+            f"so the diff was never read and this card cannot merge. Run either "
+            f"command by hand to see GitHub's error; if it persists, a person "
+            f"reads the diff against [risk] paths and merges or parks the card"
+        )
     else:
-        files = [f for f in out.splitlines() if f.strip()]
-        touched = sorted({p for f in files for p in HIGH_RISK_PATHS if f.startswith(p)})
+        touched = sorted({p for f in scanned for p in HIGH_RISK_PATHS if f.startswith(p)})
         pr["files_changed"] = len(files)
         pr["risk"] = "high" if touched else "low"
         pr["risk_paths"] = touched
@@ -515,12 +664,13 @@ def commit_on_main(sha: str) -> bool | None:
     """
     if not sha:
         return False
-    code, _ = run(["git", "fetch", "--quiet", "origin", "main"], cwd=REPO)
+    code, _ = run(["git", "fetch", "--quiet", "origin", MAIN_BRANCH], cwd=REPO)
     if code != 0:
         return None
     # is-ancestor exits 1 for "no" and something else entirely (128) for a sha
     # this checkout has never heard of. Only 0 and 1 are answers.
-    code, _ = run(["git", "merge-base", "--is-ancestor", sha, "origin/main"], cwd=REPO)
+    code, _ = run(["git", "merge-base", "--is-ancestor", sha, f"origin/{MAIN_BRANCH}"],
+                  cwd=REPO)
     if code not in (0, 1):
         return None
     return code == 0
@@ -788,7 +938,12 @@ def deploy_verdict(sha: str) -> dict:
     # exactly where headSha lies, and refusing to read it there removes the
     # dangerous direction entirely. This costs nothing, because a stand-down
     # never proved a deployment anyway.
-    run(["git", "fetch", "--quiet", "origin"], cwd=REPO)
+    #
+    # The fetch is what puts a descendant's commit in this checkout. Its exit
+    # code used to be ignored, and `merge-base` then exited 128 for a head it
+    # had never heard of, which read as "does not carry this commit". A run
+    # that git cannot place is now its own answer: see `unplaced` below.
+    fetch_code, _ = run(["git", "fetch", "--quiet", "origin"], cwd=REPO)
     # The best explanation so far for why this commit is not deployed, ranked by
     # `_explains_better` rather than taken from list order — see there for why
     # newest-first is not sufficient.
@@ -800,18 +955,14 @@ def deploy_verdict(sha: str) -> dict:
     # later and B's deploy failed, A saw `skipped`, was on `main`, and waited the
     # full budget every tick forever while production was broken.
     unverified = None
+    # A run still going that carries this commit, its own or a descendant's.
+    in_flight = None
+    # Runs whose ancestry git could not answer. Any one of them may be the
+    # descendant whose deploy verifies this commit.
+    unplaced: list[dict] = []
     for r in runs:
         head = r.get("headSha") or ""
         if not head:
-            continue
-        if r.get("status") != "completed":
-            if head == sha:
-                running = {
-                    "verified": False, "terminal": False,
-                    "reason": f"deploy run {r['databaseId']} still {r.get('status')}",
-                }
-                if _explains_better(running, unverified):
-                    unverified = running
             continue
         # Ancestry first, steps second. `run_steps` is a `gh run view`
         # round trip per run; this is a local merge-base. Asking the network
@@ -820,10 +971,32 @@ def deploy_verdict(sha: str) -> dict:
         # for the whole deploy budget, so it multiplied into thousands. Both
         # orders return the same verdict, because a run that fails this test
         # contributes nothing either way.
+        #
+        # is-ancestor exits 1 for "no" and 128 for a commit this checkout does
+        # not have. Only 0 and 1 are answers, as in commit_on_main.
         if head != sha:
             code, _ = run(["git", "merge-base", "--is-ancestor", sha, head], cwd=REPO)
-            if code != 0:
+            if code == 1:
                 continue
+            if code != 0:
+                unplaced.append(r)
+                continue
+        if r.get("status") != "completed":
+            running = {
+                "verified": False, "terminal": False,
+                "reason": f"deploy run {r['databaseId']}"
+                          f"{'' if head == sha else f' of descendant {head[:12]}'} "
+                          f"still {r.get('status')}",
+                "url": r.get("url"),
+            }
+            if in_flight is None:
+                in_flight = running
+            # Only the commit's own run competes as an explanation. A
+            # descendant still going is weighed after the loop, against the
+            # one answer it can overturn.
+            if head == sha and _explains_better(running, unverified):
+                unverified = running
+            continue
         steps = run_steps(r)
         if steps.state != "ok" or steps.deploy != "success":
             # Records why this run did not verify, without letting it contribute
@@ -852,6 +1025,23 @@ def deploy_verdict(sha: str) -> dict:
             "url": r.get("url"),
         }
 
+    if unplaced:
+        ids = ", ".join(str(r["databaseId"]) for r in unplaced)
+        return {
+            "verified": False, "terminal": False,
+            "reason": f"git could not tell whether these deploy runs carry "
+                      f"{sha[:12]}: {ids}"
+                      + ("" if fetch_code == 0 else " (git fetch origin failed)")
+                      + "; any of them may be the deploy that verifies it"
+                      + (f"; meanwhile {unverified['reason']}" if unverified else ""),
+        }
+    # A run that completed without its deploy job never deploys anything, but
+    # a run still going that carries this commit still may. Reading the first
+    # as final ended the wait while that deploy was in flight.
+    if (unverified and unverified.get("outcome") == "deploy-never-ran"
+            and in_flight is not None):
+        return {**in_flight,
+                "reason": f"{in_flight['reason']}; {unverified['reason']}"}
     if unverified:
         return unverified
     return {"verified": False, "terminal": False,
@@ -1037,6 +1227,19 @@ def _read_jsonl(path: str) -> list[dict]:
     return out
 
 
+def event_of(entry: dict) -> dict:
+    """One history entry's `event`, or {} when it is not a JSON object.
+
+    `_read_jsonl` guarantees each ENTRY is an object, and nothing guarantees
+    its `event` is. A hand-edited line whose event is a string, a list or null
+    parses, and `.get` on it raised AttributeError -- which took down
+    `--host-slots` and `--overview` for every board on the machine. An event
+    nobody can read records no action, which every reader already handles.
+    """
+    event = entry.get("event")
+    return event if isinstance(event, dict) else {}
+
+
 def history(ticket: str) -> list[dict]:
     """The card's append-only transition log, as written by config.sh:card_log.
 
@@ -1137,7 +1340,7 @@ def card_holds_slot(history_path: str, stale_minutes: float | None) -> bool:
     if not entries:
         return False
     last = entries[-1]
-    event = last.get("event") or {}
+    event = event_of(last)
     if event.get("action") == "released":
         return False
     if stale_minutes is not None:
@@ -1287,9 +1490,11 @@ def dispatch_verdict(board: str, host_max: int,
     total = slots.get("total", 0)
     priorities = board_priorities(FOREMAN_HOME)
     if board not in priorities:
-        # Not declared: `boards.py` refuses it elsewhere, and inventing a floor
-        # for a board this machine does not run would reserve capacity forever.
-        return ""
+        # Not declared, so it has no floor and no share of this machine.
+        # Inventing a floor would reserve capacity forever; answering "" let
+        # it dispatch past a full machine. `--may-dispatch` refuses it before
+        # this is reached, and this refuses it again for every other caller.
+        return f"{board} is not declared in {os.path.join(FOREMAN_HOME, 'boards.toml')}"
     weight = sum(priorities.values())
     floors = {}
     for name, priority in priorities.items():
@@ -1748,7 +1953,7 @@ def _attempts(entries: list[dict], role: str) -> int:
     """
     seen, voided = set(), set()
     for e in entries:
-        ev = e.get("event") or {}
+        ev = event_of(e)
         if ev.get("role") != role:
             continue
         if ev.get("action") == "spawn":
@@ -1758,10 +1963,14 @@ def _attempts(entries: list[dict], role: str) -> int:
     return len(seen - voided)
 
 
-# The `dispatch.sh --reason` values whose build resume spends an attempt. A
-# `fix` resume does not: review rounds already bound the one fix a blocking
-# finding earns. Nor does a `retry`: it is the one resume a failed attempt
-# earns, part of that attempt, and step 2 bounds it to once.
+# The `dispatch.sh --reason` values whose build resume spends an attempt: only
+# `ci-fix`, which the tick may repeat for as long as a required check fails.
+#
+# A `fix` resume does not spend one. `review_verdict` answers `needs-fix` only
+# until a build resume follows the round, so a round buys exactly one fix, and
+# MAX_REVIEW_ROUNDS bounds the rounds. A `retry` does not either: it is the one
+# resume a failed attempt earns, part of that attempt, and step 2 bounds it to
+# once. Charging either would spend the budget twice for one attempt.
 CHARGED_BUILD_RESUME_REASONS = frozenset({"ci-fix"})
 
 
@@ -1773,13 +1982,12 @@ def build_attempts(entries: list[dict]) -> int:
     alone let a card whose required check never passes be resumed every pass
     and never reach the cap.
     """
-    resumes = sum(
-        1
-        for e in entries
-        if (e.get("event") or {}).get("action") == "resume"
-        and (e.get("event") or {}).get("role") == "build"
-        and (e.get("event") or {}).get("reason") in CHARGED_BUILD_RESUME_REASONS
-    )
+    resumes = 0
+    for e in entries:
+        ev = event_of(e)
+        if (ev.get("action") == "resume" and ev.get("role") == "build"
+                and ev.get("reason") in CHARGED_BUILD_RESUME_REASONS):
+            resumes += 1
     return _attempts(entries, "build") + resumes
 
 
@@ -1794,29 +2002,36 @@ def plan_rounds(entries: list[dict]) -> int:
     number, not a reason a resume happened. History is the only place the
     reason is recorded at all.
 
-    `dispatch.sh --resume` logs one row for every resume. A build resume's row
-    carries `role` and `reason`; a plan resume's row carries neither, so it
-    cannot say whether it was a revision round. A plan round therefore needs
-    its own entry, the same way an environmental write-off is an explicit
-    `card_log` call (see `build_attempts`'s `void`):
+    One round is one resume row naming `role: plan`. `dispatch.sh --resume`
+    writes `role` on every resume row it logs, so its own row is the round;
+    the only plan resume the board makes is the one that answers the
+    operator's comments on a parked `needs-plan` card.
+
+    Before that, dispatch.sh wrote a plan resume row with no role, and the
+    tick logged the round by hand:
 
         card_log <T> '{"action":"resume","role":"plan","round":"<n>"}'
 
-    This is the contract the board's tick (SKILL.md) must follow when it parks
-    a `needs-plan` card and resumes it with unconsumed operator comments --
-    written here because `reconcile.py` is what has to read it back. One row
-    is one round, by construction: the board increments `round` itself before
-    logging, so there is nothing here to dedupe the way `build_attempts`
-    dedupes a spawn against a later resume of the same attempt number -- a
-    round that needs revisiting again waits for the next operator comment
-    first, which is a NEW row, not the same one replayed.
+    Those rows still count, so a card parked across the upgrade keeps its
+    rounds. A tick still following the old prose writes its hand row right
+    after dispatch.sh's own; that pair is one round, not two, or the card
+    would reach MAX_PLAN_ROUNDS at half the rounds the operator allowed. A
+    hand row carries no `name`, and dispatch.sh's row always does.
     """
-    return sum(
-        1
-        for e in entries
-        if (e.get("event") or {}).get("action") == "resume"
-        and (e.get("event") or {}).get("role") == "plan"
-    )
+    rounds = 0
+    after_dispatch_row = False
+    for e in entries:
+        ev = event_of(e)
+        if ev.get("action") != "resume" or ev.get("role") != "plan":
+            after_dispatch_row = False
+            continue
+        by_dispatch = bool(ev.get("name"))
+        if not by_dispatch and after_dispatch_row:
+            after_dispatch_row = False
+            continue
+        rounds += 1
+        after_dispatch_row = by_dispatch
+    return rounds
 
 
 def plan_attempts(entries: list[dict]) -> int:
@@ -1842,6 +2057,11 @@ def plan_attempts(entries: list[dict]) -> int:
     voided for an environment fault is none. An operator asking for a revision
     of a plan that WAS posted is not a failure at all; that is `plan_rounds`,
     counted from resume entries, and the two caps are independent.
+
+    Zero is an ordinary answer. A Todo card without the `needs-plan` label is
+    dispatched straight to a build, and the build agent judges for itself
+    whether the work needs a graph. Such a card has no plan entry at all, so
+    both plan counts read 0 while it is `In Progress`, and nothing is missing.
     """
     return _attempts(entries, "plan")
 
@@ -1957,7 +2177,8 @@ def _api_error_text(row: dict) -> str | None:
     if not (row.get("isApiErrorMessage") or row.get("error")):
         return None
     parts = [str(row.get("error") or "")]
-    content = (row.get("message") or {}).get("content")
+    message = row.get("message")
+    content = message.get("content") if isinstance(message, dict) else None
     if isinstance(content, str):
         parts.append(content)
     elif isinstance(content, list):
@@ -1968,6 +2189,10 @@ def _api_error_text(row: dict) -> str | None:
 
 def _is_rate_limit(text: str) -> bool:
     return any(p.search(text) for p in RATE_LIMIT_PATTERNS)
+
+
+# How much of a rate-limit refusal the record carries for the card comment.
+DEATH_TEXT_CHARS = 400
 
 
 def death_report(path: str | None) -> dict | None:
@@ -2013,11 +2238,19 @@ def death_report(path: str | None) -> dict | None:
     ran_tool = False
     rate_limit_error = None
     for r in rows:
+        if not isinstance(r, dict):
+            continue
         error_text = _api_error_text(r)
         if (error_text is not None and rate_limit_error is None
                 and _is_rate_limit(error_text)):
-            rate_limit_error = " ".join(error_text.split())[:400]
-        msg = r.get("message") or {}
+            # The WHOLE text, whitespace folded. It is cut for display only
+            # below: the reset time a limit names can sit past any fixed cut,
+            # and a cut here made rate_limit_minutes fall back to the
+            # configured cooldown for a limit that said when it ends.
+            rate_limit_error = " ".join(error_text.split())
+        msg = r.get("message")
+        if not isinstance(msg, dict):
+            continue
         content = msg.get("content")
         if isinstance(content, str):
             last_text = content
@@ -2030,8 +2263,7 @@ def death_report(path: str | None) -> dict | None:
             kind = b.get("type")
             if kind == "tool_use":
                 ran_tool = True
-                desc = (b.get("input") or {}).get("command") or json.dumps(b.get("input"))[:200]
-                pending[b.get("id") or ""] = f"{b.get('name')}: {' '.join(str(desc).split())[:200]}"
+                pending[b.get("id") or ""] = _tool_call_summary(b)
             elif kind == "tool_result":
                 pending.pop(b.get("tool_use_id") or "", None)
             elif kind == "text":
@@ -2046,14 +2278,31 @@ def death_report(path: str | None) -> dict | None:
         "last_text": " ".join(last_text.split())[-400:] if last_text else None,
         "rows": len(rows),
         "rate_limited": rate_limit_error is not None,
-        "rate_limit_error": rate_limit_error,
+        "rate_limit_error": (rate_limit_error[:DEATH_TEXT_CHARS]
+                             if rate_limit_error else None),
         # How long to believe THIS limit, when its own text says. None means
         # the text did not say and FALLBACK_COOLDOWN_MINUTES answers, which is
         # what happened before this field existed. SKILL.md passes it to
-        # `fallback.py mark --minutes`.
+        # `fallback.py mark --minutes`. Read from the whole text, never the
+        # displayed cut above.
         "rate_limit_minutes": (rate_limit_minutes(rate_limit_error)
                                if rate_limit_error else None),
     }
+
+
+def _tool_call_summary(block: dict) -> str:
+    """`<tool name>: <what it was asked>`, short enough for a card comment.
+
+    A shell tool's `command` when its input carries one, else the input as
+    JSON. The input is whatever the transcript recorded: a string or a list
+    is as legal there as an object, and reaching for `.get` on one crashed
+    the diagnosis of every agent on the card.
+    """
+    call = block.get("input")
+    desc = call.get("command") if isinstance(call, dict) else None
+    if not desc:
+        desc = json.dumps(call)[:200]
+    return f"{block.get('name')}: {' '.join(str(desc).split())[:200]}"
 
 
 def spawned_model(entries: list[dict], name: str) -> str | None:
@@ -2066,7 +2315,7 @@ def spawned_model(entries: list[dict], name: str) -> str | None:
     recorded the model.
     """
     for e in reversed(entries):
-        ev = e.get("event") or {}
+        ev = event_of(e)
         if ev.get("action") == "spawn" and ev.get("name") == name:
             return ev.get("model") or None
     return None
@@ -2089,19 +2338,29 @@ def environmental_streak(entries: list[dict]) -> dict | None:
     Entries of another role are skipped, and so are spawn, resume and fallback
     entries. Any other entry ends the run: a non-void action for the role, or a
     role-less one such as `released`, means the card moved or was let go.
+
+    The run's role is the first role a void in it names. A void that names
+    none still counts, since every void is an environment fault, but it does
+    not decide the role. Deciding it as "" made every older entry that named
+    a role look like another stage's, so the run skipped straight past the
+    move that should have ended it. `role` is null only for a run in which no
+    void named one.
     """
     role, count, since, last_reason = None, 0, None, None
     for e in reversed(entries):
-        ev = e.get("event") or {}
+        ev = event_of(e)
         action = ev.get("action")
         if action in _STREAK_TRANSPARENT:
             continue
-        if role is not None and ev.get("role") and ev.get("role") != role:
+        named = ev.get("role") or None
+        if role is not None and named is not None and named != role:
             continue
         if action != "void":
             break
+        if not count:
+            last_reason = ev.get("reason")
         if role is None:
-            role, last_reason = ev.get("role") or "", ev.get("reason")
+            role = named
         count += 1
         since = e.get("at")
     if not count:
@@ -2110,14 +2369,13 @@ def environmental_streak(entries: list[dict]) -> dict | None:
             "last_reason": last_reason}
 
 
-BLOCKING = "blocking"
 # `<round><slot>`, as dispatch.sh composes `--attempt <r> --slot <s>` and as
 # each reviewer names its file. The leading digits are the round; whatever
 # follows is the slot.
 _ATTEMPT = re.compile(r"^(\d+)(.*)$")
 
 
-def review_findings(path: str) -> list[dict] | None:
+def review_findings(path: str) -> list | None:
     """One review file's findings, or None because it could not be READ.
 
     The same rule `waitfor.reviews_state` waits on: a review has arrived only
@@ -2125,9 +2383,9 @@ def review_findings(path: str) -> list[dict] | None:
     half-written file is not a review that found nothing, and reading one as
     an empty findings list merges a diff nobody finished reading.
 
-    A findings entry that is not an object is dropped rather than raising --
-    every reader below reaches straight for `.get`, and this is the parse
-    boundary.
+    Every entry is kept, including one that is not an object. It used to be
+    dropped, which read a finding nobody could parse as no finding at all.
+    `severity.is_blocking` counts it as blocking instead.
     """
     try:
         with open(path) as fh:
@@ -2136,7 +2394,77 @@ def review_findings(path: str) -> list[dict] | None:
         return None
     if not isinstance(doc, dict) or not isinstance(doc.get("findings"), list):
         return None
-    return [f for f in doc["findings"] if isinstance(f, dict)]
+    return doc["findings"]
+
+
+# How many update-branch merges may sit between a reviewed head and the head
+# now. The tick runs `gh pr update-branch` once per pass while a pull request
+# is BEHIND, so each one is a pass on which `main` moved under a green card.
+# Ten is a long day of that, and the walk needs a bound to stop at all.
+UPDATE_BRANCH_WALK = 10
+
+
+def update_branch_only(ref: str, head: str, branch: str) -> tuple[bool | None, str]:
+    """Is `head` reached from the reviewed `ref` by update-branch merges alone?
+
+    `(True, why)`, `(False, why)`, or `(None, why)` when git could not answer.
+
+    `gh pr update-branch` merges `main` into the branch. The commit it makes
+    has the old head as its FIRST parent and `main`'s tip as its SECOND, and
+    its tree is exactly what merging the two produces. A head reached from
+    `ref` only through such commits changes nothing a reviewer has not read:
+    what it adds is already on `main`.
+
+    Each commit on the way must hold all three, checked in this checkout:
+
+      * two parents, the first being the next commit toward `ref`;
+      * a second parent that is an ancestor of `origin/main`;
+      * a tree equal to what `git merge-tree --write-tree` makes of the two
+        parents. A merge whose conflicts somebody resolved by hand, or that
+        carries an extra edit, has a different tree, and that edit is code no
+        reviewer read.
+
+    Found 2026-09-30: an update-branch after a clean review read as
+    `head-moved`, and at MAX_REVIEW_ROUNDS = 1 every card whose `main` moved
+    before the merge went to `Needs Human`.
+    """
+    code, _ = run(["git", "fetch", "--quiet", "origin", MAIN_BRANCH, branch], cwd=REPO)
+    if code != 0:
+        return None, f"git fetch origin {MAIN_BRANCH} {branch} failed"
+    sha = head
+    for _ in range(UPDATE_BRANCH_WALK):
+        code, out = run(["git", "rev-list", "--parents", "-n", "1", sha], cwd=REPO)
+        if code != 0:
+            return None, f"{sha[:12]} is not in this checkout after a fetch"
+        parents = out.split()[1:]
+        if len(parents) != 2:
+            return False, f"{sha[:12]} is not a merge commit"
+        first, second = parents
+        code, _ = run(["git", "merge-base", "--is-ancestor", second,
+                       f"origin/{MAIN_BRANCH}"], cwd=REPO)
+        if code == 1:
+            return False, f"{sha[:12]} merges {second[:12]}, which is not on {MAIN_BRANCH}"
+        if code != 0:
+            return None, f"git could not tell whether {second[:12]} is on {MAIN_BRANCH}"
+        # Exit 1 is a conflict, which update-branch refuses rather than
+        # commits, so a merge commit over one was resolved by somebody. Any
+        # other failure is a git too old for --write-tree (it needs 2.38):
+        # that never improves by waiting, so it re-reviews rather than waits.
+        code, out = run(["git", "merge-tree", "--write-tree", first, second], cwd=REPO)
+        if code != 0:
+            return False, (f"{sha[:12]} could not be recomputed as a clean merge "
+                           f"(git merge-tree --write-tree exited {code})")
+        merged_tree = (out.split() or [""])[0]
+        code, tree = run(["git", "rev-parse", f"{sha}^{{tree}}"], cwd=REPO)
+        if code != 0:
+            return None, f"git could not read the tree of {sha[:12]}"
+        if tree.strip() != merged_tree:
+            return False, f"{sha[:12]} changes more than merging {MAIN_BRANCH} does"
+        if first == ref:
+            return True, f"{head[:12]} only merges {MAIN_BRANCH} into {ref[:12]}"
+        sha = first
+    return False, (f"{head[:12]} is more than {UPDATE_BRANCH_WALK} update-branch "
+                   f"merges past {ref[:12]}, or never reaches it")
 
 
 def review_verdict(ticket: str, entries: list[dict], pr: dict | None,
@@ -2160,14 +2488,17 @@ def review_verdict(ticket: str, entries: list[dict], pr: dict | None,
       head-moved       no blocking finding, but the head has moved past the sha
                        the round read, so nobody has reviewed what would merge.
                        Dispatch `next_round`, which MAX_REVIEW_ROUNDS bounds.
+                       A move made only by `gh pr update-branch` is not one:
+                       see update_branch_only.
       needs-fix        a blocking finding, and no build resume after it.
                        Resume the build with the findings.
       fixing           resumed, and the fix is not pushed yet -- the head is
                        still the sha the reviewer read, and the build agent is
                        running. Wait.
-      ref-unknown      resumed, and whether the fix was pushed cannot be
-                       judged: the round recorded no ref, or the head could not
-                       be read. Wait. Never a person's card -- see below.
+      ref-unknown      whether the head moved past the round cannot be
+                       judged: the round recorded no ref, the head could not
+                       be read, or git could not say how it moved. Wait.
+                       Never a person's card, and never a merge -- see below.
       fix-unresolved   resumed, the round's ref IS recorded, the head still
                        equals it, and the build agent is no longer running.
                        `Needs Human`: the fix agent stopped without pushing
@@ -2176,7 +2507,8 @@ def review_verdict(ticket: str, entries: list[dict], pr: dict | None,
       checks-failing   the fix is pushed and a required check failed.
       mergeable        no blocking finding at all, or the fix is pushed and
                        green -- the second case carries `merged_after_fix`,
-                       which SKILL.md logs before it merges.
+                       which SKILL.md logs before it merges. Always carries
+                       `merge_head`, the one sha merge.py may merge.
 
     `ref` is what makes "the fix was pushed" observable: `dispatch.sh` records
     the sha each reviewer was dispatched against, and a head that has moved
@@ -2195,13 +2527,18 @@ def review_verdict(ticket: str, entries: list[dict], pr: dict | None,
     are not the same answer. So `fix-unresolved` requires a RECORDED ref that
     the head provably still equals, and everything else waits.
 
+    A CLEAN round waits on the same unknowns. It used to answer `mergeable`
+    whenever it could not compare the head with the ref -- a legacy round with
+    no ref, a failed `gh pr list`, no pull request at all -- so a head nobody
+    reviewed could merge on a lookup that failed.
+
     `ticket` is a parameter because nothing else here names the card: the
     reviews live at `$BOARD_HOME/cards/<ticket>/reviews/<round><slot>.json`.
     """
     head = (pr or {}).get("headRefOid") or ""
     rounds: dict[int, list[tuple[int, str, str]]] = {}
     for index, entry in enumerate(entries):
-        event = entry.get("event") or {}
+        event = event_of(entry)
         if event.get("action") != "spawn" or event.get("role") != "review":
             continue
         match = _ATTEMPT.match(str(event.get("attempt") or ""))
@@ -2244,7 +2581,7 @@ def review_verdict(ticket: str, entries: list[dict], pr: dict | None,
         if findings is None:
             unread.append(f"{rnd}{slot}")
             continue
-        blocking += sum(1 for f in findings if f.get("severity") == BLOCKING)
+        blocking += sum(1 for f in findings if severity.is_blocking(f))
     state["blocking"] = blocking
     if unread:
         state.update(verdict="awaiting-review",
@@ -2264,26 +2601,56 @@ def review_verdict(ticket: str, entries: list[dict], pr: dict | None,
     # Did a commit land after this round was dispatched? Only a RECORDED ref
     # and a READABLE head can answer that. Either one missing is "unknown", and
     # unknown is never "no" -- both paths below turn on this.
+    unknown = []
+    if not ref:
+        unknown.append(f"round {rnd} recorded no ref")
+    if not head:
+        unknown.append("the pull request head could not be read"
+                       if pr else "the card has no pull request")
     pushed = bool(head and ref and head != ref)
 
     if not blocking:
+        if unknown:
+            state.update(
+                verdict="ref-unknown",
+                reason=f"{' and '.join(unknown)}, so whether round {rnd}'s "
+                       f"clean review covers what would merge cannot be judged",
+            )
+            return state
+        if not pushed:
+            state.update(verdict="mergeable", merge_head=head,
+                         reason=f"round {rnd} filed no blocking finding")
+            return state
         # A clean round licensed a merge on its round number alone, so a head
         # the reviewer never read could merge: round 1 passes at sha A, a
         # required check fails, the build is resumed and pushes B, and B merges
-        # unreviewed. Ask for a fresh round instead. This is what keeps
-        # MAX_REVIEW_ROUNDS meaningful -- it now bounds the re-reviews a moving
-        # head causes, and a card that reaches it with the head still moving is
-        # the existing `Needs Human` exit.
-        if pushed:
+        # unreviewed. Ask for a fresh round instead -- unless the only thing
+        # that moved the head was `gh pr update-branch`, which the tick runs
+        # itself and which adds nothing but `main`. MAX_REVIEW_ROUNDS bounds
+        # the re-reviews a moving head causes, and a card that reaches it with
+        # the head still moving is the existing `Needs Human` exit.
+        benign, why = update_branch_only(ref, head, branch_for(ticket))
+        if benign is None:
             state.update(
-                verdict="head-moved", next_round=rnd + 1,
-                reason=f"round {rnd} filed no blocking finding at {ref[:12]}, "
-                       f"but the head is now {head[:12]}, which no reviewer has "
-                       f"read; round {rnd + 1} has to read it",
+                verdict="ref-unknown",
+                reason=f"round {rnd} filed no blocking finding at {ref[:12]} and "
+                       f"the head is now {head[:12]}, but {why}, so whether a "
+                       f"reviewer has read what would merge cannot be judged",
             )
             return state
-        state.update(verdict="mergeable",
-                     reason=f"round {rnd} filed no blocking finding")
+        if benign:
+            state.update(
+                verdict="mergeable", merge_head=head,
+                reason=f"round {rnd} filed no blocking finding at {ref[:12]}; "
+                       f"{why}, so the reviewed diff is what would merge",
+            )
+            return state
+        state.update(
+            verdict="head-moved", next_round=rnd + 1,
+            reason=f"round {rnd} filed no blocking finding at {ref[:12]}, "
+                   f"but the head is now {head[:12]} ({why}), which no reviewer "
+                   f"has read; round {rnd + 1} has to read it",
+        )
         return state
 
     # A build resumed after the round's last reviewer spawned is the fix. The
@@ -2293,9 +2660,9 @@ def review_verdict(ticket: str, entries: list[dict], pr: dict | None,
     # stamps, which are whole seconds and tie.
     after = max(index for index, _, _ in spawned)
     resumed = any(
-        (e.get("event") or {}).get("action") == "resume"
-        and ((e.get("event") or {}).get("role") == "build"
-             or "/build-" in str((e.get("event") or {}).get("name") or ""))
+        event_of(e).get("action") == "resume"
+        and (event_of(e).get("role") == "build"
+             or "/build-" in str(event_of(e).get("name") or ""))
         for e in entries[after + 1:]
     )
     if not resumed:
@@ -2308,11 +2675,6 @@ def review_verdict(ticket: str, entries: list[dict], pr: dict | None,
     # into `fix-unresolved` sent the card to `Needs Human` with `board-failed`
     # on evidence nobody gathered -- see this function's docstring for the two
     # ways that happens to a card whose fix is pushed and green.
-    unknown = []
-    if not ref:
-        unknown.append(f"round {rnd} recorded no ref")
-    if not head:
-        unknown.append("the pull request head could not be read")
     if unknown:
         state.update(
             verdict="ref-unknown",
@@ -2337,7 +2699,7 @@ def review_verdict(ticket: str, entries: list[dict], pr: dict | None,
 
     checks = (pr or {}).get("checks") or {}
     if checks.get("passing"):
-        state.update(verdict="mergeable", merged_after_fix=True,
+        state.update(verdict="mergeable", merged_after_fix=True, merge_head=head,
                      reason=f"round {rnd} blocked, the fix at {head[:12]} is "
                             f"pushed and every required check passed")
         return state
@@ -2354,6 +2716,21 @@ def review_verdict(ticket: str, entries: list[dict], pr: dict | None,
     return state
 
 
+def _has_exited(agent: dict) -> bool:
+    """Has this agent's process ended, so its transcript is final?
+
+    A `stopped` agent has. So has a turn-complete one with no pid: on the
+    Claude Code this was measured against, a finished agent EXITS and keeps
+    its row at `done` with `pid: null` (harness/claude.sh says so). Asking
+    only about `terminal` meant a Claude spawn refused by a rate limit was
+    never diagnosed, so the tick never fell back a tier for it, and an agent
+    killed mid-tool was never named as one.
+    """
+    if agent["phase"] == "terminal":
+        return True
+    return agent["phase"] == "turn-complete" and not agent["alive"]
+
+
 def reconcile(ticket: str, agents: list[dict]) -> dict:
     pr = pr_for(ticket)
     # Composed from config.sh's BOARD_WORKTREE_PREFIX, as config.sh:worktree_path
@@ -2368,7 +2745,7 @@ def reconcile(ticket: str, agents: list[dict]) -> dict:
     # always has an outstanding tool call — it is mid-turn — so asking this of
     # one would report every healthy build as killed.
     for a in mine:
-        a["death"] = death_report(a["transcript"]) if a["phase"] == "terminal" else None
+        a["death"] = death_report(a["transcript"]) if _has_exited(a) else None
         a["model"] = spawned_model(entries, a["name"])
     record = {
         "ticket": ticket,
@@ -2390,21 +2767,6 @@ def reconcile(ticket: str, agents: list[dict]) -> dict:
         record["commit_on_main"] = commit_on_main(sha)
         record["deploy"] = deploy_verdict(sha)
     return record
-
-
-def _host_max() -> int:
-    """`HOST_MAX_CONCURRENT` from the environment, 4 when it cannot be read.
-
-    The machine ceiling reaches this process through the environment and not
-    through the contract: it is a fact about the machine, and `dispatch.sh`
-    passes config.sh's value in on the call. The default is config.sh's own,
-    so a caller that forgets to pass it weighs the same number the shell would
-    have used.
-    """
-    try:
-        return int(os.environ.get("HOST_MAX_CONCURRENT", "4"))
-    except ValueError:
-        return 4
 
 
 def _is_declared(board: str, mode: str) -> bool:
@@ -2554,8 +2916,27 @@ def _tick_view(agents: list[dict]) -> dict:
         "state": row.get("state"),
         "phase": PHASE.get(row.get("state"), "unknown"),
         "age_seconds": _age_seconds(row.get("startedAt")),
+        "idle_seconds": _idle_seconds(row),
         "live_count": len(live),
     }
+
+
+def _idle_seconds(agent: dict) -> float | None:
+    """Seconds since this agent's transcript last changed, or None.
+
+    The transcript's mtime is the evidence supervise.sh judges a tick's health
+    on, asked of the adapter the same way. None when the adapter cannot say
+    where the transcript is, or it is not there: an idle time nobody measured
+    is not a long one.
+    """
+    session, cwd = agent.get("sessionId") or "", agent.get("cwd") or ""
+    if not session or not cwd:
+        return None
+    path = transcript_path(cwd, session)
+    try:
+        return max(0.0, time.time() - os.path.getmtime(path)) if path else None
+    except OSError:
+        return None
 
 
 def _rate_limit_view() -> list[dict]:
@@ -2622,7 +3003,7 @@ def _machine_view() -> dict:
         "foreman_home": FOREMAN_HOME,
         "disk_free_mb": _disk_free_mb(FOREMAN_HOME),
         "memory_free_mb": _memory_free_mb(),
-        "host_max_concurrent": _host_max(),
+        "host_max_concurrent": HOST_MAX_CONCURRENT,
         "rate_limits": _rate_limit_view(),
         "linear_key": os.path.exists(os.path.join(FOREMAN_HOME, "linear.key")),
         "mcp_config": os.path.exists(os.path.join(FOREMAN_HOME, "mcp.json")),
@@ -2650,7 +3031,7 @@ def _spawn_facts(entries: list[dict]) -> dict:
     """
     out: dict = {}
     for entry in entries:
-        event = entry.get("event") or {}
+        event = event_of(entry)
         if event.get("action") != "spawn":
             continue
         name = event.get("name")
@@ -2699,7 +3080,7 @@ def _card_view(board: str, ticket: str, agents: list[dict], now: datetime) -> di
     return {
         "ticket": ticket,
         "board": board,
-        "last_action": (last or {}).get("event", {}).get("action"),
+        "last_action": event_of(last).get("action") if last else None,
         "last_at": last.get("at") if last else None,
         "idle_seconds": (now - stamp).total_seconds() if stamp else None,
         "holds_slot": card_holds_slot(os.path.join(home, "history.jsonl"),
@@ -2721,10 +3102,10 @@ def _board_agents(agents: list[dict], board: str) -> list[dict]:
 # four hours is not slow, it is waiting for somebody.
 STUCK_CARD_SECONDS = 4 * 3600
 
-# How long the tick may go without a new turn before it is called stale.
-# supervise.sh already replaces a tick that is dead or wedged; this only
-# reports, and it is deliberately looser than TICK_DEAD_MINUTES so a watchdog
-# mid-replacement does not read as a problem.
+# How long the tick may go without writing to its transcript before it is
+# called stale. supervise.sh already replaces a tick that is dead or wedged;
+# this only reports, and it is deliberately looser than TICK_DEAD_MINUTES so a
+# watchdog mid-replacement does not read as a problem.
 STALE_TICK_SECONDS = 90 * 60
 
 
@@ -2741,10 +3122,14 @@ def _problems(tick: dict, boards: list[dict], machine: dict) -> list[dict]:
         out.append({"severity": "critical", "kind": "tick-down",
                     "detail": "no tick is running; no board is being walked",
                     "fix": "skills/board/supervise.sh"})
-    elif (tick.get("age_seconds") or 0) > STALE_TICK_SECONDS:
+    elif (tick.get("idle_seconds") or 0) > STALE_TICK_SECONDS:
+        # Idle, not age. A tick that has been UP for hours is the healthy
+        # case -- one tick walks every board and is recycled on its own
+        # schedule -- so age flagged every working tick after 90 minutes and
+        # taught the operator to ignore this line. Silence is the symptom.
         out.append({"severity": "warning", "kind": "tick-stale",
-                    "detail": f"the tick has been up {_ago(tick['age_seconds'])} "
-                              "without being recycled",
+                    "detail": f"the tick has written nothing for "
+                              f"{_ago(tick['idle_seconds'])}",
                     "fix": "skills/board/supervise.sh --restart"})
     if (tick.get("live_count") or 0) > 1:
         out.append({"severity": "critical", "kind": "tick-doubled",
@@ -3042,11 +3427,16 @@ def main(argv: list[str]) -> int:
         if len(argv) < 2:
             print("usage: reconcile.py --may-dispatch <board>", file=sys.stderr)
             return 2
-        host_max = _host_max()
+        # Refuse an undeclared board, as every other mode that names one does.
+        # It used to be let through with no line at all -- even on a full
+        # machine -- because no floor was computed for it, so a typo or a
+        # removed board's stale FOREMAN_INSTANCE dispatched past the ceiling.
+        if not _is_declared(argv[1], "--may-dispatch"):
+            return 2
         # The BARE board name, as the tick and the operator say it. There is
         # one foreman, so that name is already what `--host-slots` keys by and
         # there is no second shape for a copy to drift from.
-        verdict = dispatch_verdict(argv[1], host_max)
+        verdict = dispatch_verdict(argv[1], HOST_MAX_CONCURRENT)
         if verdict:
             print(verdict)
         return 0
@@ -3143,8 +3533,10 @@ def main(argv: list[str]) -> int:
                   "report a cleanup as due", file=sys.stderr)
             return 3
         verdict = cleanup_verdict(FOREMAN_HOME, board, CLEANUP_EVERY_DAYS,
-                                  agents, _host_max())
+                                  agents, HOST_MAX_CONCURRENT)
         print(verdict or "due")
+        # 1 means "not due" and nothing else. Every fault on the way here
+        # exits FAULT_EXIT or 3, with its reason on stderr.
         return 1 if verdict else 0
     if argv[0] == "--board-order":
         # The pass order, not the roster: `boards.py --list` prints boards in
@@ -3180,9 +3572,9 @@ if __name__ == "__main__":
     except BoardsUnreadable as exc:
         # Caught here rather than inside each mode, because every mode that
         # reads a roster fails the same way and must exit the same way:
-        # non-zero, with the installation and boards.py's own message named,
+        # FAULT_EXIT, with the installation and boards.py's own message named,
         # and NO count on stdout. `--host-slots` and `--may-dispatch` are the
         # two that feed the machine ceiling, and dispatch.sh refuses to
-        # dispatch when either of them exits non-zero.
-        print(f"reconcile: {exc}", file=sys.stderr)
-        sys.exit(1)
+        # dispatch when either of them exits non-zero. Not 1, which
+        # `--cleanup-due` spends on "not due".
+        _fault(str(exc))

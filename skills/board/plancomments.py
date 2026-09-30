@@ -62,11 +62,11 @@ import re
 import sys
 from typing import NoReturn
 
-# Every HTML comment in a body, innards captured. Footers are found by scanning
-# the whole body rather than only its last line: Linear renders and re-wraps
-# markdown, and an operator quoting a plan comment inline puts a real footer
-# somewhere other than the end.
+# Every HTML comment in a text, innards captured.
 HTML_COMMENT = re.compile(r"<!--(.*?)-->", re.DOTALL)
+
+# A line that opens or closes a fenced code block.
+FENCE = re.compile(r"^\s*(```|~~~)")
 
 # The footer, exactly. `consumed` may be empty -- that is round 1, which
 # consumed nothing -- but both keys must be present and in this order, because
@@ -187,6 +187,30 @@ def footers(body: str, identifier: str) -> tuple[list[int], set[str], bool]:
     return rounds, consumed, malformed
 
 
+def footer_line(body: str) -> str:
+    """The one line of a body that may carry the board's footer, or "".
+
+    That is the final non-empty line, unless it is a quote (`>`) or sits inside
+    a code fence. The board's agents post the footer last and bare. An operator
+    who quotes a plan comment to answer it copies its footer too, and scanning
+    the whole body read that reply as a plan comment: its question never
+    reached the agent (audit, 2026-09-30). A quoted or fenced footer, or one
+    with a line of text after it, is therefore the operator's text, not the
+    board's. Text BEFORE the footer on its line is allowed: plan comments have
+    always been read that way, and a quote cannot put it there.
+    """
+    lines = [line for line in body.splitlines() if line.strip()]
+    if not lines:
+        return ""
+    last = lines[-1]
+    if last.lstrip().startswith(">"):
+        return ""
+    fences = sum(1 for line in lines[:-1] if FENCE.match(line))
+    if fences % 2 or FENCE.match(last):
+        return ""
+    return last
+
+
 def unconsumed(comments: list[dict]) -> dict:
     """The whole computation, over an already-flattened comment list."""
     flat: list[dict] = []
@@ -208,7 +232,11 @@ def unconsumed(comments: list[dict]) -> dict:
         seen.add(identifier)
 
         body = body_of(comment, identifier)
-        found, ids, bad = footers(body, identifier)
+        # Only the footer line is read. A marker anywhere else in the body is
+        # quoted text, and it consumes nothing: counting a quoted footer's ids
+        # would keep them consumed after the plan comment that really named
+        # them was deleted, and replaying them is the safe direction.
+        found, ids, bad = footers(footer_line(body), identifier)
         if bad:
             malformed.append(identifier)
         consumed.update(ids)

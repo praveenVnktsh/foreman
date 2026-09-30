@@ -175,6 +175,29 @@ A finding here reads "this works, and it should not exist" — not "this is brok
 
 **Promotion rule:** a finding surfaced by 2+ personas moves up one level.
 
+### When a caller grades in `blocking` and `note`
+
+The board that dispatches reviews on this installation reads two severities, and
+its review prompt asks for them by name. When a prompt asks for `blocking` and
+`note`, grade with those words, not with the table above:
+
+| Board severity | Use it for | Effect |
+|---|---|---|
+| `blocking` | A defect shown with a concrete failing scenario, and only of these kinds: a correctness bug, a security hole, a gate or check made weaker, data loss, or a broken build or test | Sends the change back for one fix |
+| `note` | Everything else, including every WARNING and NOTE above that is not one of those kinds | Recorded; stops nothing |
+
+- A CRITICAL finding is `blocking`. A WARNING is `blocking` only when it is one of
+  the kinds above, shown failing. Otherwise it is a `note`.
+- The promotion rule does not apply. Several personas finding one defect is
+  evidence the defect is real, not that it is worse.
+- Write the words exactly. The board reads a severity it does not recognise,
+  such as `critical` or a missing one, as `blocking`.
+- The caller's output file and shape replace the markdown report below. A
+  finding that lives only in the markdown reaches nobody.
+
+Used on its own, with no caller asking for board severities, the skill grades
+with the table above and reports in the format below.
+
 ## Output format
 
 ```markdown

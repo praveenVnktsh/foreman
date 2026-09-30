@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Read a file as GitHub currently holds it, for verifying a claim about the code.
 #
-#   evidence.sh main <path>        `<path>` at the tip of origin/main, right now
+#   evidence.sh main <path>        `<path>` at the tip of origin's default branch, right now
 #   evidence.sh pr <n> <path>      `<path>` at pull request <n>'s head, right now
 #   evidence.sh pr <n>             pull request <n>'s diff
 #   --text                         emit bytes `grep` would call binary, anyway
@@ -339,10 +339,28 @@ show_pr_diff() {
   attest_and_emit "$provenance" "the diff of PR #$number"
 }
 
+# The branch origin's HEAD points at, or `main` when origin does not say.
+#
+# Named, not assumed: a target whose default branch is `trunk` was read at a
+# `main` that is stale or absent. A failed ls-remote falls back too, because
+# the fetch that follows fails loudly on the same unreachable origin.
+default_branch() {
+  local branch
+  branch="$(git -C "$REPO" ls-remote --symref origin HEAD 2>/dev/null \
+    | awk '$1 == "ref:" && $3 == "HEAD" { sub("^refs/heads/", "", $2); print $2; exit }')" \
+    || branch=""
+  printf '%s\n' "${branch:-main}"
+}
+
+# Every refspec source is a full ref name. A bare `main` is resolved by git's
+# DWIM rules, which try refs/tags/main BEFORE refs/heads/main -- so a tag named
+# `main` on origin was served as the default branch under a provenance line
+# naming origin/main. Found auditing the board on 2026-09-30.
 case "${1:-}" in
   main)
     [[ $# -eq 2 ]] || usage
-    fetch_and_show "main" "origin/main" "$2"
+    branch="$(default_branch)"
+    fetch_and_show "refs/heads/$branch" "origin/$branch" "$2"
     ;;
   pr)
     [[ $# -eq 2 || $# -eq 3 ]] || usage
@@ -353,7 +371,7 @@ case "${1:-}" in
     else
       # `pull/<n>/head` rather than the branch name: a fork's branch is not on
       # this remote, and the head SHA may not be fetchable on its own.
-      fetch_and_show "pull/$number/head" "PR #$number head" "$3"
+      fetch_and_show "refs/pull/$number/head" "PR #$number head" "$3"
     fi
     ;;
   *)

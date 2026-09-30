@@ -196,18 +196,26 @@ subs = [
     ("<n>", "1"),
     ("<r>", "1"),
     ("<N>", "1"),
+    # Every dispatch block keeps its scratch under the AGENT_TMP_ROOT of the board
+    # rather than a fixed name under /tmp. Mapped to the scratch directory
+    # AFTER the /tmp/ rule above, for the reason that rule gives.
+    ('"${AGENT_TMP_ROOT:?source config.sh first}/dispatch"', '"' + work + '"'),
 ]
 
 # `fix` is here because review now runs ONCE: a blocking finding buys exactly
 # one fix, and that fix merges on its own checks with no second reviewer. That
 # resume is the last thing any agent does to the diff before it merges, so a
 # document that only describes it in a sentence is a dispatch nothing runs.
-KINDS = ["plan", "build", "replan", "review", "fix", "cleanup"]
+# `build-direct` is a build with no --plan-file: a Todo card without
+# needs-plan goes straight to a build, and its agent judges SMALL or PLANNED.
+KINDS = ["plan", "build", "build-direct", "replan", "review", "fix", "cleanup"]
 seen = {}
 for block in blocks:
     if "brief.py " not in block and "dispatch.sh " not in block:
         continue
     kind = next((k for k in KINDS if f"brief.py {k} " in block), None)
+    if kind == "build" and "--plan-file" not in block:
+        kind = "build-direct"
     if kind is None:
         sys.exit("a block drives brief.py or dispatch.sh and this test does not "
                  "run it; give it a case or stop documenting it:\n" + block)
@@ -645,6 +653,42 @@ else
 $(cat "$argv_log")"
 fi
 
+# --- 5d. The direct build dispatch -----------------------------------------
+#
+# A Todo card without needs-plan skips the plan stage. The block is the same
+# card-shaped command with no --plan-file and the footer plancomments.py
+# printed, so a build agent that decides to plan posts a comment the board
+# recognises. A second ticket, so this spawn is not the build-1 above, and run
+# here because every slot the cases above took has been released by now: at
+# MAX_CONCURRENT 1 the ceiling would otherwise refuse it, correctly.
+DIRECT_TICKET="ACME-8"
+echo '[]' > "$work/comments.json"
+sed "s/$TICKET/$DIRECT_TICKET/g" "$blocks/build-direct.sh" > "$work/build-direct.sh"
+if out="$(run_block "$work/build-direct.sh" 2>&1)"; then
+  ok "SKILL.md's direct build block runs: plancomments.py, brief.py build and dispatch.sh all accept it"
+else
+  bad "SKILL.md's direct build block does not run as written:
+$out"
+fi
+if spawned "foreman/demo/$DIRECT_TICKET/build-1"; then
+  ok "the direct build block spawns a build agent with no plan stage"
+else
+  bad "the direct build block spawned no agent named foreman/demo/$DIRECT_TICKET/build-1"
+fi
+if grep -q 'foreman:plan round=1 consumed=' "$work/b.md" 2>/dev/null; then
+  ok "the direct build prompt carries the footer a plan comment must end with"
+else
+  bad "the direct build prompt does not carry plancomments.py's footer:
+$(cat "$work/b.md" 2>/dev/null)"
+fi
+
+if grep -q 'SMALL' "$work/b.md" 2>/dev/null && grep -q 'PLANNED' "$work/b.md" 2>/dev/null; then
+  ok "the direct build prompt asks the agent to judge SMALL or PLANNED"
+else
+  bad "the direct build prompt never asks the agent to judge SMALL or PLANNED:
+$(cat "$work/b.md" 2>/dev/null)"
+fi
+
 # --- 6. Every board-failed exit lands in Needs Human -----------------------
 #
 # The exits are found by their released marker rather than by prose, because
@@ -887,6 +931,68 @@ PY
 $prose_out"
 else
   ok "SKILL.md reads correctly on the cadence, the injection caveat and needs-plan ($prose_out)"
+fi
+
+# --- every script SKILL.md invokes accepts every --flag SKILL.md gives it
+# The runnable blocks above cover brief.py and dispatch.sh. The rest (merge.py,
+# queue.py, waitfor.py ...) need a network or a live board, so they are checked
+# statically: each --flag on an invocation must appear in that script's source.
+# A flag the script never mentions dies at argparse on a live card.
+if flag_out="$(python3 - "$skill" "$root" <<'PY'
+import pathlib, re, sys
+
+skill, root = sys.argv[1], pathlib.Path(sys.argv[2])
+scripts = {
+    "merge.py": "skills/board", "queue.py": "skills/board",
+    "waitfor.py": "skills/board", "fallback.py": "skills/board",
+    "preflight.py": "skills/board", "plancomments.py": "skills/board",
+    "reconcile.py": "skills/board", "brief.py": "skills/board",
+    "sweep.sh": "skills/board", "supervise.sh": "skills/board",
+    "evidence.sh": "skills/board", "dispatch.sh": "skills/board",
+    "resolve-ids.py": "bin",
+}
+source = {n: (root / d / n).read_text() for n, d in scripts.items()}
+
+blocks, cur = [], None
+for line in pathlib.Path(skill).read_text().split("\n"):
+    if cur is None:
+        if line.strip() == "```bash":
+            cur = []
+        continue
+    if line.strip() == "```":
+        blocks.append(cur)
+        cur = None
+        continue
+    cur.append(line)
+
+problems, checked = [], 0
+for block in blocks:
+    # Join continuation lines, drop comments, split on shell operators.
+    text = re.sub(r"\\\n\s*", " ", "\n".join(block))
+    for logical in text.split("\n"):
+        logical = re.sub(r"(^|\s)#.*$", "", logical)
+        for seg in re.split(r"\|\||&&|[|;()]", logical):
+            tokens = seg.split()
+            for i, tok in enumerate(tokens):
+                name = tok.strip("\"'").rsplit("/", 1)[-1]
+                if name not in scripts:
+                    continue
+                flags = re.findall(r"(?<![\w-])(--[a-z][a-z0-9-]*)", " ".join(tokens[i + 1:]))
+                for flag in flags:
+                    checked += 1
+                    if flag not in source[name]:
+                        problems.append(f"{name} is given {flag}, which its source never mentions:\n  {seg.strip()}")
+if checked == 0:
+    sys.exit("found no script flags to check; the extraction is broken")
+if problems:
+    sys.exit("\n\n".join(problems))
+print(f"{checked} flags")
+PY
+)"; then
+  ok "every --flag SKILL.md gives a script appears in that script ($flag_out)"
+else
+  bad "SKILL.md passes a script a flag it does not have:
+$flag_out"
 fi
 
 exit "$fail"

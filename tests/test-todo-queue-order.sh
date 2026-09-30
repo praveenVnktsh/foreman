@@ -8,18 +8,18 @@
 # plain ascending sort puts every UNTRIAGED card ahead of every urgent one --
 # the board would then dispatch its least understood work first.
 #
-# PRA-197: refusing the whole batch over one card's bad priority used to stall
+# Refusing the whole batch over one card's bad priority used to stall
 # every dispatch on the board, Urgent cards included, in silence -- a board
 # that never dispatches looks exactly like a board with no work. A missing or
 # unreadable priority now costs only its own card; the card is still refused,
 # but out loud on stderr, and every other card still dispatches.
 #
-# PRA-342: a board where every card is unrankable used to exit 0 with empty
+# A board where every card is unrankable used to exit 0 with empty
 # stdout -- exactly what an empty Todo list produces. The tick could not tell
 # a stalled board from an idle one. Exit 3 is what separates them: it means
 # cards came in and not one of them could be ranked.
 #
-# PRA-352: that stall signal moved from 2 to 3. 2 is a usage error everywhere
+# That stall signal moved from 2 to 3. 2 is a usage error everywhere
 # else on this board -- skills/board/waitfor.py draws the same line -- so a
 # stalled board that exited 2 read to the tick the same as a mistyped
 # invocation. refuses() also accepted any non-zero exit, so it could not tell

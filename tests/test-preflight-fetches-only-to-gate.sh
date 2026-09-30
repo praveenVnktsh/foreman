@@ -37,7 +37,7 @@
 # into CI; see docs/plans/2026-08-27-foreman-layer-1.md).
 
 set -euo pipefail
-# Run directly, too, in a card agent: clear the board it inherits (PRA-586).
+# Run directly, too, in a card agent: clear the board it inherits.
 # shellcheck source=lib/without-board.sh
 source "$(dirname -- "${BASH_SOURCE[0]}")/lib/without-board.sh"
 

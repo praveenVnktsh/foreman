@@ -138,7 +138,7 @@ PY
 
 # paged_scenario [fail_after]
 # 100 Todo cards entered 10m ago (page one) and ABC-101 entered 90m ago
-# (page two). Linear's first: 100 hid ABC-101 before PRA-461.
+# (page two). Linear's first: 100 hid ABC-101.
 paged_scenario() {
   python3 - "$work/scenario.json" "$(minutes_before_now 600)" \
     "$(minutes_before_now 10)" "$(minutes_before_now 90)" "${1:-}" <<'PY'

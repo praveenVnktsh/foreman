@@ -94,7 +94,8 @@ class World:
 
     def __init__(self, *, deploy_runs=(), views=None, ancestors=(),
                  ci_runs=(), attempt=1, prs=(), diff=(0, ""),
-                 ls_remote=(2, ""), compare=(0, "[]"), logs=None):
+                 ls_remote=(2, ""), compare=(0, "[]"), logs=None,
+                 files=(1, ""), fetch=0, unplaceable=()):
         self.deploy_runs = deploy_runs
         self.views = views or {}
         self.logs = logs or {}
@@ -107,6 +108,13 @@ class World:
         # something else never has to say anything about the plan.
         self.ls_remote = ls_remote
         self.compare = compare
+        # The pull request files API, which pr_for reads only when `gh pr diff`
+        # failed. It fails too unless a case says otherwise.
+        self.files = files
+        # What `git fetch` exits with, and the run heads `git merge-base` has
+        # never heard of (it exits 128 for those, as git does).
+        self.fetch = fetch
+        self.unplaceable = set(unplaceable)
         self.calls: list[list[str]] = []
 
     def run_json(self, args, cwd=None):
@@ -124,8 +132,10 @@ class World:
     def run(self, args, cwd=None):
         self.calls.append(args)
         if args[:2] == ["git", "fetch"]:
-            return (0, "")
+            return (self.fetch, "")
         if args[:2] == ["git", "merge-base"]:
+            if args[4] in self.unplaceable:
+                return (128, "")
             return (0, "") if (args[3], args[4]) in self.ancestors else (1, "")
         if args[:3] == ["gh", "pr", "diff"]:
             return self.diff
@@ -136,6 +146,8 @@ class World:
         # than quietly collect this answer.
         if args[:2] == ["gh", "api"] and "/compare/" in args[2]:
             return self.compare
+        if args[:2] == ["gh", "api"] and args[2].endswith("/files"):
+            return self.files
         # The exact path reconcile.selection_reason asks for, so a reader that
         # fetched some other job's log, or the run's, hits the AssertionError.
         prefix, suffix = "repos/{owner}/{repo}/actions/jobs/", "/logs"
@@ -203,6 +215,35 @@ World(deploy_runs=[gh_run(1, A)], views={1: NO_DEPLOY_STEP}).install()
 v = reconcile.deploy_verdict(A)
 check(v["terminal"] and v["outcome"] == "deploy-never-ran",
       "a missing deploy step is terminal", json.dumps(v))
+
+print("==> a run that never deployed is not final while a descendant's deploy is running")
+# The commit's own run completed with no deploy job, which alone is final. But
+# B, which carries A, is still deploying, and its deploy verifies A. Ending the
+# wait on A's own run reported "no deploy will carry it" while one was running.
+World(
+    deploy_runs=[gh_run(2, B, status="in_progress", conclusion=""), gh_run(1, A)],
+    views={1: NO_DEPLOY_STEP},
+    ancestors={(A, B)},
+).install()
+v = reconcile.deploy_verdict(A)
+check(not v["terminal"] and not v["verified"],
+      "a descendant deploy in flight keeps the wait open", json.dumps(v))
+check(B[:12] in v["reason"], "it names the descendant still deploying", v["reason"])
+
+print("==> a run git cannot place is not a run that does not carry the commit")
+# `merge-base --is-ancestor` exits 128 for a head this checkout never fetched.
+# Read as "not an ancestor", B's successful deploy of A was skipped, and A's own
+# run -- which completed with no deploy job -- ended the wait as final.
+World(
+    deploy_runs=[gh_run(2, B), gh_run(1, A)],
+    views={2: deploy_job("success"), 1: NO_DEPLOY_STEP},
+    fetch=1, unplaceable={B},
+).install()
+v = reconcile.deploy_verdict(A)
+check(not v["terminal"] and not v["verified"],
+      "an unplaceable run keeps the wait open", json.dumps(v))
+check("2" in v["reason"] and "git fetch origin failed" in v["reason"],
+      "it names the run and the failed fetch", v["reason"])
 
 print("==> a run `gh run view` could not read teaches nothing and stops nothing")
 World(deploy_runs=[gh_run(1, A)], views={}).install()
@@ -496,6 +537,32 @@ pr = reconcile.pr_for("PRA-1")
 check(pr["risk"] == "unknown", "the diff is unknown", json.dumps(pr.get("risk")))
 check(pr["needs_update"] is True and pr["is_draft"] is True,
       "needs_update and is_draft survive the unreadable path", json.dumps(pr))
+
+print("==> a diff GitHub will not render is read from the files API, renames and all")
+# `gh pr diff` fails for good on a diff past GitHub's size limit, and the card's
+# risk stayed `unknown` on every tick. The files API pages instead, and it names
+# where a renamed file came from: moving a migration out of its directory
+# changes that directory.
+real_paths = reconcile.HIGH_RISK_PATHS
+reconcile.HIGH_RISK_PATHS = ["db/migrations/"]
+open_pr = {"number": 5, "state": "OPEN", "isCrossRepository": False,
+           "statusCheckRollup": []}
+World(prs=[dict(open_pr)], diff=(1, ""),
+      files=(0, '["README.md", ""]\n["archive/001.sql", "db/migrations/001.sql"]\n')).install()
+pr = reconcile.pr_for("PRA-1")
+check(pr["risk"] == "high" and pr["risk_paths"] == ["db/migrations/"],
+      "a file renamed out of a risk path is high risk", json.dumps(pr.get("risk_paths")))
+check(pr["files_changed"] == 2, "a rename is one changed file",
+      json.dumps(pr.get("files_changed")))
+World(prs=[dict(open_pr)], diff=(1, ""), files=(0, '["README.md", ""]\n')).install()
+pr = reconcile.pr_for("PRA-1")
+check(pr["risk"] == "low", "the files API alone can clear a card", json.dumps(pr.get("risk")))
+World(prs=[dict(open_pr)], diff=(1, ""), files=(1, "")).install()
+pr = reconcile.pr_for("PRA-1")
+check(pr["risk"] == "unknown" and "pulls/5/files" in pr.get("risk_reason", ""),
+      "both failing is unknown, and says which reads to try by hand",
+      json.dumps(pr.get("risk_reason")))
+reconcile.HIGH_RISK_PATHS = real_paths
 
 print("==> a fork's pull request is never the card's, even on the card's exact branch name")
 # `--head` matches a branch by NAME -- gh: '"<owner>:<branch>" syntax not

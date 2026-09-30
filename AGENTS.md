@@ -20,17 +20,27 @@
 
 | Stage | Do | Done when |
 |---|---|---|
-| Plan | invoke `graphplan` | the graph is posted to the Linear card as a comment |
-| Implement | execute the graph | every node is done |
+| Plan, only when the change is not small | invoke `graphplan` | the graph is posted to the Linear card as a comment |
+| Implement | make the change, or execute the graph | the change is made, or every node is done |
 | Test | run the target's own test command | it ran, and it passed |
 
-- The board reads your card's comments, not your branch. Your card sits in
-  `Plan` until your graph lands as a comment on it, so a plan you never post is
-  a card that never moves. Post it and stop: the plan stage pushes no commit and
-  opens no pull request.
-- **Invoke `graphplan` as a skill, not from memory.** Its instructions authorise
-  the Workflow tool, so invoking it is what makes stage 2 run in parallel. Reading
-  the file without invoking it leaves the work serial.
+- **Judge the size first.** A small change is one coherent change to a handful
+  of files with no design decision in it. It skips Plan and goes straight to
+  Implement. Anything larger is planned first. Say which you judged, SMALL or
+  PLANNED, in the pull request body.
+- **A card labelled `needs-plan` is always planned, by a separate plan agent.**
+  The board dispatches that agent for the Plan stage alone. It posts the graph
+  on the card and stops: it pushes no commit and opens no pull request. The card
+  sits in `Plan` until the graph lands as a comment and the operator signs it
+  off, so a plan never posted is a card that never moves.
+- **A build agent that plans its own card posts the graph and carries on.**
+  Post it on the card with the footer line your prompt gives you, then execute
+  it and open the pull request without stopping. The board reads your card's
+  comments, not your branch.
+- **When you plan, invoke `graphplan` as a skill, not from memory.** Its
+  instructions authorise the Workflow tool, so invoking it is what makes the
+  Implement stage run in parallel. Reading the file without invoking it leaves
+  the work serial.
 - No Workflow tool in this session? Say so and execute in dependency order by
   hand. Never serialise silently and report it as done.
 - A test you did not watch run is not a passing test. Quote the output.
@@ -48,6 +58,7 @@
 | See what a target declares | `bin/contract.py board.toml` | reading `board.toml` by hand |
 | Read a file as `main` has it | `skills/board/evidence.sh main <path>` | `git show origin/main:<path>` |
 | Read a PR's file or diff | `skills/board/evidence.sh pr <n> [path]` | the working tree |
+| Merge a card's pull request | `skills/board/merge.py <n> --head <sha> < card.json`, with the `merge_head` from `reconcile.py` | a bare `gh pr merge`; it skips the fast-track label and merges whatever the head is by then |
 | Get a Linear id | `ids.env`, from `bin/resolve-ids.py` | a literal UUID, ever |
 | Get an agent's scratch dir | `bin/tmp-dir.sh <worktree>` | `$TMPDIR`, or a path you compose |
 | Serialise shared git metadata | `skills/board/withlock.py` | hoping two ticks do not collide |
@@ -67,7 +78,7 @@
 | Check a plan is a graph | `bin/check-plan-graph.py --max-label-chars <N> <file>` | reading the plan by eye, or the checker's default budget over a target that sets its own |
 | Restart the tick, leaving cards alone | `skills/board/supervise.sh --restart` | `systemctl --user restart foreman.service`; it finds a healthy tick |
 | Update foreman to the latest release | `bin/self-update.sh` | `git -C ~/.foreman/install pull` by hand; the tick keeps running the code it started with, so the machine reports healthy while running a version nobody chose |
-| Cut a release foreman follows | `bin/release.sh` (CI runs it on a push to `main`) | assuming a merge deploys; it does, so a commit that should not ship needs the marker below |
+| Cut a release foreman follows | `bin/release.sh` (`release.yml` runs it once CI passes on `main`) | assuming a merge deploys; it does, so a commit that should not ship needs the marker below |
 | Opt a commit out of releasing | `Release: skip` (or `[skip release]`) in the commit or PR body | editing `release.yml`; the marker is per commit |
 
 - `git show origin/main:<path>` reads a **local** ref. No fetch is guaranteed to

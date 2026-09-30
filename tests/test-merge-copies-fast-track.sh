@@ -71,15 +71,26 @@ if [[ "$1 $2" == "pr view" ]]; then
     done
     printf ']}\n'
   else
-    # merge.py asks where the head branch lives before it touches the PR. Real
-    # gh answers `false` for a pull request from this repository, so that is the
-    # default; GH_CROSS_REPO lets a case answer `true`, or something that is neither.
-    printf '%s\n' "${GH_CROSS_REPO-false}"
+    # merge.py asks where the head branch lives, and whether the PR is the one
+    # reviewed, before it touches the PR. Real gh answers `false` for a pull
+    # request from this repository, so that is the default; GH_CROSS_REPO lets
+    # a case answer `true`, or something that is neither (empty is null).
+    cross="${GH_CROSS_REPO-false}"
+    printf '{"state":"OPEN","baseRefName":"main","headRefOid":"%s","isCrossRepository":%s}\n' \
+      "$HEAD_SHA" "${cross:-null}"
   fi
+fi
+if [[ "$1 $2" == "repo view" ]]; then
+  echo main
 fi
 exit 0
 SH
 chmod +x "$stub_bin/gh"
+
+# The reviewed commit merge.py is told to land, and the PR's head in the stub.
+HEAD_SHA=0123456789abcdef0123456789abcdef01234567
+export HEAD_SHA
+merge_call="pr merge 42 --squash --match-head-commit $HEAD_SHA"
 
 # run_merge <board> <fail_on> <card-json>
 # Sets status, out and log. REPO is unset so the board's declared repo wins.
@@ -90,7 +101,7 @@ run_merge() {
   status=0
   out="$(printf '%s' "$card" | env -u REPO HOME="$home" FOREMAN_HOME="$home/.foreman" \
     FOREMAN_INSTANCE="$board" PATH="$stub_bin:$PATH" GH_LOG="$log" \
-    GH_FAIL_ON="$fail_on" python3 "$merge" 42)" || status=$?
+    GH_FAIL_ON="$fail_on" python3 "$merge" 42 --head "$HEAD_SHA")" || status=$?
 }
 
 json_field() {
@@ -111,7 +122,7 @@ plain_phys="$(cd "$plain_repo" && pwd -P)"
 name="a card carrying fast-track gets the label on its PR before the merge"
 run_merge fast "" '{"identifier":"PRA-1","labels":{"nodes":[{"name":"bug"},{"name":"fast-track"}]}}'
 edit_at="$(line_of "pr edit 42 --add-label fast-track")"
-merge_at="$(line_of "pr merge 42 --squash")"
+merge_at="$(line_of "$merge_call")"
 if [[ "$status" -eq 0 && "$edit_at" -gt 0 && "$merge_at" -gt "$edit_at" \
       && "$(json_field merged)" == true && "$(json_field fast_tracked)" == true \
       && "$(json_field label)" == '"fast-track"' ]]; then
@@ -131,7 +142,7 @@ fi
 name="a card without fast-track on a PR without it merges with no label change"
 GH_PR_LABELS="bug fast-track-later" run_merge fast "" '{"identifier":"PRA-2","labels":{"nodes":[{"name":"bug"},{"name":"fast-track-later"}]}}'
 read_at="$(line_of "pr view 42 --json labels")"
-if [[ "$status" -eq 0 && "$read_at" -gt 0 && "$(line_of "pr merge 42 --squash")" -gt "$read_at" ]] \
+if [[ "$status" -eq 0 && "$read_at" -gt 0 && "$(line_of "$merge_call")" -gt "$read_at" ]] \
    && ! grep -q '|pr edit' "$log" \
    && [[ "$(json_field merged)" == true && "$(json_field fast_tracked)" == false ]]; then
   ok "$name"
@@ -155,7 +166,7 @@ fi
 # --- 4 ------------------------------------------------------------------------
 name="a target without fast_track_label merges a labelled card with no label call"
 run_merge plain "" '{"identifier":"PRA-4","labels":{"nodes":[{"name":"fast-track"}]}}'
-if [[ "$status" -eq 0 && "$(line_of "pr merge 42 --squash")" -gt 0 ]] \
+if [[ "$status" -eq 0 && "$(line_of "$merge_call")" -gt 0 ]] \
    && ! grep -q '|pr edit' "$log" && ! grep -q 'labels' "$log" \
    && [[ "$(json_field merged)" == true && "$(json_field fast_tracked)" == false \
          && "$(json_field label)" == '""' ]] \
@@ -209,7 +220,7 @@ name="a fast-track label the card lacks is removed from the PR before the merge"
 GH_PR_LABELS="bug fast-track" run_merge fast "" '{"identifier":"PRA-7","labels":{"nodes":[{"name":"bug"}]}}'
 read_at="$(line_of "pr view 42 --json labels")"
 remove_at="$(line_of "pr edit 42 --remove-label fast-track")"
-merge_at="$(line_of "pr merge 42 --squash")"
+merge_at="$(line_of "$merge_call")"
 if [[ "$status" -eq 0 && "$read_at" -gt 0 && "$remove_at" -gt "$read_at" && "$merge_at" -gt "$remove_at" ]] \
    && ! grep -q -- '--add-label' "$log" \
    && [[ "$(json_field merged)" == true && "$(json_field fast_tracked)" == false ]]; then
@@ -246,7 +257,7 @@ fi
 # --- 10 -----------------------------------------------------------------------
 name="a card carrying fast-track on a PR that already has it merges fast-tracked"
 GH_PR_LABELS="fast-track" run_merge fast "" '{"identifier":"PRA-10","labels":{"nodes":[{"name":"fast-track"}]}}'
-if [[ "$status" -eq 0 && "$(line_of "pr merge 42 --squash")" -gt 0 ]] \
+if [[ "$status" -eq 0 && "$(line_of "$merge_call")" -gt 0 ]] \
    && ! grep -q -- '--remove-label' "$log" \
    && [[ "$(json_field merged)" == true && "$(json_field fast_tracked)" == true ]]; then
   ok "$name"
@@ -257,11 +268,11 @@ fi
 # --- 11 -----------------------------------------------------------------------
 # GitHub labels are case-insensitive. gh pr view returns the stored name
 # (Fast-Track) while FAST_TRACK_LABEL is fast-track. Exact membership misses
-# it, so the stale label stays on and the merge still fast-tracks. PRA-459.
+# it, so the stale label stays on and the merge still fast-tracks.
 name="a differently-cased fast-track label the card lacks is removed before the merge"
 GH_PR_LABELS="Fast-Track" run_merge fast "" '{"identifier":"PRA-11","labels":{"nodes":[{"name":"bug"}]}}'
 remove_at="$(line_of "pr edit 42 --remove-label fast-track")"
-merge_at="$(line_of "pr merge 42 --squash")"
+merge_at="$(line_of "$merge_call")"
 if [[ "$status" -eq 0 && "$remove_at" -gt 0 && "$merge_at" -gt "$remove_at" ]] \
    && ! grep -q -- '--add-label' "$log" \
    && [[ "$(json_field merged)" == true && "$(json_field fast_tracked)" == false ]]; then
