@@ -3,7 +3,7 @@
 # hand-maintained list happened to have written down.
 #
 # The old version of this test stood up a python3 that refuses without
-# LD_LIBRARY_PATH -- the one name PRA-276's allowlist had recorded -- so it
+# LD_LIBRARY_PATH -- the one name the original allowlist had recorded -- so it
 # would have stayed green even if dispatch_fixture_run went back to a fixed
 # list and dropped every other name. It proved one instance, not the class.
 # This version proves the class by asking two different programs, needing two
@@ -23,7 +23,7 @@
 # same thing: "the dispatch never reached `claude --bg`". None of them named
 # python3, because the dispatch's output went to /dev/null.
 #
-# git, added for PRA-349: a second shim, refusing without a SECOND variable,
+# git, added later: a second shim, refusing without a SECOND variable,
 # picked so that nothing in this repository has written its name down before
 # this test runs. A real git variable -- GIT_EXEC_PATH, say -- would not
 # prove the claim: it could pass this test by having already been listed in

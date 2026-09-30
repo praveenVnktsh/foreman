@@ -71,7 +71,7 @@
 # SKILL.md carried a fourth hole of the same kind: "a four-word budget" typed
 # the label-word budget a second time, in prose no test compared to it.
 #
-# The eighth, PRA-346 on 2026-09-09: a `subgraph` statement sharing its line
+# The eighth, 2026-09-09: a `subgraph` statement sharing its line
 # with a graph statement and no ";" between them. The title ran from the first
 # "[" to the last "]", so the checker reported a title nobody wrote and, in the
 # same breath, a graph with no link -- on a line that draws one. The same card
@@ -963,7 +963,7 @@ fi
 # The same line with no ";" between the subgraph statement and the graph
 # statement: refused, naming the trailing text and the missing separator.
 # Mermaid puts a separator after the title's "]" and does not render this line
-# either. Until PRA-346 on 2026-09-09 the title ran from the first "[" to the
+# either. Until 2026-09-09 the title ran from the first "[" to the
 # last "]" on the line, so this was refused for a five-word title nobody wrote
 # and, in the same breath, for having no link -- though the line draws one.
 # Neither false claim may come back.

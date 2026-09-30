@@ -3,9 +3,9 @@
 # clean environment CI gives it.
 #
 # dispatch.sh pins FOREMAN_INSTANCE, FOREMAN_CONFIG_INSTANCE and every name in
-# FOREMAN_BOARD_EXPORTS into a card agent's environment (PRA-517), and config.sh
+# FOREMAN_BOARD_EXPORTS into a card agent's environment, and config.sh
 # is environment-wins. A test that reads those values takes them for an
-# operator's, and fails on a correct build (PRA-575, PRA-586). run-all.sh
+# operator's, and fails on a correct build. run-all.sh
 # sources this before running anything; a test that reads the environment
 # sources it too, so running it directly with `bash` gives the same answer.
 #

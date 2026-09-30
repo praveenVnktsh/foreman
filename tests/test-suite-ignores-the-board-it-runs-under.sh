@@ -4,10 +4,10 @@
 # run directly with `bash`.
 #
 # dispatch.sh pins FOREMAN_INSTANCE, FOREMAN_CONFIG_INSTANCE and every name in
-# FOREMAN_BOARD_EXPORTS into a card agent's environment (PRA-517). Measured
+# FOREMAN_BOARD_EXPORTS into a card agent's environment. Measured
 # 2026-09-25: with those inherited, run-all.sh exited 1 on a correct build
-# (PRA-575). Measured 2026-09-28: the six tests named below failed run directly,
-# because only run-all.sh cleared the board (PRA-586). Each now sources
+# too. Measured 2026-09-28: the six tests named below failed run directly,
+# because only run-all.sh cleared the board. Each now sources
 # tests/lib/without-board.sh. CI runs with a clean environment, so only this
 # test shows the leak there.
 set -uo pipefail

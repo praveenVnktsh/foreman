@@ -18,8 +18,10 @@ fail=0
 ok()  { printf 'ok   %s\n' "$1"; }
 bad() { printf 'FAIL %s\n' "$1" >&2; fail=1; }
 
+checked=0
 for skill in "$root"/skills/*/SKILL.md; do
   [[ -f "$skill" ]] || continue
+  checked=$((checked + 1))
   dir="$(basename "$(dirname "$skill")")"
 
   if ! head -1 "$skill" | grep -q '^---$'; then
@@ -37,14 +39,23 @@ for skill in "$root"/skills/*/SKILL.md; do
     || bad "$dir has no description, so it can never be triggered"
 done
 
+# A glob that matches nothing loops zero times and would pass the whole test.
+[[ $checked -gt 0 ]] \
+  && ok "checked $checked skills" \
+  || bad "found no skills/*/SKILL.md to check"
+
 # Every skill named in code that builds a prompt must exist. This is the half
 # that actually broke something: a string in brief.py and a directory on disk
 # are only related by someone remembering.
+named_count=0
 for named in $(grep -rhoE '`[a-z][a-z0-9-]+` skill' "$root/skills/board/"*.py \
                  | sed 's/`//g; s/ skill//' | sort -u); do
+  named_count=$((named_count + 1))
   [[ -d "$root/skills/$named" ]] \
     && ok "prompt-generating code names '$named', and it exists" \
     || bad "prompt-generating code names skill '$named', which does not exist"
 done
+[[ $named_count -gt 0 ]] \
+  || bad "no skill is named in skills/board/*.py, so the existence check ran on nothing"
 
 exit "$fail"

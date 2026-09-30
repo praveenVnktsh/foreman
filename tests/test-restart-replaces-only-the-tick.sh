@@ -309,6 +309,28 @@ else
   bad "run mode did not stand down (rc=$rc, started=$(tr '\n' ' ' <"$started")): $out"
 fi
 
+# wait_locked <lockfile> <budget-seconds>: polls a non-blocking trylock until
+# another process holds it. A fixed sleep after starting the holder guesses how
+# long withlock.py takes to start, and a slow machine loses that guess.
+wait_locked() {
+  python3 - "$1" "$2" <<'PY'
+import fcntl, os, sys, time
+path, budget = sys.argv[1], float(sys.argv[2])
+deadline = time.monotonic() + budget
+while time.monotonic() < deadline:
+    fd = os.open(path, os.O_CREAT | os.O_RDWR, 0o600)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        fcntl.flock(fd, fcntl.LOCK_UN)
+    except OSError:
+        sys.exit(0)
+    finally:
+        os.close(fd)
+    time.sleep(0.005)
+sys.exit(1)
+PY
+}
+
 # --- another supervisor holds the machine lock
 # The lock is what stops a timer fire from interleaving with a hand-run
 # restart. Without it the fire can start a tick that the restart then does not
@@ -321,12 +343,16 @@ fi
 # while the tick kept running the pre-pull skill.
 write_registry idle
 : >"$stopped"
-"$withlock" "$work/supervise.lock" 30 -- sleep 2 &
+rm -f "$work/holder-released"
+"$withlock" "$work/supervise.lock" 30 -- \
+  bash -c 'sleep 2; : >"$1"' _ "$work/holder-released" &
 holder=$!
-sleep 0.3
+wait_locked "$work/supervise.lock" 10 || bad "the lock holder never took the lock"
 out="$(run --restart)"; rc=$?
 wait "$holder" 2>/dev/null
-if [[ $rc -eq 0 && "$(cat "$stopped")" == "tick-1" ]]; then
+# The holder writes its marker as it finishes. A restart that returned before
+# the marker existed ran without the lock, which is the bug this case guards.
+if [[ $rc -eq 0 && "$(cat "$stopped")" == "tick-1" && -e "$work/holder-released" ]]; then
   ok "a restart waits for a supervisor that is about to finish, then runs"
 else
   bad "the restart did not wait for the lock (rc=$rc, stopped=$(tr '\n' ' ' <"$stopped")): $out"
@@ -338,7 +364,7 @@ write_registry idle
 : >"$started"
 "$withlock" "$work/supervise.lock" 30 -- sleep 6 &
 holder=$!
-sleep 0.3
+wait_locked "$work/supervise.lock" 10 || bad "the lock holder never took the lock"
 out="$(run --restart)"; rc=$?
 kill "$holder" 2>/dev/null
 wait "$holder" 2>/dev/null
@@ -353,7 +379,7 @@ fi
 : >"$started"
 "$withlock" "$work/supervise.lock" 30 -- sleep 3 &
 holder=$!
-sleep 0.3
+wait_locked "$work/supervise.lock" 10 || bad "the lock holder never took the lock"
 out="$(run)"; rc=$?
 kill "$holder" 2>/dev/null
 wait "$holder" 2>/dev/null

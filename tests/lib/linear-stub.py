@@ -34,7 +34,7 @@ The issues connection is cursor-paginated at 100, matching starved.py's
 `first: 100`. `after` is the exclusive start index as a decimal string
 (Linear's cursor is opaque; the stub's is the offset so a test can name
 it). Each response carries `pageInfo.hasNextPage` and `pageInfo.endCursor`.
-A waiting card at index 100 is on page two, which is the PRA-461 fixture.
+A waiting card at index 100 is on page two, which is the page-two fixture.
 starved.py's walk counts as one request per page, so `fail_after: 1` is a
 later-page failure.
 
@@ -69,7 +69,7 @@ import sys
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
 # starved.py's TodoIssues query asks for first: 100. A stub that returned the
-# whole list in one page would hide the bug PRA-461 exists to catch: a waiting
+# whole list in one page would hide the bug this fixture exists to catch: a waiting
 # card past that first page.
 TODO_PAGE_SIZE = 100
 
