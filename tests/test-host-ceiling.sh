@@ -371,7 +371,7 @@ run_preflight_quick() { # NAME=VALUE overrides, e.g. QUICK_PROBE_MB=1
 # the same lock file, not merely that withlock.py can serialize two of its own
 # invocations.
 
-"$withlock" "$lockfile" 30 -- sleep 3 &
+"$withlock" "$lockfile" 30 -- sleep 6 &
 holder_pid=$!
 wait_lock_state "$lockfile" locked 10 ||
   { kill "$holder_pid" 2>/dev/null || true
@@ -386,8 +386,8 @@ end="$(monotonic)"
 wait "$holder_pid" 2>/dev/null || true
 
 elapsed="$(python3 -c "print($end - $start)")"
-python3 -c "import sys; sys.exit(0 if $elapsed >= 2.5 else 1)" ||
-  fail "a second preflight did not block on the held probe lock (waited only ${elapsed}s, expected >= 2.5s -- the holder released after 3s)"
+python3 -c "import sys; sys.exit(0 if $elapsed >= 3.0 else 1)" ||
+  fail "a second preflight did not block on the held probe lock (waited only ${elapsed}s, expected >= 3.0s -- the holder released after 6s)"
 expect "True" "$(verdict_field "$blocked_json" 'v["fit"]')" \
   "preflight succeeds once the held lock is released, having merely waited for it"
 echo "ok  a second preflight blocks while the first holds the probe lock"

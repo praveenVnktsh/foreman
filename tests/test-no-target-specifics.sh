@@ -50,11 +50,17 @@
 # 2026-09-16, when an audit before making this repository public found it: this
 # list banned the project's name but not its ticket prefix, so the examples
 # kept naming its tickets. Usage examples invent a plainly generic key instead.
+#
+# `PRA-[0-9]{3}` is this project's own ticket key, the same leak. Only three or
+# more digits: fixtures invent card ids PRA-1 .. PRA-99 throughout the tests
+# (tests/lib/legacy-strings.sh lists the bare prefix for the prompt check, where
+# no fixture id can appear), while a real reference in a comment is a card
+# number. A comment that needs history says what happened, not which card.
 set -euo pipefail
 here="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 root="$(dirname -- "$here")"
 self="$(basename -- "${BASH_SOURCE[0]}")"
-banned='murmr|mango|Praveen|MURMR_|MUR-[0-9]|just test-all|deploy-mango|\.murmr-|backend/|design/build_system|test_design_invariants|ops/'
+banned='murmr|mango|Praveen|MURMR_|MUR-[0-9]|just test-all|deploy-mango|\.murmr-|backend/|design/build_system|test_design_invariants|ops/|PRA-[0-9]{3}'
 banned_ci='whatsapp|baileys'
 
 # STYLEGUIDE.md and AGENTS.md are in scope even though they sit at the root.

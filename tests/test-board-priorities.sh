@@ -63,9 +63,20 @@ hold() {  # $1 board, $2 ticket
 # reconcile.py sources config.sh at startup, which refuses to guess which
 # repository it serves -- so FOREMAN_INSTANCE must be set even for a question
 # about the whole machine. Ask as the board being asked about.
+#
+# --may-dispatch exits 0 both when it allows and when it refuses; the refusal is
+# the line it prints. Any other exit is a crash, and a crash prints nothing, so
+# it must not read as "allowed". It comes back as a line no test expects.
 may() {  # $1 board, $2 host_max -> prints the refusal, empty if allowed
-  env FOREMAN_HOME="$fh" FOREMAN_INSTANCE="$1" HOST_MAX_CONCURRENT="$2" \
-    "$root/skills/board/reconcile.py" --may-dispatch "$1" 2>/dev/null
+  local out rc err="$work/may.err"
+  out="$(env FOREMAN_HOME="$fh" FOREMAN_INSTANCE="$1" HOST_MAX_CONCURRENT="$2" \
+    "$root/skills/board/reconcile.py" --may-dispatch "$1" 2>"$err")"
+  rc=$?
+  if [[ $rc -ne 0 ]]; then
+    printf 'CRASH: --may-dispatch exited %s: %s' "$rc" "$(cat "$err")"
+    return 0
+  fi
+  printf '%s' "$out"
 }
 
 # The real verb dispatch.sh calls when a board has a card it wants to start.

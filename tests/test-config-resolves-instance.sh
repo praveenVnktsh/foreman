@@ -16,7 +16,7 @@
 # FOREMAN_HOME points at a temp directory throughout. Nothing here may read or
 # write the real ~/.foreman.
 set -euo pipefail
-# Run directly, too, in a card agent: clear the board it inherits (PRA-586).
+# Run directly, too, in a card agent: clear the board it inherits.
 # shellcheck source=lib/without-board.sh
 source "$(dirname -- "${BASH_SOURCE[0]}")/lib/without-board.sh"
 here="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"

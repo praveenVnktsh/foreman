@@ -144,7 +144,10 @@ fi
 rm -f "$fh/mcp.json"
 : >"$argv_log"; : >"$spawn_log"
 out="$(run_supervise)"
-if grep -q -- "--mcp-config" "$argv_log"; then
+# An empty argv log also lacks --mcp-config, so prove the tick was spawned first.
+if [[ ! -s "$argv_log" ]]; then
+  bad "no tick was spawned, so the absent-config case proved nothing: $out"
+elif grep -q -- "--mcp-config" "$argv_log"; then
   bad "passed --mcp-config with no config file present"
 else
   ok "no config file means no flag, not a failure"

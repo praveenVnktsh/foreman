@@ -243,8 +243,8 @@ dispatch_fixture_show_run_log() {
 # `${NAME:-default}`, so the operator's shell can answer any of them before
 # config.sh asks, and the test then fails on a correctly configured machine
 # with nothing in the diff under review to blame. Named per incident, that is
-# one fix per variable someone happens to export: PLAN_MODEL was the first
-# (PRA-276), and CLAUDE_CODE_SUBAGENT_MODEL, REPO, FOREMAN_HOME,
+# one fix per variable someone happens to export: PLAN_MODEL was the first,
+# and CLAUDE_CODE_SUBAGENT_MODEL, REPO, FOREMAN_HOME,
 # BOARD_DRY_RUN, FOREMAN_TMP_ROOT and BOARD_HOME each reproduce it. An
 # allowlist closes the class, and makes each remaining hole a decision. It
 # stays an allowlist: config.sh honours the environment for every key

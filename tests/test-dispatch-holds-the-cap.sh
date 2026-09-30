@@ -57,7 +57,7 @@ hold() {
 dispatch() {
   env HOME="$home" FOREMAN_HOME="$home/.foreman" FOREMAN_INSTANCE=demo \
     PATH="$stub:$PATH" MAX_CONCURRENT="$1" HOST_MAX_CONCURRENT="$2" BOARD_DRY_RUN=1 \
-    bash "$root/skills/board/dispatch.sh" --ticket "$3" --role build --attempt 1 \
+    bash "${4:-$root/skills/board/dispatch.sh}" --ticket "$3" --role build --attempt 1 \
       --prompt-file "$work/prompt.md" 2>&1
 }
 
@@ -101,9 +101,13 @@ esac
 # and the machine over-dispatched on top of its builds -- the 2026-09-01
 # failure one level up. A count the gate cannot read is now a refusal that
 # names itself and spends no attempt.
-mv "$root/skills/board/reconcile.py" "$work/reconcile.hidden" 2>/dev/null || true
-out="$(dispatch 1 4 ABC-77)"
-mv "$work/reconcile.hidden" "$root/skills/board/reconcile.py" 2>/dev/null || true
+# Hide reconcile.py in a COPY of the skills tree. Moving the real file left the
+# repository without it whenever an interrupt landed between the two moves.
+copy="$work/tree-copy"
+mkdir -p "$copy"
+cp -R "$root/skills" "$root/bin" "$copy/"
+rm -f "$copy/skills/board/reconcile.py"
+out="$(dispatch 1 4 ABC-77 "$copy/skills/board/dispatch.sh")"
 case "$out" in
   *"could not count the machine's slots"*) ok "a count it cannot read refuses the dispatch by name" ;;
   *) bad "an unreadable slot count did not refuse by name: $out" ;;

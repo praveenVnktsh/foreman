@@ -6,7 +6,7 @@
 # of these -- answers the question config.sh asks before it asks it. The two
 # model tests then go red on a correctly configured machine, and the failure
 # names the dispatch code, which is not what broke. PLAN_MODEL was the first
-# report (PRA-276); CLAUDE_CODE_SUBAGENT_MODEL, REPO, FOREMAN_HOME and
+# report; CLAUDE_CODE_SUBAGENT_MODEL, REPO, FOREMAN_HOME and
 # BOARD_DRY_RUN each reproduced it, and the next one is whichever variable
 # someone exports next.
 #
