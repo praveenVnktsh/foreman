@@ -67,7 +67,7 @@ def _load_config() -> dict[str, str]:
         "FOREMAN_DEFAULT_HARNESS", "FOREMAN_HARNESSES",
         "BOARD_NAME_PREFIX", "BOARD_WORKTREE_PREFIX",
         "CLEANUP_EVERY_DAYS", "MAX_CONCURRENT", "REVIEWERS_PER_ROUND",
-        "HOST_MAX_CONCURRENT",
+        "HOST_MAX_CONCURRENT", "MAX_REVIEW_ROUNDS",
     )
     script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.sh")
     printf = 'printf "%s\\0" ' + " ".join(f'"${k}"' for k in keys)
@@ -195,6 +195,11 @@ MAX_CONCURRENT = _int_setting("MAX_CONCURRENT")
 # a round that is fully dispatched from one the tick was interrupted part-way
 # through; a round short of its reviewers has not been reviewed yet.
 REVIEWERS_PER_ROUND = _int_setting("REVIEWERS_PER_ROUND")
+# How many review rounds a card gets. `review_verdict()` reports it, plus one
+# per `rebuild` resume, as `rounds_allowed`: resolving a conflict with `main`
+# moves the head past what the reviewer read, and without the extra round the
+# default of 1 would send every conflicted card to Needs Human.
+MAX_REVIEW_ROUNDS = _int_setting("MAX_REVIEW_ROUNDS")
 # The MACHINE's ceiling, across every board, read from config.sh like every
 # other setting here. config.sh takes it from the environment (dispatch.sh and
 # starved.py pass it in), defaults it to 4 and refuses anything but a positive
@@ -644,6 +649,11 @@ def pr_for(ticket: str) -> dict | None:
     # A branch that cannot see main's tip will not merge under `strict: true`,
     # no matter how green it looks.
     pr["needs_update"] = pr.get("mergeStateStatus") == "BEHIND"
+    # A branch that conflicts with main cannot merge at all, and update-branch
+    # cannot fix it: GitHub refuses a merge it would have to resolve. Step 4
+    # resumes the build with `brief.py rebuild` instead of retrying the merge
+    # every pass forever.
+    pr["conflicting"] = pr.get("mergeStateStatus") == "DIRTY"
     # A draft cannot be merged either. `gh pr merge` fails with "Pull Request is
     # still a draft" — which the board used to discover at the merge call, having
     # already run two adversarial reviewers and declared the card ready to ship.
@@ -1963,15 +1973,17 @@ def _attempts(entries: list[dict], role: str) -> int:
     return len(seen - voided)
 
 
-# The `dispatch.sh --reason` values whose build resume spends an attempt: only
-# `ci-fix`, which the tick may repeat for as long as a required check fails.
+# The `dispatch.sh --reason` values whose build resume spends an attempt:
+# `ci-fix`, which the tick may repeat for as long as a required check fails, and
+# `rebuild`, which it repeats for as long as the branch conflicts with `main`.
+# Charging both is what bounds each by MAX_BUILD_ATTEMPTS.
 #
 # A `fix` resume does not spend one. `review_verdict` answers `needs-fix` only
 # until a build resume follows the round, so a round buys exactly one fix, and
 # MAX_REVIEW_ROUNDS bounds the rounds. A `retry` does not either: it is the one
 # resume a failed attempt earns, part of that attempt, and step 2 bounds it to
 # once. Charging either would spend the budget twice for one attempt.
-CHARGED_BUILD_RESUME_REASONS = frozenset({"ci-fix"})
+CHARGED_BUILD_RESUME_REASONS = frozenset({"ci-fix", "rebuild"})
 
 
 def build_attempts(entries: list[dict]) -> int:
@@ -2487,7 +2499,8 @@ def review_verdict(ticket: str, entries: list[dict], pr: dict | None,
                        readable yet. NOT "found nothing": see review_findings.
       head-moved       no blocking finding, but the head has moved past the sha
                        the round read, so nobody has reviewed what would merge.
-                       Dispatch `next_round`, which MAX_REVIEW_ROUNDS bounds.
+                       Dispatch `next_round`, which `rounds_allowed` bounds:
+                       MAX_REVIEW_ROUNDS plus one per `rebuild` resume.
                        A move made only by `gh pr update-branch` is not one:
                        see update_branch_only.
       needs-fix        a blocking finding, and no build resume after it.
@@ -2546,8 +2559,13 @@ def review_verdict(ticket: str, entries: list[dict], pr: dict | None,
             rounds.setdefault(int(match.group(1)), []).append(
                 (index, match.group(2), str(event.get("ref") or ""))
             )
+    rebuilds = sum(1 for e in entries
+                   if event_of(e).get("action") == "resume"
+                   and event_of(e).get("role") == "build"
+                   and event_of(e).get("reason") == "rebuild")
     state = {"verdict": "unreviewed", "round": 0, "blocking": 0,
-             "ref": None, "head": head or None}
+             "ref": None, "head": head or None,
+             "rounds_allowed": MAX_REVIEW_ROUNDS + rebuilds}
     if not rounds:
         state["reason"] = "no review agent has been dispatched for this card"
         return state

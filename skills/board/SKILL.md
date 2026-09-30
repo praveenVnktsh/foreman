@@ -1805,9 +1805,10 @@ against, the pull request head and the build agent's phase — the four facts
   `card_log <T> '{"action":"released","reason":"board-failed: fix unresolved"}'`.
   Never merge on it — the finding is still open, and the one agent asked to
   close it said it could not.
-- **`MAX_REVIEW_ROUNDS` spent and the card still unmerged** — a blocking finding
+- **Review rounds spent and the card still unmerged** — a blocking finding
   open with no fix left, or a `head-moved` whose `next_round` is past the
-  ceiling → to `Needs Human` (`STATE_NEEDS_HUMAN`, matched by id) carrying
+  verdict's `rounds_allowed` (`MAX_REVIEW_ROUNDS`, plus one for every `rebuild`
+  resume, so resolving a conflict with `main` always earns its review) → to `Needs Human` (`STATE_NEEDS_HUMAN`, matched by id) carrying
   `board-failed`, with the findings attached, and
   `card_log <T> '{"action":"released","reason":"board-failed: review rounds exhausted"}'`
   — same reasoning as the build-attempts exit above: `board-failed` releases
@@ -2011,6 +2012,16 @@ Before merging, three things that make a green PR lie:
   Do not merge on the old SHA's green. The update costs no review round: step 3
   reads the merge commit it makes as the same reviewed diff, and reports it as
   `merge_head` once its checks pass.
+- **`conflicting: true`** (`mergeStateStatus == DIRTY`) — the branch
+  conflicts with `main`. Neither the merge nor `gh pr update-branch` can land
+  it, so do not retry them. Resume the build agent to merge `main` in: render
+  the prompt with `brief.py rebuild --ticket <T> --pr <n> --conflicts "<paths>"`
+  (the paths `git merge-tree --write-tree --name-only origin/main <head>` lists
+  after the tree id; leave `--conflicts` out if you cannot read them) and run
+  `dispatch.sh ... --resume --role build --reason rebuild`, the way step 2 runs
+  a `ci-fix`. A `rebuild` spends a build attempt, so MAX_BUILD_ATTEMPTS bounds
+  a branch that keeps conflicting, and it earns one more review round: the
+  resolved head is reviewed like any other moved head.
 - **A branch older than a day touching a sequentially-numbered high-risk
   path** (a migrations directory like `db/migrations/` is the usual case) —
   it can be green forever while `main` claims the next number underneath it.

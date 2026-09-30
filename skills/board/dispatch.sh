@@ -58,20 +58,20 @@ done
 [[ -n "$PROMPT_FILE" && -r "$PROMPT_FILE" ]] || die "--prompt-file must be readable"
 
 # --reason is required on a build resume and refused everywhere else: it feeds
-# reconcile.py's build_attempts arithmetic (a ci-fix resume charges an attempt,
-# a fix or retry resume does not), so a resume it cannot classify must not
+# reconcile.py's build_attempts arithmetic (a ci-fix or rebuild resume charges an
+# attempt, a fix or retry resume does not), so a resume it cannot classify must not
 # proceed silently, and a role or spawn that arithmetic never reads must not
 # carry one to go stale.
 REASON_BAD=""
 if [[ -n "$RESUME" && "$ROLE" == "build" ]]; then
   case "$REASON" in
-    ci-fix|fix|retry) ;;
+    ci-fix|fix|retry|rebuild) ;;
     *) REASON_BAD=1 ;;
   esac
 elif [[ -n "$REASON" ]]; then
   REASON_BAD=1
 fi
-[[ -z "$REASON_BAD" ]] || die "--reason must be ci-fix, fix or retry, and only on --resume --role build"
+[[ -z "$REASON_BAD" ]] || die "--reason must be ci-fix, fix, retry or rebuild, and only on --resume --role build"
 
 NAME="$(agent_name "$TICKET" "$ROLE" "${ATTEMPT}${SLOT}")"
 PROMPT="$(cat "$PROMPT_FILE")"
