@@ -1,37 +1,61 @@
 name: Release
 
-# Cut a GitHub Release of main's head on every push to main, so a merge deploys
+# Cut a GitHub Release of each main commit that PASSED CI, so a merge deploys
 # unless its commit opts out. Installations follow the latest release
 # (bin/self-update.sh polls it), so this job is the only thing that deploys.
 #
-# RUNS ON GITHUB-HOSTED RUNNERS, NEVER ON AN OPERATOR'S MACHINE. The trigger is
-# `push`, not `pull_request`, so no contributor's branch is ever in scope -- the
-# same reason CI does not run a self-hosted runner on this public repository.
+# IT WAITS FOR CI. The trigger is `workflow_run` of the workflow named "CI"
+# (.github/workflows/ci.yml), not `push`. On `push` the release was cut the
+# moment a commit landed, in parallel with the tests, so a commit that broke
+# the suite reached every machine anyway. The release is of the run's own
+# head_sha: main may have moved on by the time CI finishes, and releasing
+# main's head then would ship a commit no CI run had passed.
+#
+# RUNS ON GITHUB-HOSTED RUNNERS, NEVER ON AN OPERATOR'S MACHINE. The job runs
+# only for a CI run triggered by a `push` to this repository's main. The
+# `branches` filter alone is not enough: it matches the head branch NAME, and a
+# pull request from a fork's branch called `main` has that name too.
+#
+# ONE RELEASE AT A TIME, never cancelled. Two merges close together finish CI
+# close together, and two jobs picking the same date tag race; a cancelled one
+# is a passed commit that never releases.
 #
 # A COMMIT OPTS OUT with a line of its own reading `[skip release]` or
-# `Release: skip` in its message (a squash merge takes the PR body). It must be
-# a whole line, so prose that mentions the marker does not fire it. bin/release.sh
-# checks the head commit and exits 0 without cutting, which this job reads as a
-# no-op.
+# `Release: skip` in its commit message or in the body of the pull request it
+# came from. bin/release.sh checks both and exits 0 without cutting, which
+# this job reads as a no-op.
 
 on:
-  push:
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
     branches: [main]
 
 # contents: write is what lets the job create the tag and the release object.
 permissions:
   contents: write
+  pull-requests: read
+
+concurrency:
+  group: release
+  cancel-in-progress: false
 
 jobs:
   release:
+    if: >-
+      github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.event == 'push' &&
+      github.event.workflow_run.head_repository.full_name == github.repository
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
+          ref: ${{ github.event.workflow_run.head_sha }}
           # generate-notes diffs against the previous release, so every tag must
           # be present in the clone.
           fetch-depth: 0
-      - name: Cut a release of main's head
+      - name: Cut a release of the commit CI passed
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_SHA: ${{ github.event.workflow_run.head_sha }}
         run: bin/release.sh

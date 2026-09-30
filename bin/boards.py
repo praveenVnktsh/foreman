@@ -30,7 +30,15 @@ from __future__ import annotations
 import os
 import re
 import sys
-import tomllib
+
+# tomllib arrived in Python 3.11. On an older interpreter the import below
+# died with a ModuleNotFoundError traceback that names the module, not the
+# fix. Checked inline in each loader, not in a shared module: tests and
+# installs copy these files one by one, and a sibling import would break them.
+if sys.version_info < (3, 11):
+    sys.stderr.write("foreman needs Python 3.11+ (found %s)\n" % sys.version.split()[0])
+    raise SystemExit(2)
+import tomllib  # noqa: E402
 
 # Same bin/ directory. The root that holds the shared credential is a fact
 # about the installation, so it is asked of the installation loader rather
@@ -72,7 +80,10 @@ DEFAULT_KEY_FILE = "linear.key"
 # repository. Any separator can be absorbed by an unconstrained name, so the
 # name is what has to be closed. Underscores stay legal so `target_staging` is
 # still sayable.
-BOARD_NAME = re.compile(r"^[A-Za-z0-9_]+$")
+#
+# Matched with fullmatch, never `^...$`: `$` also matches before a trailing
+# newline, so a quoted TOML key "alpha\n" passed as a board name.
+BOARD_NAME = re.compile(r"[A-Za-z0-9_]+")
 
 
 def die(message: str) -> None:
@@ -114,7 +125,7 @@ def absolute(path: str, what: str, board: str) -> str:
 def check_board_shape(path: str, name: str, table: object) -> None:
     """The checks on one board that depend on the file alone: its name, that
     it is a table, and that it says nothing unknown."""
-    if not BOARD_NAME.match(name):
+    if not BOARD_NAME.fullmatch(name):
         die(f"{path}: board name {name!r} is invalid; "
             "only letters, digits and underscore are allowed (no hyphen, no slash)")
     if not isinstance(table, dict):
@@ -242,17 +253,22 @@ def main(argv: list[str]) -> int:
         emit(names_only(path))
         return 0
 
-    boards = load(path, home)
     if args[0] == "--list":
-        emit([name for name, _, _, _ in boards])
+        emit([name for name, _, _, _ in load(path, home)])
         return 0
 
-    for name, repo, key_file, priority in boards:
-        if name == args[0]:
-            emit(["REPO", repo, "KEY_FILE", key_file, "PRIORITY", str(priority)])
-            return 0
-    die(f"{path}: no board named {args[0]}")
-    return 1
+    # ONE BOARD IS ASKED ABOUT, SO ONE BOARD IS CHECKED. Validating every
+    # board here made one board's unmounted repository refuse every lookup of
+    # every other board: `boardctl halt beta` failed because alpha's disk was
+    # gone. --list still checks them all, because it is the roster the tick
+    # dispatches from.
+    name = args[0]
+    boards = boards_table(path)
+    if name not in boards:
+        die(f"{path}: no board named {name}")
+    repo, key_file, priority = board_record(path, home, name, boards[name])
+    emit(["REPO", repo, "KEY_FILE", key_file, "PRIORITY", str(priority)])
+    return 0
 
 
 if __name__ == "__main__":

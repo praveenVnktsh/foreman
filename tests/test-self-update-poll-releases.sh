@@ -52,11 +52,17 @@ git_q "$upstream" commit -q --allow-empty -m B
 b_sha="$(git -C "$upstream" rev-parse HEAD)"
 
 # A gh stand-in that reports GH_TAG as the latest release tag (empty = none).
+# GH_DRAFT_TAG is a newer draft or pre-release: real `gh release list` answers
+# with it unless asked to exclude both, and so does this.
 stub="$work/stub"
 mkdir -p "$stub"
 cat >"$stub/gh" <<'GH'
 #!/usr/bin/env bash
-printf '%s' "${GH_TAG-}"
+if [[ " $* " == *" --exclude-drafts "* && " $* " == *" --exclude-pre-releases "* ]]; then
+  printf '%s' "${GH_TAG-}"
+else
+  printf '%s' "${GH_DRAFT_TAG:-${GH_TAG-}}"
+fi
 # GH_FAIL makes it exit non-zero, standing in for an unauthenticated or
 # unreachable gh rather than an empty release list.
 [ -z "${GH_FAIL-}" ]
@@ -85,6 +91,16 @@ grep -q "none exists yet" <<<"$out" \
   && [[ "$(head_of)" == "$b_sha" ]] \
   && ok "no release yet is nothing to do, not an error" \
   || bad "no release -> head=$(head_of): $out"
+
+# A draft or pre-release newer than the latest release is not followed. A
+# draft is somebody's unfinished release note, and deploying it to every
+# machine is not what cutting it meant.
+git_q "$upstream" commit -q --allow-empty -m C
+git_q "$upstream" tag v3-draft
+out="$(GH_TAG=v2 GH_DRAFT_TAG=v3-draft update)" || bad "a pending draft exited non-zero: $out"
+[[ "$(head_of)" == "$b_sha" ]] \
+  && ok "a newer draft or pre-release is not followed" \
+  || bad "draft v3 -> head=$(head_of) want=$b_sha: $out"
 
 # gh failing to answer is a refusal, not a silent no-op.
 before="$(head_of)"

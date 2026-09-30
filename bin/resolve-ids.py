@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Turn the names in a contract into the ids the board moves cards by.
 
-    resolve-ids.py --instance <name> --installation <name> [--api-url URL] [--key-file PATH]
+    resolve-ids.py --instance <name> [--api-url URL] [--key-file PATH]
 
 The contract names a team, a project and nothing else, because a fork must not
 inherit somebody else's project UUID (see bin/contract.py). The running loop
@@ -11,7 +11,9 @@ script is the one moment those two requirements meet, and therefore the one
 moment a name is trusted.
 
 The credential is per Linear WORKSPACE, not per board: $FOREMAN_ROOT/linear.key
-by default -- the machine root, shared by every installation on it -- or the --key-file path for a board in a different workspace. It
+by default -- the machine root, shared by every installation on it -- or the
+`key` a board declares in boards.toml for a board in a different workspace,
+which config.sh exports as KEY_FILE. --key-file overrides both. It
 used to be $INSTANCE_HOME/linear.key, so ten boards in one workspace meant ten
 identical copies of one secret, and rotating it meant finding all ten. One copy
 missed is a board that keeps authenticating with a key the operator believes is
@@ -171,11 +173,17 @@ query States($teamId: String!) {
 }
 """
 
+# Paginated. Linear answers 50 labels per page by default, so a team with
+# more than that used to look like it lacked `needs-plan` -- and this script
+# then created a second one, which every later run refused as ambiguous.
+LABELS_PAGE_SIZE = 250
+
 LABELS_QUERY = """
-query Labels($teamId: String!) {
+query Labels($teamId: String!, $first: Int!, $after: String) {
   team(id: $teamId) {
-    labels {
+    labels(first: $first, after: $after) {
       nodes { id name }
+      pageInfo { hasNextPage endCursor }
     }
   }
 }
@@ -255,6 +263,20 @@ def _pick_unique(nodes: list, kind: str, name: str) -> dict:
     return matches[0]
 
 
+def _team(data: dict, team_id: str) -> dict:
+    """The `team` object of a response, refusing a null one.
+
+    Linear answers `"team": null` for an id the key cannot see. `.get("team",
+    {})` does not cover that -- the key is present, its value is None -- and
+    the next `.get` died with an AttributeError traceback.
+    """
+    team = data.get("team")
+    if not isinstance(team, dict):
+        die(f"Linear returned no team for id {team_id!r}; expected the team this "
+            "key resolved a moment ago. Does the key belong to its workspace?")
+    return team
+
+
 def resolve_team(api_url: str, key: str, name: str) -> str:
     data = query(api_url, key, TEAM_QUERY, {"name": name})
     node = _pick_unique(data.get("teams", {}).get("nodes", []), "team", name)
@@ -263,7 +285,7 @@ def resolve_team(api_url: str, key: str, name: str) -> str:
 
 def resolve_project(api_url: str, key: str, team_id: str, name: str) -> str:
     data = query(api_url, key, PROJECT_QUERY, {"teamId": team_id, "name": name})
-    nodes = data.get("team", {}).get("projects", {}).get("nodes", [])
+    nodes = (_team(data, team_id).get("projects") or {}).get("nodes", [])
     node = _pick_unique(nodes, "project", name)
     return node["id"]
 
@@ -274,7 +296,7 @@ def resolve_states(api_url: str, key: str, team_id: str) -> dict:
     Returns {role: id} for every role in STATE_ROLES.
     """
     data = query(api_url, key, STATES_QUERY, {"teamId": team_id})
-    nodes = data.get("team", {}).get("states", {}).get("nodes", [])
+    nodes = (_team(data, team_id).get("states") or {}).get("nodes", [])
 
     # Name every missing column in one message, before resolving any of them.
     # _pick_unique on its own answers `no state named 'Plan'`: true, but it
@@ -320,8 +342,7 @@ def ensure_labels(api_url: str, key: str, team_id: str, label_roles: list) -> di
     path and the just-created path share this one guard, because a mismatch
     on either would re-file every finding, every run, forever.
     """
-    data = query(api_url, key, LABELS_QUERY, {"teamId": team_id})
-    nodes = data.get("team", {}).get("labels", {}).get("nodes", [])
+    nodes = all_labels(api_url, key, team_id)
     ids: dict = {}
     for role, label_name in label_roles:
         matches = [n for n in nodes if n.get("name") == label_name]
@@ -358,6 +379,23 @@ def ensure_labels(api_url: str, key: str, team_id: str, label_roles: list) -> di
             )
         ids[role] = label_id
     return ids
+
+
+def all_labels(api_url: str, key: str, team_id: str) -> list:
+    """Every label of the team, walking every page."""
+    nodes: list = []
+    after = None
+    while True:
+        data = query(api_url, key, LABELS_QUERY,
+                     {"teamId": team_id, "first": LABELS_PAGE_SIZE, "after": after})
+        labels = _team(data, team_id).get("labels") or {}
+        nodes.extend(labels.get("nodes") or [])
+        page = labels.get("pageInfo") or {}
+        if not page.get("hasNextPage"):
+            return nodes
+        after = page.get("endCursor")
+        if not after:
+            die("Linear said more labels follow but gave no cursor to fetch them")
 
 
 def write_ids(instance_home: str, ids: dict) -> None:
@@ -421,7 +459,7 @@ def _load_instance_config(instance: str) -> dict:
     there is no legitimate reason for it to inherit an ambient REPO from
     whatever ran before it in this process's environment.
     """
-    keys = ("INSTANCE_HOME", "FOREMAN_HOME", "FOREMAN_ROOT", "LINEAR_TEAM_NAME", "LINEAR_PROJECT_NAME")
+    keys = ("INSTANCE_HOME", "FOREMAN_HOME", "KEY_FILE", "LINEAR_TEAM_NAME", "LINEAR_PROJECT_NAME")
     script = os.path.join(
         os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
         "skills",
@@ -462,7 +500,7 @@ def main(argv: list) -> int:
     parser.add_argument(
         "--key-file",
         default=None,
-        help="Linear API key file; defaults to $FOREMAN_ROOT/linear.key",
+        help="Linear API key file; defaults to the board's own KEY_FILE",
     )
     args = parser.parse_args(argv)
 
@@ -472,14 +510,15 @@ def main(argv: list) -> int:
         team_name = cfg["LINEAR_TEAM_NAME"]
         project_name = cfg["LINEAR_PROJECT_NAME"]
 
-        # One credential per Linear workspace, in the machine's foreman root.
-        # --key-file exists for the one board that lives in a DIFFERENT
-        # workspace and therefore needs a different key; boards.toml carries
-        # that path per board. No fallback to the old per-board copy and no
-        # fallback to an empty key: a key read as "" reaches Linear as an
-        # unauthenticated request, and the operator reads the resulting error
-        # as "Linear is down", not "the key file moved".
-        key_path = args.key_file or os.path.join(cfg["FOREMAN_ROOT"], "linear.key")
+        # One credential per Linear workspace. KEY_FILE is what config.sh
+        # derives from boards.toml: the machine's shared key, or the `key` a
+        # board in a DIFFERENT workspace declares. This used to read the
+        # shared key regardless, so such a board resolved its ids with another
+        # workspace's key and failed as "no team named ...". No fallback to an
+        # empty key: a key read as "" reaches Linear as an unauthenticated
+        # request, and the operator reads the resulting error as "Linear is
+        # down", not "the key file moved".
+        key_path = args.key_file or cfg["KEY_FILE"]
         try:
             with open(key_path) as handle:
                 key = handle.read().strip()

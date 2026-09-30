@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 # Claim: bin/release.sh cuts a GitHub Release at origin/main -- naming the tag,
-# targeting main's commit -- and refuses a tag that already exists.
+# targeting main's commit, or the commit it is given when that commit is on
+# main -- refuses a tag that already exists, and skips a commit whose message
+# or pull request body carries the do-not-release marker on a line of its own.
 #
 # The failure it prevents: a merge to main is not a deploy. Installations poll
 # the latest release, so a change reaches them only when a release is cut, and a
@@ -29,7 +31,9 @@ git_q -C "$seed" push -q origin main
 main_sha="$(git -C "$seed" rev-parse HEAD)"
 
 # The clone release.sh runs from, with the real script in its bin/, and a gh
-# stand-in that records the argv it was handed.
+# stand-in that records the argv of every WRITE it was handed. `gh api` is
+# the read of the commit's pull requests: it prints GH_PR_BODY, and fails when
+# GH_API_FAIL is set.
 dep="$work/deployer"
 git_q clone -q "$origin" "$dep"
 mkdir -p "$dep/bin"
@@ -41,6 +45,11 @@ stub="$work/stub"
 mkdir -p "$stub"
 cat >"$stub/gh" <<'GH'
 #!/usr/bin/env bash
+if [[ "$1" == "api" ]]; then
+  [[ -z "${GH_API_FAIL-}" ]] || { echo "HTTP 502" >&2; exit 1; }
+  printf '%s\n' "${GH_PR_BODY-}"
+  exit 0
+fi
 printf '%s\n' "$*" >> "${GH_LOG:?}"
 exit 0
 GH
@@ -110,5 +119,55 @@ out="$("$release" 2>&1)" || bad "a prose mention failed to release: $out"
 grep -q "release create v" "$GH_LOG" \
   && ok "prose about the marker does not skip the release" \
   || bad "prose mention skipped the release: $out"
+
+# THE PULL REQUEST BODY COUNTS. This repository squashes with the commit
+# messages, so a marker in the PR body never reaches main's commit.
+git_q -C "$seed" commit -q --allow-empty -m "a change whose PR opted out"
+git_q -C "$seed" push -q origin main
+: >"$GH_LOG"
+out="$(GH_PR_BODY=$'Summary.\r\n\r\nRelease: skip\r\n' "$release" 2>&1)" || bad "a PR-body skip failed: $out"
+grep -q "do-not-release in its pull request" <<<"$out" && [[ ! -s "$GH_LOG" ]] \
+  && ok "a marker line in the pull request body skips the release" \
+  || bad "PR-body marker -> $out; gh log: $(cat "$GH_LOG")"
+
+: >"$GH_LOG"
+out="$(GH_PR_BODY="This explains the Release: skip trailer." "$release" 2>&1)" || bad "PR prose failed: $out"
+grep -q "release create v" "$GH_LOG" \
+  && ok "prose about the marker in a PR body does not skip the release" \
+  || bad "PR prose skipped the release: $out"
+
+: >"$GH_LOG"
+if out="$(GH_API_FAIL=1 "$release" 2>&1)"; then
+  bad "a failed PR lookup released anyway: $out"
+else
+  [[ ! -s "$GH_LOG" ]] && grep -q "could not read the pull request" <<<"$out" \
+    && ok "a PR lookup that fails refuses rather than releasing" \
+    || bad "failed PR lookup -> $out"
+fi
+
+# THE COMMIT CI PASSED, not main's head. The workflow passes RELEASE_SHA; main
+# may have moved on while CI ran.
+passed_sha="$(git -C "$seed" rev-parse HEAD)"
+git_q -C "$seed" commit -q --allow-empty -m "landed while CI ran"
+git_q -C "$seed" push -q origin main
+: >"$GH_LOG"
+out="$(RELEASE_SHA="$passed_sha" "$release" --version v2.0.0 2>&1)" || bad "RELEASE_SHA failed: $out"
+grep -qF "release create v2.0.0 --target $passed_sha " "$GH_LOG" \
+  && ok "RELEASE_SHA releases that commit, not main's newer head" \
+  || bad "RELEASE_SHA -> $out; gh log: $(cat "$GH_LOG")"
+
+git_q -C "$seed" checkout -q -b side
+git_q -C "$seed" commit -q --allow-empty -m "never on main"
+git_q -C "$seed" push -q origin side
+side_sha="$(git -C "$seed" rev-parse HEAD)"
+git -C "$dep" fetch -q origin side
+: >"$GH_LOG"
+if out="$("$release" --sha "$side_sha" 2>&1)"; then
+  bad "a commit off main was released: $out"
+else
+  [[ ! -s "$GH_LOG" ]] && grep -q "not on origin/main" <<<"$out" \
+    && ok "a commit that is not on main is refused" \
+    || bad "off-main sha -> $out"
+fi
 
 exit "$fail"

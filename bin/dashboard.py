@@ -37,14 +37,32 @@ band names the command instead.
 
 LOOPBACK ONLY. The bind is 127.0.0.1 and the publisher in front is what joins
 it to a tailnet (`tailscale serve`), so reaching this page requires being on
-the tailnet and this process never has to judge who is asking.
+the tailnet.
+
+BUT A BROWSER ON THIS HOST IS NOT THE OPERATOR. Any web page the operator has
+open can make that browser send requests to 127.0.0.1. So the server still
+checks two things, and refuses with 403 otherwise:
+
+    Host     must name this machine: loopback, its hostname, a tailnet name
+             `<hostname>.<tailnet>.ts.net`, or a name in
+             $FOREMAN_DASHBOARD_HOSTS. A DNS-rebound name is refused, so a
+             foreign page cannot read the api through its own origin.
+    POST     must carry `X-Foreman-Dashboard: 1`, and its Origin, when sent,
+             must be an allowed host. A cross-site form cannot set a custom
+             header, and a cross-site fetch that sets one needs a CORS
+             preflight this server never approves. Without it, any page could
+             queue an instruction for a tick that runs with permissions
+             bypassed.
 """
 
 from __future__ import annotations
 
+import functools
 import json
 import os
+import re
 import secrets
+import socket
 import subprocess
 import sys
 from datetime import datetime, timezone
@@ -72,6 +90,17 @@ OVERVIEW_TIMEOUT = 60
 # pass, and something long enough to crowd out its own instructions is a
 # message that changes what the tick is rather than what it does.
 MAX_MESSAGE_BYTES = 4096
+
+# The header the page sends with every POST. Its value never matters to
+# secrecy; what matters is that a cross-site request cannot carry it without a
+# CORS preflight, and this server answers no preflight.
+MESSAGE_HEADER = "X-Foreman-Dashboard"
+
+# Extra names this page is served under, comma- or space-separated.
+# bin/install-dashboard.sh writes the tailnet name here when it can find it.
+EXTRA_HOSTS_ENV = "FOREMAN_DASHBOARD_HOSTS"
+
+LOOPBACK_HOSTS = ("localhost", "127.0.0.1", "::1")
 
 
 def die(message: str) -> None:
@@ -145,6 +174,49 @@ def _broken(detail: str) -> dict:
                       "detail": detail,
                       "fix": "check FOREMAN_HOME and that the install is intact"}],
     }
+
+
+@functools.lru_cache(maxsize=1)
+def allowed_hosts() -> frozenset[str]:
+    """Every name this machine answers to, lowercased and without a port.
+
+    Computed once: socket.getfqdn() can wait on a reverse DNS lookup, and this
+    is asked on every request.
+    """
+    names = set(LOOPBACK_HOSTS)
+    hostname = socket.gethostname().lower()
+    names.update({hostname, hostname.split(".")[0], socket.getfqdn().lower()})
+    extra = os.environ.get(EXTRA_HOSTS_ENV, "")
+    names.update(n.lower().rstrip(".") for n in re.split(r"[,\s]+", extra) if n)
+    names.discard("")
+    return frozenset(names)
+
+
+def host_of(value: str) -> str:
+    """The host part of a Host header or an Origin, lowercased, port dropped."""
+    value = value.strip().lower()
+    if "://" in value:
+        value = value.split("://", 1)[1]
+    value = value.split("/", 1)[0]
+    if value.startswith("["):
+        return value[1:].split("]", 1)[0]
+    return value.rsplit(":", 1)[0] if value.count(":") == 1 else value
+
+
+def is_tailnet_name_of_this_host(host: str) -> bool:
+    """`<hostname>.<tailnet>.ts.net`: what `tailscale serve` forwards as Host.
+
+    Nobody but Tailscale controls DNS under ts.net, so this name cannot be
+    rebound to 127.0.0.1 by a hostile page.
+    """
+    labels = host.rstrip(".").split(".")
+    short = socket.gethostname().lower().split(".")[0]
+    return len(labels) == 4 and labels[0] == short and labels[2:] == ["ts", "net"]
+
+
+def host_is_allowed(host: str) -> bool:
+    host = host.rstrip(".")
+    return host in allowed_hosts() or is_tailnet_name_of_this_host(host)
 
 
 # A message filename: sortable, unique, and safe. The timestamp is what orders
@@ -420,7 +492,9 @@ $("msg").addEventListener("submit", async (ev) => {
   const button = ev.target.querySelector("button");
   button.disabled = true;
   try {
-    const r = await fetch(BASE + "message", {method: "POST", body: text});
+    // The header is what the server requires of a POST; see MESSAGE_HEADER.
+    const r = await fetch(BASE + "message", {method: "POST", body: text,
+                                             headers: {"X-Foreman-Dashboard": "1"}});
     const out = await r.json();
     if (out.error) { $("sent").textContent = out.error; $("sent").style.color = "var(--crit)"; }
     else { $("text").value = ""; $("sent").textContent = "queued " + out.queued; $("sent").style.color = ""; tick(); }
@@ -457,7 +531,27 @@ class Handler(BaseHTTPRequestHandler):
         last = segments[-1] if segments else ""
         return last if last in self.ENDPOINTS else ""
 
+    def _refuse_foreign_host(self) -> bool:
+        """Answer 403 and return True when Host is not a name of this machine."""
+        if host_is_allowed(host_of(self.headers.get("Host") or "")):
+            return False
+        self._send(403, "text/plain; charset=utf-8",
+                   b"forbidden: Host is not a name of this machine; add it to "
+                   + EXTRA_HOSTS_ENV.encode() + b"\n")
+        return True
+
+    def _post_refusal(self) -> str:
+        """Why a POST is not from this page, or "" when it is."""
+        if self.headers.get(MESSAGE_HEADER) != "1":
+            return f"missing header {MESSAGE_HEADER}: 1"
+        origin = self.headers.get("Origin")
+        if origin is not None and not host_is_allowed(host_of(origin)):
+            return f"Origin {origin} is not a name of this machine"
+        return ""
+
     def do_GET(self) -> None:
+        if self._refuse_foreign_host():
+            return
         if self._route() == "api":
             self._send(200, "application/json", json.dumps(overview()).encode())
             return
@@ -465,13 +559,25 @@ class Handler(BaseHTTPRequestHandler):
         self._send(200, "text/html; charset=utf-8", body.encode())
 
     def do_POST(self) -> None:
+        if self._refuse_foreign_host():
+            return
         if self._route() != "message":
             self._send(404, "text/plain; charset=utf-8", b"not found\n")
+            return
+        refusal = self._post_refusal()
+        if refusal:
+            self._send(403, "application/json", json.dumps({"error": refusal}).encode())
             return
         try:
             length = int(self.headers.get("Content-Length") or 0)
         except ValueError:
-            length = 0
+            length = -1
+        # A negative length reached rfile.read(-1), which reads until the
+        # client closes and so held the worker for as long as it liked.
+        if length < 0:
+            self._send(400, "application/json",
+                       json.dumps({"error": "Content-Length must be a non-negative integer"}).encode())
+            return
         # Read at most one message's worth plus a byte, so an oversized body is
         # refused by the same rule write_message applies rather than buffered
         # whole first.

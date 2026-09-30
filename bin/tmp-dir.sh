@@ -31,7 +31,29 @@
 
 set -euo pipefail
 
-root="${FOREMAN_TMP_ROOT:-${BOARD_HOME:-$HOME/.foreman}/tmp}"
+# THE SAME DIRECTORY THE REAPER CLEANS. config.sh asks this script with
+# BOARD_HOME set to the board's runtime directory,
+# $FOREMAN_HOME/instances/<board>, and sweep.sh reaps under that. An agent
+# that ran this bare -- AGENTS.md tells it to -- used to get ~/.foreman/tmp/,
+# which nothing reaps, and its scratch accumulated for ever. So with no
+# BOARD_HOME the board comes from FOREMAN_INSTANCE, which every card agent
+# carries, and the home from FOREMAN_HOME, exactly as config.sh derives
+# INSTANCE_HOME.
+home="${FOREMAN_HOME:-$HOME/.foreman}"
+if [[ -n "${BOARD_HOME:-}" ]]; then
+  board_home="$BOARD_HOME"
+elif [[ -n "${FOREMAN_INSTANCE:-}" ]]; then
+  # The board-name rule bin/boards.py and config.sh enforce, so a name can
+  # never climb out of instances/.
+  [[ "$FOREMAN_INSTANCE" =~ ^[A-Za-z0-9_]+$ ]] || {
+    printf 'tmp-dir.sh: FOREMAN_INSTANCE %s is not a board name\n' "$FOREMAN_INSTANCE" >&2
+    exit 2
+  }
+  board_home="$home/instances/$FOREMAN_INSTANCE"
+else
+  board_home="$home"
+fi
+root="${FOREMAN_TMP_ROOT:-$board_home/tmp}"
 
 case "${1:-}" in
   --root)

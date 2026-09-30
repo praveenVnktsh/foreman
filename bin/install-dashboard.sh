@@ -4,6 +4,9 @@
 #   install-dashboard.sh --dry-run   print the unit and change nothing
 #   install-dashboard.sh             write, enable and start it
 #   install-dashboard.sh --port N    serve on N instead of 8429
+#   install-dashboard.sh --host NAME another name the page is published under
+#                                    (repeatable; the tailnet name is found
+#                                    from `tailscale status` when it runs)
 #
 # A long-running service, not a timer: unlike the watchdog this holds a socket
 # open, so `Type=simple` with `Restart=on-failure` is exactly right and a
@@ -21,6 +24,11 @@
 # process to check. The page is written to work under any path prefix, so the
 # `--set-path` is the operator's to choose.
 #
+# THE PUBLISHED NAME HAS TO BE TOLD TO THE PAGE. dashboard.py refuses any Host
+# that is not a name of this machine, so a page on some other site cannot
+# reach it through the operator's browser. `tailscale serve` forwards the
+# tailnet name as Host, so this writes it into FOREMAN_DASHBOARD_HOSTS.
+#
 # Lingering is the part everyone forgets. A user service only runs while the
 # user has a session unless `loginctl enable-linger` is set, so on a headless
 # host the dashboard silently stops at logout and nothing says so -- which is
@@ -32,11 +40,16 @@ die() { printf 'install-dashboard: %s\n' "$*" >&2; exit 1; }
 
 DRY=""
 PORT="8429"
+HOSTS=""
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --dry-run) DRY=1; shift ;;
     --port) [[ $# -ge 2 ]] || die "--port needs a value"; PORT="$2"; shift 2 ;;
-    *) die "unknown argument: $1 (expected --dry-run or --port N)" ;;
+    --host)
+      [[ $# -ge 2 ]] || die "--host needs a value"
+      [[ "$2" =~ ^[A-Za-z0-9.:-]+$ ]] || die "--host must be a hostname, got '$2'"
+      HOSTS="${HOSTS:+$HOSTS,}$2"; shift 2 ;;
+    *) die "unknown argument: $1 (expected --dry-run, --port N or --host NAME)" ;;
   esac
 done
 [[ "$PORT" =~ ^[0-9]+$ ]] && [[ "$PORT" -gt 0 ]] && [[ "$PORT" -lt 65536 ]] \
@@ -65,6 +78,20 @@ DASHBOARD="$INSTALL_ROOT/bin/dashboard.py"
 BOARDS="$(FOREMAN_HOME="$FOREMAN_HOME" "$INSTALL_ROOT/bin/boards.py" --list 2>/dev/null | tr '\0' '\n' | grep -c . || true)"
 [[ "${BOARDS:-0}" -gt 0 ]] \
   || die "no boards declared in $FOREMAN_HOME/boards.toml; run 'boardctl add <name> --repo <path>' first"
+
+# The tailnet name, when tailscale is here to say it. Absent tailscale this
+# adds nothing, and the page still answers on loopback and the hostname.
+if command -v tailscale >/dev/null 2>&1; then
+  TAILNET_NAME="$(tailscale status --json 2>/dev/null | python3 -c '
+import json, sys
+try:
+    print(json.load(sys.stdin)["Self"]["DNSName"].rstrip("."))
+except (ValueError, KeyError, TypeError):
+    pass' || true)"
+  if [[ "$TAILNET_NAME" =~ ^[A-Za-z0-9.-]+$ ]]; then
+    HOSTS="${HOSTS:+$HOSTS,}$TAILNET_NAME"
+  fi
+fi
 
 UNIT_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user"
 UNIT="$UNIT_DIR/foreman-dashboard.service"
@@ -103,6 +130,8 @@ Environment=PATH=%h/.local/bin:%h/bin:/usr/local/bin:/usr/bin:/bin
 ExecStart=$DASHBOARD
 Environment=FOREMAN_HOME=$FOREMAN_HOME
 Environment=FOREMAN_DASHBOARD_PORT=$PORT
+# Names besides loopback and the hostname that the page is served under.
+Environment=FOREMAN_DASHBOARD_HOSTS=$HOSTS
 Restart=on-failure
 RestartSec=5
 

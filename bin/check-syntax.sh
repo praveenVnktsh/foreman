@@ -71,6 +71,28 @@ kind_of() {
   fi
 }
 
+# BASH 4 CONSTRUCTS, which `bash -n` cannot catch. CI's bash is 5, where they
+# parse; macOS ships 3.2, where they fail at run time. AGENTS.md sets the floor
+# at 3.2, so a board on a Mac dies on a line CI called fine. Matched on the
+# source with comments stripped, one pattern per construct:
+#
+#   mapfile / readarray          no builtin in 3.2
+#   declare|local|typeset -A     no associative arrays in 3.2
+#   ${var,,} ${var^^} ...        no case modification in 3.2
+#   |&                           no stderr pipe shorthand in 3.2
+#
+# The patterns are spelled so this file does not match its own source.
+bash4_pattern='(^|[^A-Za-z0-9_-])(map''file|read''array)([^A-Za-z0-9_-]|$)'
+bash4_pattern+='|(declare|local|typeset)[[:space:]]+-[A-Za-z]*A'
+bash4_pattern+='|\$\{[A-Za-z_][A-Za-z0-9_]*(\[[^]]*\])?(,|\^)'
+bash4_pattern+='|(^|[^|])[|]&([[:space:]]|$)'
+
+# bash4_lines <path> -- each line of <path> that uses a bash 4 construct, as
+# `<line>:<text>`, comments stripped first so prose about them is allowed.
+bash4_lines() {
+  sed -E 's/(^|[[:space:]])#.*$//' "$1" | grep -nE "$bash4_pattern" || true
+}
+
 status=0
 checked=0
 unclassified_executables=()
@@ -112,6 +134,15 @@ while IFS= read -r -d '' entry; do
   if ! "${checker[@]}" "$path"; then
     echo "FAIL: $path does not parse" >&2
     status=1
+  fi
+
+  if [[ "$kind" == shell ]]; then
+    bash4="$(bash4_lines "$path")"
+    if [[ -n "$bash4" ]]; then
+      echo "FAIL: $path uses bash 4 constructs; this repository runs on bash 3.2 (see AGENTS.md):" >&2
+      printf '%s\n' "$bash4" | sed "s#^#  $path:#" >&2
+      status=1
+    fi
   fi
 
   checked=$(( checked + 1 ))

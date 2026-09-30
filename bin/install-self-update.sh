@@ -3,11 +3,19 @@
 #
 #   install-self-update.sh --dry-run          print both units and change nothing
 #   install-self-update.sh                    write, enable and start them
-#   install-self-update.sh --ref <ref>        track <ref> instead of origin/main
+#   install-self-update.sh --ref <ref>        track <ref> instead of the latest release
+#   install-self-update.sh --releases         follow the latest release again
 #
-# --ref writes FOREMAN_UPDATE_REF into the unit. A clone pinned to
-# origin/release (bin/release.sh promotes main onto it) does not deploy on a
-# merge to main; it deploys when a release is promoted. See docs/INSTALLING.md.
+# By default the updater follows the latest GitHub Release, which
+# bin/release.sh cuts; a merge to main reaches the machine only then. --ref
+# writes FOREMAN_UPDATE_REF=origin/<branch> into the unit, and the clone
+# follows that branch instead: a development machine uses it to follow main.
+# See docs/INSTALLING.md.
+#
+# RE-RUNNING KEEPS WHAT THE MACHINE TRACKS. Without --ref or --releases the
+# ref already in the unit is kept. Re-running this to pick up a unit change
+# used to write a unit with no ref, silently moving a machine that followed
+# origin/main back onto releases.
 #
 # This file is to bin/self-update.sh what bin/install-service.sh is to
 # skills/board/supervise.sh, and it is deliberately the same shape. The two
@@ -21,13 +29,23 @@ die() { printf 'install-self-update: %s\n' "$*" >&2; exit 1; }
 
 DRY=""
 UPDATE_REF=""
+REF_CHOSEN=""
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --dry-run) DRY=1; shift ;;
-    --ref) [[ $# -ge 2 ]] || die "--ref needs a value"; UPDATE_REF="$2"; shift 2 ;;
-    *) die "unknown argument: $1 (expected --dry-run or --ref <ref>)" ;;
+    --ref) [[ $# -ge 2 ]] || die "--ref needs a value"; UPDATE_REF="$2"; REF_CHOSEN=1; shift 2 ;;
+    --releases) UPDATE_REF=""; REF_CHOSEN=1; shift ;;
+    *) die "unknown argument: $1 (expected --dry-run, --ref <ref> or --releases)" ;;
   esac
 done
+
+UNIT_NAME="foreman-update"
+UNIT_DIR="$HOME/.config/systemd/user"
+
+# Neither flag: keep the ref the installed unit already carries, if any.
+if [[ -z "$REF_CHOSEN" && -f "$UNIT_DIR/$UNIT_NAME.service" ]]; then
+  UPDATE_REF="$(sed -n 's/^Environment=FOREMAN_UPDATE_REF=//p' "$UNIT_DIR/$UNIT_NAME.service" | head -1)"
+fi
 
 # By default the timer follows GitHub Releases: bin/self-update.sh polls the
 # latest. --ref pins it to a git ref instead, and the same validation
@@ -85,11 +103,9 @@ git -C "$INSTALL_ROOT" rev-parse --git-dir >/dev/null 2>&1 \
 # refusing to install a timer over it would be refusing the wrong question.
 # One fact, one place.
 
-# ONE FOREMAN, so the unit carries no segment. It is `foreman-update`, which is
-# distinguishable at a glance from install-service.sh's `foreman` in
-# `systemctl --user list-timers`.
-UNIT_NAME="foreman-update"
-UNIT_DIR="$HOME/.config/systemd/user"
+# ONE FOREMAN, so the unit carries no segment. UNIT_NAME, set above, is
+# `foreman-update`, which is distinguishable at a glance from
+# install-service.sh's `foreman` in `systemctl --user list-timers`.
 
 service_unit() {
   cat <<UNIT
