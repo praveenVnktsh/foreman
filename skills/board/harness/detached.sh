@@ -23,18 +23,21 @@
 #   detached_list <home>          the spec's JSON list, one row per record
 #   detached_reap <home> <older-than-seconds>
 #       Deletes the record, the log, the wrapper and any leftover run directory
-#       of every agent that is finished and older than the window, and prints
+#       of every agent that is finished and older than the window, after
+#       ending whatever its process group left running, and prints
 #       one line per id. Nothing else reaps them: every spawn leaves them under
 #       <home>/agents forever, and detached_list globs and parses them on every
 #       dispatch gate, every sweep, every watch-agents poll and every supervise
 #       fire, so the cost of a liveness check rose with the installation's
 #       lifetime. sweep.sh calls it through the adapter's `reap` verb.
 #   detached_forget <home> <id>
-#       Deletes one finished agent's record, log and wrapper. Refuses, exit 1,
+#       Deletes one finished agent's record, log and wrapper, after ending
+#       whatever its process group left running. Refuses, exit 1,
 #       when the record is working (message names the state) or the id is
 #       unknown. Prints nothing on success. sweep.sh calls it through the
 #       adapter's `forget` verb, once an exited agent's transcript is copied.
-#   detached_stop <home> <id>     TERM then KILL, to the whole process group
+#   detached_stop <home> <id>     TERM then KILL, to the whole process group,
+#                                 also when only the wrapper has exited
 #   detached_transcript <home> <id>   prints the log path
 #   detached_newest <home> <match-field> <match-value> <out-field>
 #       One field of the newest row whose <match-field> equals <match-value>.
@@ -80,11 +83,20 @@
 #   name        the agent name the caller asked for, e.g. foreman/<...>/build-1
 #   cwd         where the command runs
 #   pid         the detached process, which is also its process group id
-#   startedBy   what `ps -o lstart= -p <pid>` printed for that pid at spawn
+#   startedBy   what `LC_ALL=C TZ=UTC0 ps -o lstart= -p <pid>` printed for
+#               that pid at spawn (older records: the same, in the spawn's
+#               own zone and locale; see _detached_start_time)
 #   sessionId   the harness's own id; "" until detached_note_session fills it
 #   startedAt   epoch MILLIseconds, the unit every consumer already sorts by
 #   log         <home>/agents/<id>.log, both streams of the command
+#   harness     the adapter that spawned it, e.g. codex. Codex and OpenCode
+#               share this directory, so it is how a resume, a transcript or
+#               registry.sh tells one harness's agent from the other's
+#   loopSeconds the wait between passes of a loop; "" for a single run
 #   exit        absent until the command ends, then its exit code
+#   endedAt     epoch milliseconds, whole seconds, when the wrapper wrote
+#               `exit`; absent when it was killed first
+#   stoppedAt   epoch milliseconds of the first stop asked for, if any
 #
 # `startedBy` is what makes `pid` mean anything. A pid alone is a recycled
 # number: after a reboot, an OOM kill or a pid wraparound, a record left at
@@ -95,13 +107,14 @@
 # TERM and KILL to an unrelated process group. A pid plus the start time the
 # kernel gave THAT process identifies one process and no other.
 #
-# A spawn leaves four things under <home>/agents, all named by the id. The id
+# A spawn leaves five things under <home>/agents, all named by the id. The id
 # is the filename, so nothing stores it twice.
 #
-#   <id>.json   the record above
-#   <id>.log    both streams of the command
-#   <id>.sh     the generated wrapper
-#   <id>.tmp/   the run directory, the command's TMPDIR while a run lives
+#   <id>.json       the record above
+#   <id>.json.lock  what every record write holds; see _detached_record_write
+#   <id>.log        both streams of the command
+#   <id>.sh         the generated wrapper
+#   <id>.tmp/       the run directory, the command's TMPDIR while a run lives
 #
 # The run directory exists because a harness does not always clean up its own
 # TMPDIR. opencode 1.18.30 extracts a 5.4MB hidden `.<hash>-00000000.so` into $TMPDIR
@@ -196,18 +209,33 @@ _DETACHED_EXIT_KILL=137
 # `set` overwrites; `default` leaves a key that is already there alone. That
 # distinction is what lets detached_stop claim an exit code without erasing the
 # real one a wrapper wrote a microsecond earlier.
+#
+# EVERY WRITE HOLDS <file>.lock. A write reads the record, merges, and replaces
+# it, and four writers do that to one file: the wrapper (exit), the adapter
+# (sessionId), detached_stop (exit, stoppedAt) and spawn itself. Without the
+# lock, two writers read the same old record and the second replace drops the
+# first one's key. Measured 2026-09-30: an `exit` and a `sessionId` written at
+# once lost one of the two in 27 of 40 rounds. A lost `exit` leaves the row
+# `working` behind a dead pid, and a lost `stoppedAt` makes a stopped agent
+# read `done`. flock rather than a mkdir lock: the kernel drops it when the
+# holder dies, so there is no stale lock to recover. The lock file is its own
+# file because the record is replaced by rename, and a lock on the old inode
+# excludes nobody who opens the new one.
 _detached_record_write() { # <file> set|default <key> <value>...
   python3 -c '
-import json, os, sys
+import fcntl, json, os, sys
 
 # The three fields foreman compares as numbers. Everything else is a string,
 # and a string "0" exit code would make `state` read done as stopped.
-NUMERIC = ("pid", "startedAt", "exit", "stoppedAt")
+NUMERIC = ("pid", "startedAt", "exit", "endedAt", "stoppedAt")
 
 path, op = sys.argv[1], sys.argv[2]
 pairs = sys.argv[3:]
 if len(pairs) % 2:
     sys.exit("foreman: %s: record update needs key/value pairs, got %d arguments" % (path, len(pairs)))
+
+lock = open(path + ".lock", "a")
+fcntl.flock(lock, fcntl.LOCK_EX)
 
 record = {}
 if os.path.exists(path):
@@ -239,6 +267,7 @@ with open(tmp, "w") as handle:
     json.dump(record, handle)
     handle.write("\n")
 os.replace(tmp, path)
+lock.close()
 ' "$@"
 }
 
@@ -265,8 +294,61 @@ _detached_record_default() { # <file> <key> <value>...
 # the trailing NEWLINE and nothing else — the pad is then present in both
 # strings or in neither. detached_list's python does the same, in the same
 # words, because the comparison is worthless if the two normalisations differ.
+#
+# ALWAYS UNDER `LC_ALL=C TZ=UTC0`. lstart is printed in the caller's time zone
+# and locale, and the spawn and the readers are different processes: a tick
+# under systemd, a sweep under cron, an operator's shell. Measured 2026-09-30:
+# an agent spawned under TZ=UTC and listed with TZ unset read `stopped` while
+# it ran, and `detached_stop` then left it running. `mer. 30 sept.` under a
+# French LC_TIME breaks the comparison the same way. `UTC0` is the POSIX
+# spelling, so it needs no zoneinfo file.
 _detached_start_time() { # <pid>
+  LC_ALL=C TZ=UTC0 ps -o lstart= -p "$1" 2>/dev/null || true
+}
+
+# What a record written before the rule above holds: lstart in whatever zone
+# and locale its spawn ran under. Read only as a fallback, so a record left by
+# an older foreman is not called dead the day this one is installed.
+_detached_legacy_start_time() { # <pid>
   ps -o lstart= -p "$1" 2>/dev/null || true
+}
+
+# Exit 0 when <pid> is still the process whose start time was recorded.
+_detached_is_same_process() { # <pid> <recorded startedBy>
+  local now
+  now="$(_detached_start_time "$1")"
+  [[ -n "$now" ]] || return 1
+  [[ "$now" == "$2" ]] && return 0
+  [[ "$(_detached_legacy_start_time "$1")" == "$2" ]]
+}
+
+# Exit 0 while any process is left in process group <pgid>. The bare pid is
+# the fallback for a spawn whose setsid did not take, the same fallback every
+# signal in detached_stop carries.
+_detached_group_alive() { # <pgid>
+  kill -0 -"$1" 2>/dev/null || kill -0 "$1" 2>/dev/null
+}
+
+# TERM process group <pgid>, wait out the grace period for the WHOLE group,
+# then KILL whatever is left. Prints the exit code the stop stands for.
+#
+# The group, not the leader, is what is polled. The leader is the wrapper, and
+# its TERM trap exits as soon as the harness does, so a child that ignores TERM
+# outlived every stop. Measured 2026-09-30: `( trap "" TERM; sleep 41 ) &`
+# under a harness was still running after the stop returned.
+_detached_end_group() { # <pgid>
+  kill -TERM -"$1" 2>/dev/null || kill -TERM "$1" 2>/dev/null || true
+  local waited=0
+  while [[ "$waited" -lt "$_DETACHED_STOP_GRACE_POLLS" ]] && _detached_group_alive "$1"; do
+    sleep "$_DETACHED_STOP_POLL_SECONDS"
+    waited=$(( waited + 1 ))
+  done
+  if _detached_group_alive "$1"; then
+    kill -KILL -"$1" 2>/dev/null || kill -KILL "$1" 2>/dev/null || true
+    printf '%s\n' "$_DETACHED_EXIT_KILL"
+    return 0
+  fi
+  printf '%s\n' "$_DETACHED_EXIT_TERM"
 }
 
 _detached_record_path() { # <home> <id>
@@ -449,7 +531,10 @@ if [ -z "$LOOP_SECONDS" ]; then
     exit 1
   fi
   TMPDIR="$RUN_TMP" "$@" </dev/null
-  _detached_record_set "$RECORD" exit "$?"
+  # endedAt beside the exit, in the same write: it is how a later stop,
+  # forget or reap tells what this run left in its group from a stranger's
+  # group that has since taken the number. See leftover_group.
+  _detached_record_set "$RECORD" exit "$?" endedAt "$(date +%s)000"
   rm -rf "$RUN_TMP"
   exit 0
 fi
@@ -504,7 +589,7 @@ os.execv(sys.argv[1], sys.argv[1:])' "$wrapper" >>"$log" 2>&1 </dev/null &
   start_time="$(_detached_start_time "$pid")"
   if [[ -z "$start_time" ]] && kill -0 "$pid" 2>/dev/null; then
     kill -TERM -"$pid" 2>/dev/null || kill -TERM "$pid" 2>/dev/null || true
-    printf 'foreman: ps -o lstart= -p %s printed nothing for a process that is running; cannot tell this agent apart from a later pid reuse\n' "$pid" >&2
+    printf 'foreman: LC_ALL=C TZ=UTC0 ps -o lstart= -p %s printed nothing for a process that is running; cannot tell this agent apart from a later pid reuse\n' "$pid" >&2
     return 1
   fi
 
@@ -517,7 +602,9 @@ os.execv(sys.argv[1], sys.argv[1:])' "$wrapper" >>"$log" 2>&1 </dev/null &
     startedBy "$start_time" \
     sessionId "" \
     startedAt "$started" \
-    log "$log" || return 1
+    log "$log" \
+    harness "$_DETACHED_ADAPTER" \
+    loopSeconds "$loop_seconds" || return 1
 
   printf '%s\n' "$id"
 }
@@ -545,6 +632,8 @@ detached_note_session() { # <home> <id> <sessionId>
 #   reap <home> <older-than-seconds>  the ids it deleted
 #   forget <home> <id>              delete one agent's files; refuses a
 #                                    working or unknown id
+#   leftovers <home> <id>           end what a finished agent left running
+#                                    in its process group
 #
 # Both ask the same question first — is this agent finished? — so `is_alive`
 # and `state_of` are written once. A second copy of that rule would drift, and
@@ -560,27 +649,48 @@ detached_note_session() { # <home> <id> <sessionId>
 # down, naming a function that was fine.
 _detached_records_py() {
   cat <<'RECORDS_PY'
-import glob, json, os, shutil, subprocess, sys, time
+import calendar, glob, json, os, shutil, signal, subprocess, sys, time
 
-# What one spawn leaves under <home>/agents, all four named by the id: the
-# record, the log, the generated wrapper and the run directory. The wrapper
+# What one spawn leaves under <home>/agents, all named by the id: the record,
+# its lock, the log, the generated wrapper and the run directory. The wrapper
 # removes the run directory itself; it is here for a run KILLed first.
-SUFFIXES = (".json", ".log", ".sh", ".tmp")
+SUFFIXES = (".json", ".json.lock", ".log", ".sh", ".tmp")
+
+# The `status` a loop reports while its wrapper sleeps between passes. The
+# row stays `working`, because the wrapper is alive and will run again; the
+# status says the silent log is the wait and not a wedged turn.
+BETWEEN_PASSES = "between passes"
+
+# The zone and locale every start time is read in. See _detached_start_time.
+CANONICAL_PS_ENV = dict(os.environ, LC_ALL="C", TZ="UTC0")
+
+# detached_stop's grace period, handed over by the shell so it is set once.
+GRACE_POLLS = int(os.environ["DETACHED_STOP_GRACE_POLLS"])
+POLL_SECONDS = float(os.environ["DETACHED_STOP_POLL_SECONDS"])
 
 op, home = sys.argv[1], sys.argv[2]
 
 
-def start_time(pid):
+def start_time(pid, env):
     # The same reading detached_spawn took, normalised the same way: strip the
     # trailing newline and nothing else. See _detached_start_time.
     try:
         result = subprocess.run(
             ["ps", "-o", "lstart=", "-p", str(pid)],
-            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, env=env,
         )
     except OSError as exc:
         sys.exit("foreman: cannot run ps to check pid %s (%s)" % (pid, exc))
     return result.stdout.decode("utf-8", "replace").rstrip("\n")
+
+
+def same_process(pid, recorded):
+    # The canonical reading first; the caller's own zone and locale only for a
+    # record an older foreman wrote. _detached_is_same_process in the shell.
+    now = start_time(pid, CANONICAL_PS_ENV)
+    if not now:
+        return False
+    return now == recorded or start_time(pid, None) == recorded
 
 
 def is_alive(record, path):
@@ -604,7 +714,132 @@ def is_alive(record, path):
             "foreman: %s records a live pid with no startedBy; refusing to say whether it is this agent or a later process reusing the number"
             % path
         )
-    return start_time(pid) == recorded
+    return same_process(pid, recorded)
+
+
+def group_alive(pgid):
+    # A group of another user's is not one this can end, so it counts as gone.
+    try:
+        os.killpg(pgid, 0)
+    except (ProcessLookupError, PermissionError):
+        return False
+    return True
+
+
+def member_start_times(pgid):
+    # Epoch seconds at which each process in group <pgid> started, read in
+    # the canonical zone so the numbers mean the same thing on every caller.
+    try:
+        result = subprocess.run(
+            ["ps", "-A", "-o", "pgid=", "-o", "lstart="],
+            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, env=CANONICAL_PS_ENV,
+        )
+    except OSError as exc:
+        sys.exit("foreman: cannot run ps to list process group %s (%s)" % (pgid, exc))
+    times = []
+    for line in result.stdout.decode("utf-8", "replace").splitlines():
+        fields = line.split(None, 1)
+        if len(fields) != 2 or fields[0] != str(pgid):
+            continue
+        try:
+            started = time.strptime(fields[1].strip(), "%a %b %d %H:%M:%S %Y")
+        except ValueError:
+            continue
+        times.append(calendar.timegm(started))
+    return times
+
+
+def leftover_group(record, agent):
+    # The process group a finished agent left running, or None.
+    #
+    # The wrapper exits when the harness does, and a harness that started
+    # `something &` leaves it in the group, running against a worktree the
+    # sweep is about to delete. Measured 2026-09-30: `sleep 44 &` outlived a
+    # stop and a forget, and nothing ever came back for it.
+    #
+    # WHOSE GROUP IT IS. The group id is the wrapper pid, and the number is
+    # recycled. While a process holds it, the start time says whether it is
+    # ours, exactly as for liveness. Once it is free, a group can still carry
+    # it: every double-forked daemon (a tmux server, a gpg-agent) lives in a
+    # group whose leader is gone, and after a wraparound one of them can hold
+    # an old record's number. So a leaderless group is ours only if one of
+    # its members started before this agent's wrapper ended. A stranger's
+    # group formed after ours was gone, so all of its members started later.
+    # A record with no endedAt cannot show that, and its group is left alone.
+    pid = record.get("pid")
+    if not isinstance(pid, int) or isinstance(pid, bool) or pid <= 1:
+        return None
+    if not group_alive(pid):
+        return None
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        ended = record.get("endedAt")
+        if not isinstance(ended, int) or isinstance(ended, bool):
+            print(
+                "foreman: %s: process group %d is running, but the record has no endedAt to show it is this agent's; leaving it"
+                % (agent, pid),
+                file=sys.stderr,
+            )
+            return None
+        if any(started <= ended // 1000 for started in member_start_times(pid)):
+            return pid
+        return None
+    except PermissionError:
+        return None
+    recorded = record.get("startedBy")
+    return pid if recorded and same_process(pid, recorded) else None
+
+
+def end_group(pgid, agent):
+    # TERM, the same grace period detached_stop gives, then KILL.
+    print("foreman: %s left processes in group %d; ending them" % (agent, pgid), file=sys.stderr)
+    try:
+        os.killpg(pgid, signal.SIGTERM)
+    except (ProcessLookupError, PermissionError):
+        return
+    for _ in range(GRACE_POLLS):
+        if not group_alive(pgid):
+            return
+        time.sleep(POLL_SECONDS)
+    try:
+        os.killpg(pgid, signal.SIGKILL)
+    except (ProcessLookupError, PermissionError):
+        pass
+
+
+def end_leftovers(name, record):
+    pgid = leftover_group(record, name)
+    if pgid is not None:
+        end_group(pgid, name)
+
+
+def remove_agent(name, record):
+    # Every file one spawn left, after any process it left behind. The group
+    # goes first: a leftover still writing to the log would recreate it.
+    end_leftovers(name, record)
+    for suffix in SUFFIXES:
+        target = os.path.join(home, "agents", name + suffix)
+        try:
+            remove(target)
+        except FileNotFoundError:
+            # A log a spawn never got as far as writing, or another sweep
+            # that reached this record first. The file is gone, which is all
+            # this asked for.
+            pass
+        except OSError as exc:
+            sys.exit("foreman: cannot remove %s (%s)" % (target, exc))
+
+
+def status_of(record, path, alive):
+    # A loop between passes is the one status this harness can report. The
+    # wrapper creates <id>.tmp before each pass and removes it after, so its
+    # absence while the wrapper lives is the wait.
+    if not alive or not record.get("loopSeconds"):
+        return None
+    if os.path.isdir(path[: -len(".json")] + ".tmp"):
+        return None
+    return BETWEEN_PASSES
 
 
 def state_of(record, alive):
@@ -692,8 +927,12 @@ def listing():
             "startedAt": record.get("startedAt") or 0,
             "cwd": record.get("cwd") or "",
             # Neither harness publishes a status line. null says there is none;
-            # "" would claim there is one and that it is blank.
-            "status": None,
+            # "" would claim there is one and that it is blank. A loop between
+            # passes is the exception; see status_of.
+            "status": status_of(record, path, alive),
+            # Which adapter spawned it, or null for a record older than the
+            # field. Codex and OpenCode list the same records.
+            "harness": record.get("harness") or None,
         })
     # Several rows may share a name, and every consumer takes the newest.
     rows.sort(key=lambda row: row["startedAt"])
@@ -732,17 +971,7 @@ def reap(raw_window):
             continue
         name = agent_id(path)
         if not dry_run:
-            for suffix in SUFFIXES:
-                target = os.path.join(home, "agents", name + suffix)
-                try:
-                    remove(target)
-                except FileNotFoundError:
-                    # A log a spawn never got as far as writing, or another
-                    # sweep that reached this record first. The file is gone,
-                    # which is all this asked for.
-                    pass
-                except OSError as exc:
-                    sys.exit("foreman: cannot remove %s (%s)" % (target, exc))
+            remove_agent(name, record)
         print(name)
 
 
@@ -757,17 +986,25 @@ def forget(agent_id_arg):
         if state == "working":
             sys.exit("foreman: %s is working; refusing to forget a live agent" % agent_id_arg)
         if not dry_run:
-            for suffix in SUFFIXES:
-                target = os.path.join(home, "agents", agent_id_arg + suffix)
-                try:
-                    # remove(), not os.remove: `.tmp` is the run's directory.
-                    remove(target)
-                except FileNotFoundError:
-                    pass
-                except OSError as exc:
-                    sys.exit("foreman: cannot remove %s (%s)" % (target, exc))
+            remove_agent(agent_id_arg, record)
         return
     sys.exit("foreman: no agent record for %s" % agent_id_arg)
+
+
+def leftovers(agent_id_arg):
+    # detached_stop's case once the wrapper is gone: end what it left, by the
+    # rule forget and reap use, and delete nothing.
+    path = os.path.join(home, "agents", agent_id_arg + ".json")
+    try:
+        with open(path) as handle:
+            record = json.load(handle)
+    except FileNotFoundError:
+        sys.exit("foreman: no agent record at %s" % path)
+    except ValueError as exc:
+        sys.exit("foreman: %s is not readable JSON (%s)" % (path, exc))
+    if not isinstance(record, dict):
+        sys.exit("foreman: %s holds a %s, expected a JSON object" % (path, type(record).__name__))
+    end_leftovers(agent_id_arg, record)
 
 
 if op == "list":
@@ -782,18 +1019,32 @@ elif op == "forget":
     if len(sys.argv) != 4:
         sys.exit("foreman: forget takes <home> <id>")
     forget(sys.argv[3])
+elif op == "leftovers":
+    if len(sys.argv) != 4:
+        sys.exit("foreman: leftovers takes <home> <id>")
+    leftovers(sys.argv[3])
 else:
     sys.exit("foreman: %r is not an operation on agent records" % op)
 RECORDS_PY
 }
 
-# The spec's JSON list: name, id, sessionId, pid, state, startedAt, cwd, status.
+# The records python, handed the grace period detached_stop uses, so a forget
+# or a reap that ends a leftover process group waits exactly as long.
+_detached_records() { # <op> <home> [arg]
+  DETACHED_STOP_GRACE_POLLS="$_DETACHED_STOP_GRACE_POLLS" \
+  DETACHED_STOP_POLL_SECONDS="$_DETACHED_STOP_POLL_SECONDS" \
+    python3 -c "$(_detached_records_py)" "$@"
+}
+
+# The spec's JSON list: name, id, sessionId, pid, state, startedAt, cwd,
+# status, plus `harness`, the adapter that spawned the agent (null on a record
+# older than the field).
 detached_list() { # <home>
   if [[ $# -ne 1 ]]; then
     printf 'foreman: detached_list needs <home>\n' >&2
     return 1
   fi
-  python3 -c "$(_detached_records_py)" list "$1"
+  _detached_records list "$1"
 }
 
 # Delete what every finished agent older than the window left behind, and print
@@ -811,7 +1062,7 @@ detached_reap() { # <home> <older-than-seconds>
     printf 'foreman: detached_reap needs <home> <older-than-seconds>\n' >&2
     return 1
   fi
-  python3 -c "$(_detached_records_py)" reap "$1" "$2"
+  _detached_records reap "$1" "$2"
 }
 
 # Delete one finished agent's record, log and wrapper. Refuses, exit 1, when
@@ -826,7 +1077,7 @@ detached_forget() { # <home> <id>
     printf 'foreman: detached_forget needs <home> <id>\n' >&2
     return 1
   fi
-  python3 -c "$(_detached_records_py)" forget "$1" "$2"
+  _detached_records forget "$1" "$2"
 }
 
 # TERM the process group, then KILL what survives, and record the stop.
@@ -835,34 +1086,39 @@ detached_stop() { # <home> <id>
     printf 'foreman: detached_stop needs <home> <id>\n' >&2
     return 1
   fi
-  local home="$1" id="$2" record pid started_by
+  local home="$1" id="$2" record pid started_by signal
   record="$(_detached_record_path "$home" "$id")"
   pid="$(_detached_record_field "$home" "$id" pid)" || return 1
-  if [[ -z "$pid" ]]; then
-    printf 'foreman: %s records no pid; refusing to signal\n' "$record" >&2
+  # 0 and 1 are refused with the empty pid: `kill -TERM -0` is the CALLER's
+  # own process group, and 1 is init.
+  if [[ ! "$pid" =~ ^[0-9]+$ || "$pid" -le 1 ]]; then
+    printf 'foreman: %s records pid %s; refusing to signal\n' "$record" "${pid:-<none>}" >&2
     return 1
   fi
 
-  # Already gone. No exit code goes into the record: the process died on its
-  # own and we do not know what it exited with, so writing one would be a
-  # guess. The ask is recorded instead, so a finished agent reads stopped after
-  # it; state_of says why that matters.
   if ! kill -0 "$pid" 2>/dev/null; then
+    # Gone. What it left running in its group is ended by the rule forget and
+    # reap use, which also decides whether a group carrying this number is
+    # still ours. No exit code goes into the record: the process died on its
+    # own and we do not know what it exited with, so writing one would be a
+    # guess. The ask is recorded instead, so a finished agent reads stopped
+    # after it; state_of says why that matters.
+    _detached_records leftovers "$home" "$id" || return 1
     _detached_mark_stopped "$record"
     return 0
   fi
 
-  # The pid is held by SOMETHING. The start time says whether it is still ours.
-  # Without this check a stale record — one left at `working` across a reboot
-  # or a wraparound — makes this function TERM and then KILL a whole process
-  # group that belongs to someone else on the machine. A mismatch means our
-  # process is gone, which is the case above.
+  # The pid is held by SOMETHING. The start time says whether it is still
+  # ours. Without this check a stale record — one left at `working` across a
+  # reboot or a wraparound — makes this function TERM and then KILL a whole
+  # process group that belongs to someone else on the machine. A mismatch
+  # means our process is gone and a stranger leads that group now.
   started_by="$(_detached_record_field "$home" "$id" startedBy)" || return 1
   if [[ -z "$started_by" ]]; then
     printf 'foreman: %s records no startedBy; refusing to signal pid %s, which may belong to another process by now\n' "$record" "$pid" >&2
     return 1
   fi
-  if [[ "$(_detached_start_time "$pid")" != "$started_by" ]]; then
+  if ! _detached_is_same_process "$pid" "$started_by"; then
     _detached_mark_stopped "$record"
     return 0
   fi
@@ -871,19 +1127,8 @@ detached_stop() { # <home> <id>
   # is also the process group id, and the group holds the loop, the harness
   # call inside it and the harness's own children. Signalling the bare pid
   # kills the loop and leaves a `codex exec` running against the worktree the
-  # sweep is about to delete. The bare pid is only the fallback, for a spawn
-  # whose setsid did not take.
-  kill -TERM -"$pid" 2>/dev/null || kill -TERM "$pid" 2>/dev/null || true
-
-  local waited=0 signal="$_DETACHED_EXIT_TERM"
-  while [[ "$waited" -lt "$_DETACHED_STOP_GRACE_POLLS" ]] && kill -0 "$pid" 2>/dev/null; do
-    sleep "$_DETACHED_STOP_POLL_SECONDS"
-    waited=$(( waited + 1 ))
-  done
-  if kill -0 "$pid" 2>/dev/null; then
-    kill -KILL -"$pid" 2>/dev/null || kill -KILL "$pid" 2>/dev/null || true
-    signal="$_DETACHED_EXIT_KILL"
-  fi
+  # sweep is about to delete.
+  signal="$(_detached_end_group "$pid")"
 
   # `default`, not `set`: a wrapper that got its own TERM in time wrote the
   # command's real exit code, and that is the better answer. Both are non-zero,
@@ -916,7 +1161,7 @@ detached_is_running() { # <home> <id>
       "$(_detached_record_path "$home" "$id")" "$pid" >&2
     return 2
   fi
-  [[ "$(_detached_start_time "$pid")" == "$started_by" ]]
+  _detached_is_same_process "$pid" "$started_by"
 }
 
 # Record that this agent was asked to stop. `default`, so a second stop keeps
@@ -943,6 +1188,11 @@ detached_transcript() { # <home> <id>
 # Several records legitimately share a name — a spawn, then a later resume —
 # and every consumer in the board takes the largest startedAt. That rule was
 # written out five times across the three adapters; it is written here once.
+#
+# Only this adapter's rows. Codex and OpenCode share <home>/agents, and a stage
+# that falls back from one to the other can leave both under one name. A codex
+# resume handed an opencode session id resumes nothing. A row older than the
+# `harness` field matches every adapter, as every row did before it.
 detached_newest() { # <home> <match-field> <match-value> <out-field>
   if [[ $# -ne 4 ]]; then
     printf 'foreman: detached_newest needs <home> <match-field> <match-value> <out-field>\n' >&2
@@ -956,12 +1206,15 @@ detached_newest() { # <home> <match-field> <match-value> <out-field>
   printf '%s' "$agents" | python3 -c '
 import json, sys
 
-field, want, out = sys.argv[1], sys.argv[2], sys.argv[3]
-matches = [row for row in json.load(sys.stdin) if row.get(field) == want]
+field, want, out, adapter = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
+matches = [
+    row for row in json.load(sys.stdin)
+    if row.get(field) == want and (not adapter or row.get("harness") in (None, adapter))
+]
 if matches:
     value = max(matches, key=lambda row: row.get("startedAt") or 0).get(out)
     print("" if value is None else value)
-' "$2" "$3" "$4"
+' "$2" "$3" "$4" "$_DETACHED_ADAPTER"
 }
 
 # The `transcript <cwd> <session-id>` verb, for both adapters.

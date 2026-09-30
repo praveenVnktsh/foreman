@@ -186,9 +186,51 @@ fi
 # drop them when a DIFFERENT board is configured, so each is derived fresh. An
 # override for the SAME board (how the tests point BOARD_HOME at a scratch dir)
 # is left alone, and a first source with no marker is untouched.
+#
+# EVERY NAME THE PREVIOUS BOARD'S FILES SET goes too, not only the exported
+# ones. boards.toml, the target's board.toml and ids.env are all read
+# environment-wins, so in one shell the first board's contract answered for the
+# second: measured 2026-09-30, sourcing alpha and then beta left beta with
+# alpha's REQUIRED_CHECKS and an empty HIGH_RISK_PATHS where beta declares
+# `db/migrations/` -- a risk gate switched off with no error. The loaders below
+# record in _foreman_board_keys each name they set that the shell did not
+# already hold, and those are the names dropped here. A name the shell held
+# BEFORE the first board was read is a genuine override and stays.
 if [[ -n "${FOREMAN_CONFIG_INSTANCE:-}" && "$FOREMAN_CONFIG_INSTANCE" != "$INSTANCE" ]]; then
   unset REPO KEY_FILE INSTANCE_HOME BOARD_HOME BOARD_NAME_PREFIX BOARD_WORKTREE_PREFIX AGENT_TMP_ROOT
+  # shellcheck disable=SC2086 # split on purpose: one name per word
+  [[ -z "${_foreman_board_keys:-}" ]] || unset $_foreman_board_keys
+  _foreman_board_keys=""
 fi
+_foreman_board_keys="${_foreman_board_keys:-}"
+
+# Remember <key> as this board's when the shell does not hold it yet: the
+# environment-wins read is about to give it this board's value. Lowercase, so no
+# loader key can overwrite the list.
+_foreman_note_board_key() { # <key>
+  [[ -z "${!1+set}" ]] || return 0
+  case " $_foreman_board_keys " in
+    *" $1 "*) ;;
+    *) _foreman_board_keys="$_foreman_board_keys $1" ;;
+  esac
+}
+
+# A loader, run as _foreman_load_pairs runs it, that notes every key it emits
+# first. _foreman_load_pairs redirects a function's output without a subshell,
+# so the notes land in this shell.
+_foreman_board_loader() { # <loader> [args...]
+  local out key value
+  out="$(mktemp)" || return 1
+  if ! "$@" >"$out"; then
+    rm -f "$out"
+    return 1
+  fi
+  while IFS= read -r -d '' key && IFS= read -r -d '' value; do
+    [[ "$key" =~ ^[A-Z_][A-Z0-9_]*$ ]] && _foreman_note_board_key "$key"
+  done <"$out"
+  cat "$out"
+  rm -f "$out"
+}
 # EXPORTED, so a child shell inheriting this board's REPO/BOARD_HOME also
 # inherits the marker that says whose they are, and can drop them for another.
 FOREMAN_CONFIG_INSTANCE="$INSTANCE"
@@ -224,6 +266,7 @@ _foreman_read_env() {
     [[ -z "$line" || "$line" == \#* ]] && continue
     key="${line%%=*}"; value="${line#*=}"
     [[ "$key" =~ ^[A-Z_][A-Z0-9_]*$ ]] || continue
+    _foreman_note_board_key "$key"
     # Environment wins. `-` and not `:-`: an explicitly empty override must mean
     # empty, the same distinction HIGH_RISK_PATHS depends on.
     eval "$key=\"\${$key-\$value}\""
@@ -235,7 +278,7 @@ _foreman_read_env() {
 # facts, one file, $FOREMAN_HOME/boards.toml -- the Linear team and project come
 # from the target repository's own board.toml below, because the repository
 # declares itself and a second copy here would drift.
-if ! _foreman_load_pairs "$FOREMAN_HOME/boards.toml" "$_foreman_install_root/bin/boards.py" "$INSTANCE"; then
+if ! _foreman_load_pairs "$FOREMAN_HOME/boards.toml" _foreman_board_loader "$_foreman_install_root/bin/boards.py" "$INSTANCE"; then
   if [[ $- == *i* ]]; then return 1; else exit 1; fi
 fi
 
@@ -268,7 +311,7 @@ fi
 # The one process that reads the key refuses by path when it cannot.
 
 # The target's own contract. Everything a repository knows about itself.
-if ! _foreman_load_pairs "$REPO/board.toml" "$_foreman_install_root/bin/contract.py" "$REPO/board.toml"; then
+if ! _foreman_load_pairs "$REPO/board.toml" _foreman_board_loader "$_foreman_install_root/bin/contract.py" "$REPO/board.toml"; then
   if [[ $- == *i* ]]; then return 1; else exit 1; fi
 fi
 # contract.py emits "" for an absent cleanup.model: it deliberately depends on
@@ -365,6 +408,13 @@ MAX_PLAN_ATTEMPTS="${MAX_PLAN_ATTEMPTS:-2}"
 # checked against before a dispatch, in addition to the board's own
 # MAX_CONCURRENT.
 HOST_MAX_CONCURRENT="${HOST_MAX_CONCURRENT:-4}"
+# Refused unless it is a positive whole number. reconcile.py weighs every
+# board's dispatch against it, and a value it cannot read as a ceiling is a
+# ceiling nobody checked: `4 ` or `four` must stop the dispatch, not pass it.
+if [[ ! "$HOST_MAX_CONCURRENT" =~ ^[1-9][0-9]*$ ]]; then
+  printf 'foreman: HOST_MAX_CONCURRENT is %s; it must be a positive whole number\n' "$HOST_MAX_CONCURRENT" >&2
+  if [[ $- == *i* ]]; then return 1; else exit 1; fi
+fi
 
 # How stale a card's LAST history.jsonl entry may be before --host-slots stops
 # counting it, even without an explicit `{"action":"released",...}`.
@@ -660,16 +710,30 @@ card_agents_prefix() { printf '%s/%s/\n' "$BOARD_NAME_PREFIX" "$1"; }
 agent_name() { printf '%s%s-%s\n' "$(card_agents_prefix "$1")" "$2" "$3"; }
 worktree_path() { printf '%s/.claude/worktrees/%s-%s\n' "$REPO" "$BOARD_WORKTREE_PREFIX" "$1"; }
 branch_name() { printf '%s/%s\n' "$BOARD_NAME_PREFIX" "$1"; }
+# The file dispatch.sh holds, carrying its own pid, while it cuts and
+# bootstraps a worktree its agent has not registered in yet. sweep.sh treats the
+# worktree as live while that pid is. Outside the worktree on purpose: a file
+# inside it is an untracked change an agent can commit.
+dispatch_marker_dir() { printf '%s/dispatching\n' "$BOARD_HOME"; }
+dispatch_marker_for() { printf '%s/%s\n' "$(dispatch_marker_dir)" "$(basename -- "$1")"; }
 evidence_ref() { printf 'refs/%s/evidence/%s\n' "$BOARD_NAME_PREFIX" "$1"; }
 
 # Append one line to a card's transition log. Never rewritten, only appended.
+#
+# A dry run writes nothing and says on stderr what it would have written. A
+# dry-run row is read back by every later pass as a real transition: a slot
+# held or released, an attempt spent.
 card_log() {
   local ticket="$1" event="$2"
-  local dir
+  local dir line
   dir="$(card_dir "$ticket")"
+  line="$(printf '{"at":"%s","event":%s}' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$event")"
+  if [[ -n "$BOARD_DRY_RUN" ]]; then
+    printf 'DRY RUN: would append to %s/history.jsonl: %s\n' "$dir" "$line" >&2
+    return 0
+  fi
   mkdir -p "$dir"
-  printf '{"at":"%s","event":%s}\n' \
-    "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$event" >>"$dir/history.jsonl"
+  printf '%s\n' "$line" >>"$dir/history.jsonl"
 }
 
 die() { printf 'foreman: %s\n' "$*" >&2; exit 1; }

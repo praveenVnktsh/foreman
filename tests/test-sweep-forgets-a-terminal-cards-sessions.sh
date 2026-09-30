@@ -241,9 +241,12 @@ listed hhhh1111 && [[ -d "$jobs/hhhh1111" && -d "$(wt alpha ABC-5)" ]] \
 grep -q 'did not land' <<<"$out" \
   && ok "and the sweep says which stop did not land" \
   || bad "no message about the stop that did not land: $out"
-tail -n1 "$cards/ABC-5/history.jsonl" | grep -q '"action":"released"' \
-  && ok "the slot is still released, since the card is terminal regardless" \
-  || bad "ABC-5's slot was not released: $(cat "$cards/ABC-5/history.jsonl")"
+# Its slot is KEPT: the agent still runs, and a slot released under it lets the
+# next dispatch run beside it, one past the ceiling.
+! grep -q '"action":"released"' "$cards/ABC-5/history.jsonl" 2>/dev/null \
+  && grep -q 'keeping the slot for ABC-5' <<<"$out" \
+  && ok "the slot is kept while the agent still runs, and the sweep says why" \
+  || bad "ABC-5's slot was released under a running agent: $out"
 # Out of the way of the orphan passes below, which would otherwise see a
 # stuck idle agent they are right to leave.
 rm -f "$STUB_REGISTRY/hhhh1111"; rm -rf "$jobs/hhhh1111" "$(wt alpha ABC-5)"

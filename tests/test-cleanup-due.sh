@@ -153,11 +153,22 @@ esac
 #
 # Same question one level up, and asked through the same dispatch_verdict()
 # every build is weighed by: a cleanup agent eats the same RAM and disk.
+# config.sh refuses a ceiling of 0, so the machine is filled the honest way: a
+# ceiling of 1, held by a card on a second declared board.
 rm -rf "$fh/instances/demo/cards"
-extra_env=(HOST_MAX_CONCURRENT=0)
+full_repo="$work/full-repo"
+mkdir -p "$full_repo"
+git init -q -b main "$full_repo"
+fixture_board_toml "$full_repo"
+fixture_add_board "$home" full "$full_repo"
+mkdir -p "$fh/instances/full/cards/ACME-9"
+printf '{"at":"%s","event":{"action":"spawn","name":"x","role":"build","attempt":"1"}}\n' \
+  "$(stamp_now 0)" > "$fh/instances/full/cards/ACME-9/history.jsonl"
+extra_env=(HOST_MAX_CONCURRENT=1)
 out="$(reconcile --cleanup-due demo)"; status=$?
+rm -rf "$fh/instances/full/cards"
 case "$status:$out" in
-  1:*"of 0 slots"*) ok "a machine with no free slot is not due" ;;
+  1:*"1 of 1 slots"*) ok "a machine with no free slot is not due" ;;
   *) bad "a machine with no free slot is not due: status=$status out=$out" ;;
 esac
 extra_env=(FOREMAN_CLEANUP_TEST=1)

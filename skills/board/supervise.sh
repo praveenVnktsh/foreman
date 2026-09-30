@@ -223,13 +223,14 @@ print(json.dumps({
   "idle_minutes": None if r[3]=="None" else float(r[3]),
   "age_hours": round((time.time()-started/1000)/3600,2) if started else None,
   "live_ticks": len(live),
+  "status": r[6] or None,
 }))
 '
 }
 
 # EVERY agent named $TICK_AGENT_NAME, one row per line, tab-separated:
 #
-#   <id>  <state>  <alive: yes|no>  <idle minutes, or None>  <startedAt ms>  <sessionId>
+#   <id>  <state>  <alive: yes|no>  <idle minutes, or None>  <startedAt ms>  <sessionId>  <status>
 #
 # THE TICK IS A SET, and every gesture that changes it acts on the whole set.
 # inspect() above collapses that set to one agent, which is what an operator
@@ -299,8 +300,9 @@ for a in agents:
         silent = idle is not None and idle > dead_minutes
         gone = not transcript and started and (now-started/1000)/60 > dead_minutes
         if silent or gone: alive=False
-    print("%s\t%s\t%s\t%s\t%s\t%s"%(a.get("id") or "?", a.get("state") or "?",
-          "yes" if alive else "no", "None" if idle is None else idle, started, sid))
+    print("%s\t%s\t%s\t%s\t%s\t%s\t%s"%(a.get("id") or "?", a.get("state") or "?",
+          "yes" if alive else "no", "None" if idle is None else idle, started, sid,
+          a.get("status") or ""))
 ' "$TICK_AGENT_NAME" "$TICK_DEAD_MINUTES" "$HARNESS_SH"
 }
 
@@ -322,7 +324,7 @@ log_corpse_ticks() {
     done
 }
 
-# Read the registry into INFO, STATE, IDLE, AGE and ID. Returns 1 and sets
+# Read the registry into INFO, STATE, STATUS, IDLE, AGE and ID. Returns 1 and sets
 # nothing when the registry cannot be read.
 #
 # `inspect` must not be allowed to fail the script or to look like "no agent".
@@ -347,6 +349,7 @@ read_registry() {
   [[ -n "${info//[[:space:]]/}" ]] || return 1
   INFO="$info"
   STATE="$(field "$INFO" state)"
+  STATUS="$(field "$INFO" status)"
   IDLE="$(field "$INFO" idle_minutes)"
   AGE="$(field "$INFO" age_hours)"
   ID="$(field "$INFO" id)"
@@ -413,8 +416,8 @@ start_agent() {
   # it, the DETACHED agent process that outlives the spawn returning --
   # inherits the fd and the flock with it. That agent runs for hours, so the
   # lock would then read as held by a live process for exactly that long, and
-  # every supervise.sh fire in between reads `flock -n 9` failing as "another
-  # supervisor holds the lock" and stands down -- a watchdog that silently
+  # every supervise.sh fire in between reads the lock as held by "another
+  # supervisor" and stands down -- a watchdog that silently
   # never runs again after its first successful start, on a lock nothing is
   # actually contending for. Closing it here, in a subshell, drops it only for
   # the adapter and whatever it forks; the parent script's own fd 9 (and the
@@ -495,6 +498,16 @@ log_cards() { # <when> <card_agents listing>
   [[ -n "$printed" ]] || log "$when: no card agents are running"
 }
 
+# The status a detached loop (Codex, OpenCode) lists while its wrapper sleeps
+# between passes -- harness/detached.sh's BETWEEN_PASSES. Its state stays
+# `working` for the whole loop, so state alone read a sleeping tick as mid-turn:
+# every restart waited out the full TICK_DRAIN_SECONDS for a turn that was not
+# running.
+TICK_BETWEEN_PASSES="between passes"
+
+# Whether the tick is in the middle of a turn, from the last read_registry.
+tick_mid_turn() { [[ "$STATE" == "working" && "$STATUS" != "$TICK_BETWEEN_PASSES" ]]; }
+
 # Wait for the tick to finish the turn it is in, up to TICK_DRAIN_SECONDS.
 #
 # Stopping it mid-turn is SAFE -- the tick holds no state and its replacement
@@ -503,8 +516,8 @@ log_cards() { # <when> <card_agents listing>
 # half-finished merge or dispatch in two and leave the next person reading a
 # transcript that stops mid-sentence.
 drain_tick() {
-  if [[ "$STATE" != "working" ]]; then
-    log "drain: $TICK_AGENT_NAME is not mid-turn (state=$STATE); nothing to drain"
+  if ! tick_mid_turn; then
+    log "drain: $TICK_AGENT_NAME is not mid-turn (state=$STATE status=$STATUS); nothing to drain"
     return 0
   fi
   local waited=0 step
@@ -516,7 +529,7 @@ drain_tick() {
       log "drain: the agent registry went unreadable after ${waited}s; stopping $TICK_AGENT_NAME anyway"
       return 0
     fi
-    if [[ "$STATE" != "working" ]]; then
+    if ! tick_mid_turn; then
       log "drain: $TICK_AGENT_NAME finished its turn after ${waited}s"
       return 0
     fi
@@ -618,9 +631,9 @@ confirm_started() { # <space-separated ids that were stopped>
 # --restart: replace the tick and leave every card agent alone.
 #
 # Only agents named exactly $TICK_AGENT_NAME are stopped, by id, never by
-# prefix. `foreman/<installation>/tick` is a prefix of nothing, but every
-# per-card name begins `foreman/<installation>/<board>/`, so a prefix stop here
-# would kill every build this installation has in flight -- the one failure
+# prefix. `foreman/tick` is a prefix of nothing, but every per-card name
+# begins `foreman/<board>/`, so a prefix stop on `foreman/` here would kill
+# every build this machine has in flight -- the one failure
 # this whole mode exists to avoid.
 restart_tick() {
   local before_cards after_cards stopped_ids
@@ -738,19 +751,18 @@ fi
 # available here, so this no longer tolerates a failure to open the lock.
 mkdir -p "$(dirname -- "$SUPERVISE_LOCK")" || die "cannot create $(dirname -- "$SUPERVISE_LOCK")"
 exec 9>"$SUPERVISE_LOCK" || die "cannot open $SUPERVISE_LOCK"
-# `! flock -n 9` is true both when the lock is held and when flock(1) does not
-# exist — and macOS has no flock(1), which is the entire reason the sibling
-# withlock.py exists. Reading "no such command" as "someone else is running"
-# gives a watchdog that stands down forever on the platform it was never tested
-# on, saying something reassuring each time. Establish the tool separately.
-command -v flock >/dev/null 2>&1 \
-  || die "flock(1) is not installed; this watchdog needs it (withlock.py covers the same gap elsewhere)"
-# flock -n exits 1 when the lock is held. Any other non-zero is a failure of the
-# tool, not a busy lock, and must not be reported as one — standing down on an
-# error means a watchdog that never runs and always sounds fine.
-# `flock -n 9; LOCK_RC=$?` does not work here: under `set -e` the failing flock
-# aborts the script before the assignment runs, so neither branch below is ever
-# reached. The `||` puts it in a condition context, which is what exempts it.
+# withlock.py --fd takes the lock ON fd 9 and exits, the way `flock -n 9` did.
+# An flock belongs to the open file description, so the lock stays held by fd 9
+# in this process until it exits. It replaces flock(1), which stock macOS does
+# not ship: this watchdog used to refuse to run at all there.
+#
+# withlock.py exits 75 when the lock is held. Any other non-zero is a failure of
+# the tool, not a busy lock, and must not be reported as one -- standing down on
+# an error means a watchdog that never runs and always sounds fine.
+# `withlock.py ...; LOCK_RC=$?` does not work here: under `set -e` the failing
+# call aborts the script before the assignment runs, so neither branch below is
+# ever reached. The `||` puts it in a condition context, which is what exempts
+# it.
 #
 # RUN MODE TAKES IT OR STANDS DOWN; AN OPERATOR'S GESTURE WAITS FOR IT. A timer
 # fire that skips one turn loses nothing, because the next fire is
@@ -763,21 +775,22 @@ command -v flock >/dev/null 2>&1 \
 # holds the lock through its own stop, and another operator's restart holds it
 # for the drain, stop and start bounds together -- so these wait rather than
 # fail on contact, and refuse only once TICK_LOCK_WAIT_SECONDS is gone.
+LOCK_BUSY=75
 LOCK_RC=0
-if [[ "$MODE" == "run" ]]; then
-  flock -n 9 || LOCK_RC=$?
-else
-  log "waiting up to ${TICK_LOCK_WAIT_SECONDS}s for the supervise lock"
-  flock -w "$TICK_LOCK_WAIT_SECONDS" 9 || LOCK_RC=$?
+LOCK_WAIT=0
+if [[ "$MODE" != "run" ]]; then
+  LOCK_WAIT="$TICK_LOCK_WAIT_SECONDS"
+  log "waiting up to ${LOCK_WAIT}s for the supervise lock"
 fi
-if [[ $LOCK_RC -eq 1 ]]; then
+LOCK_ERR="$("$SKILL_DIR/withlock.py" --fd 9 "$SUPERVISE_LOCK" "$LOCK_WAIT" 2>&1)" || LOCK_RC=$?
+if [[ $LOCK_RC -eq $LOCK_BUSY ]]; then
   if [[ "$MODE" == "run" ]]; then
     log "another supervisor holds the lock; standing down"
     exit 0
   fi
   die "another supervisor still holds $SUPERVISE_LOCK after ${TICK_LOCK_WAIT_SECONDS}s, so $MODE did not run. The tick is unchanged. Run $MODE again once that supervisor finishes."
 elif [[ $LOCK_RC -ne 0 ]]; then
-  die "flock failed with exit $LOCK_RC; refusing to run unlocked"
+  die "withlock.py could not lock $SUPERVISE_LOCK (exit $LOCK_RC: $LOCK_ERR); refusing to run unlocked"
 fi
 
 # An unreadable registry is its own answer, and the modes answer it differently.
@@ -908,7 +921,7 @@ elif [[ "$LIVE_TICKS" -eq 0 ]]; then
   # corpse of the last tick and its state is the reason the board stopped.
   log "$TICK_AGENT_NAME is not running (newest is $ID, state=$STATE)"
   start_agent
-elif [[ "$STATE" == "working" && "$IDLE" != "None" ]] \
+elif tick_mid_turn && [[ "$IDLE" != "None" ]] \
      && awk "BEGIN{exit !($IDLE > $TICK_STALL_MINUTES)}"; then
   log "$TICK_AGENT_NAME wedged: mid-turn and silent for ${IDLE}m (> ${TICK_STALL_MINUTES}m)"
   repair_tick

@@ -5,10 +5,10 @@
 #
 # `--reason` is required on `--resume --role build`, refused everywhere else,
 # and only `ci-fix`, `fix` or `retry` are valid. The row it produces carries
-# `role` and `reason`; a resume of any other role keeps the row it always
-# wrote, with no `role` key at all, so reconcile.py's plan_rounds -- which
-# counts rows with role=plan -- cannot double-count a build resume as a plan
-# one.
+# `role` and `reason`. A resume of any other role carries its `role` and no
+# `reason`: reconcile.py's plan_rounds counts plan rounds from dispatch.sh's own
+# role=plan row, so the tick no longer hand-writes one, and a build resume can
+# never be counted as a plan one.
 #
 # Drives the real dispatch.sh through tests/lib/dispatch-fixture.sh, the same
 # fixture test-dispatch-spawns-on-the-fallback-tier.sh uses: `claude` is the
@@ -111,14 +111,14 @@ else
   bad "a build resume with --reason ci-fix logs role build and reason ci-fix: got [$row]"
 fi
 
-# --- a plan resume's row carries no role key --------------------------------
+# --- a plan resume's row says role plan, and no reason -----------------------
 dispatch_fixture_run --ticket RSN-5 --role plan --attempt 1
 dispatch_fixture_resume --ticket RSN-5 --role plan --attempt 1
 row="$(last_resume_row RSN-5)"
-if [[ -n "$row" && "$row" != *'"role"'* ]]; then
-  ok "a plan resume's row has no role key"
+if [[ "$row" == *'"role":"plan"'* && "$row" != *'"reason"'* ]]; then
+  ok "a plan resume's row says role plan and carries no reason"
 else
-  bad "a plan resume's row has no role key: got [$row]"
+  bad "a plan resume's row says role plan and carries no reason: got [$row]"
 fi
 
 [[ "$fail" -eq 0 ]] && printf 'PASS: a build resume states its reason\n'

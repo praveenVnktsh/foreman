@@ -2,9 +2,10 @@
 # Spawn (or resume) one detached board agent in its own git worktree.
 #
 # The card in Linear is the lock. This script assumes the caller has ALREADY
-# moved the card out of Todo — into Plan for a fresh build, since that is where
-# a dispatched card starts. A spawn that precedes the move gets dispatched twice
-# by the next tick.
+# moved the card out of Todo -- into Plan for a `needs-plan` card's plan agent,
+# into In Progress for a card built straight from Todo. A spawn that precedes
+# the move gets dispatched twice by the next tick. Nothing here requires a plan
+# before a build: whether a card is planned first is the tick's call.
 #
 #   dispatch.sh --ticket ABC-42 --role plan   --attempt 1 --prompt-file plan.md
 #   dispatch.sh --ticket ABC-42 --role build  --attempt 1 --prompt-file brief.md
@@ -16,6 +17,10 @@
 #               --prompt-file cleanup.md
 #
 # Prints the resolved agent id on success.
+#
+# A refusal that is not the ticket's fault says "NOT a failure of ticket" and
+# must not cost the card an attempt. A halted board refuses with exit
+# 3 (HALTED_EXIT below), so a caller can tell it from a dispatch that failed.
 set -euo pipefail
 
 SKILL_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -25,6 +30,11 @@ source "$SKILL_DIR/config.sh"
 # Strips TMPDIR from the preflight, resume and spawn calls below. See the
 # note above `agent_tmp_for` for why.
 NO_TMPDIR=(env -u TMPDIR)
+
+# The exit status of a refusal on a halted board. Distinct from 1, which every
+# other refusal and failure shares, because a halt is the one refusal a caller
+# should not retry until an operator acts.
+HALTED_EXIT=3
 
 TICKET="" ROLE="" ATTEMPT="" SLOT="" REF="" PROMPT_FILE="" RESUME="" REASON=""
 while [[ $# -gt 0 ]]; do
@@ -48,8 +58,8 @@ done
 [[ -n "$PROMPT_FILE" && -r "$PROMPT_FILE" ]] || die "--prompt-file must be readable"
 
 # --reason is required on a build resume and refused everywhere else: it feeds
-# reconcile.py's build_attempts arithmetic (a ci-fix or retry resume charges an
-# attempt, a fix resume does not), so a resume it cannot classify must not
+# reconcile.py's build_attempts arithmetic (a ci-fix resume charges an attempt,
+# a fix or retry resume does not), so a resume it cannot classify must not
 # proceed silently, and a role or spawn that arithmetic never reads must not
 # carry one to go stale.
 REASON_BAD=""
@@ -66,6 +76,18 @@ fi
 NAME="$(agent_name "$TICKET" "$ROLE" "${ATTEMPT}${SLOT}")"
 PROMPT="$(cat "$PROMPT_FILE")"
 [[ -n "${PROMPT//[[:space:]]/}" ]] || die "prompt file is empty"
+
+# A HALTED BOARD DISPATCHES NOTHING, however this script is called. `boardctl
+# halt` writes this file, and SKILL.md tells the tick to skip a halted board --
+# but that is prose, and a resume or a hand-run dispatch never read it. Checked
+# before the preflight, so a halted board costs no probe either.
+if [[ -e "$INSTANCE_HOME/HALT" ]]; then
+  printf 'foreman: board %s is halted (%s exists); refusing to dispatch %s.
+This is NOT a failure of ticket %s and must not consume its attempt budget.
+Run `bin/boardctl resume %s` to dispatch again.\n' \
+    "$INSTANCE" "$INSTANCE_HOME/HALT" "$NAME" "$TICKET" "$INSTANCE" >&2
+  exit "$HALTED_EXIT"
+fi
 
 # Never spawn an agent into a machine that cannot build. On 2026-08-02 two
 # consecutive attempts on one card were lost to a `/tmp` over its user quota:
@@ -117,26 +139,32 @@ fi
 # is the same silence this comment's own 2026-09-01 paragraph records, reached
 # the other way round. reconcile.py's stderr is not captured, so whatever it
 # could not read is named above this refusal.
-if ! HELD="$("$SKILL_DIR/reconcile.py" --host-slots)"; then
-  die "could not count the machine's slots; refusing to dispatch $NAME.
+#
+# Refuses -- dies -- when this dispatch would take a slot past either ceiling,
+# and returns when it may go ahead. Run twice: once up front, so the ordinary
+# refusal comes before any worktree is cut, and again under the dispatch lock
+# right before the spawn, where the answer is the one that counts.
+check_ceilings() {
+  if ! HELD="$("$SKILL_DIR/reconcile.py" --host-slots)"; then
+    die "could not count the machine's slots; refusing to dispatch $NAME.
 reconcile.py's own message is above: a boards.toml that will not load, or
 foreman's own scripts being unrunnable.
 This is NOT a failure of ticket $TICKET and must not consume its attempt budget.
 Repair the machine, then dispatch again at the same attempt number."
-fi
-# `--host-slots` counts every board declared in this machine's boards.toml and
-# keys them by the BARE board name. There is one foreman, so a board name is
-# already unique here; the key used to carry an installation segment, and
-# reading it with the bare name made every lookup below miss, `held` come back
-# empty, and this board's own ceiling pass a dispatch through however many
-# cards were already in flight -- the gate disabled with no error at all. The
-# shape lives in reconcile.py:host_slots and is spelled once on each side.
-SLOT_KEY="$INSTANCE"
-# No `try:` around the parse and no `|| true` on the pipeline any more. HELD is
-# what json.dump wrote a moment ago, so a parse that fails here says python3
-# itself is broken, and answering "this card holds no slot" to that is the
-# disabled gate again.
-ALREADY_HOLDS="$(printf '%s' "$HELD" | python3 -c '
+  fi
+  # `--host-slots` counts every board declared in this machine's boards.toml and
+  # keys them by the BARE board name. There is one foreman, so a board name is
+  # already unique here; the key used to carry an installation segment, and
+  # reading it with the bare name made every lookup below miss, `held` come back
+  # empty, and this board's own ceiling pass a dispatch through however many
+  # cards were already in flight -- the gate disabled with no error at all. The
+  # shape lives in reconcile.py:host_slots and is spelled once on each side.
+  SLOT_KEY="$INSTANCE"
+  # No `try:` around the parse and no `|| true` on the pipeline any more. HELD is
+  # what json.dump wrote a moment ago, so a parse that fails here says python3
+  # itself is broken, and answering "this card holds no slot" to that is the
+  # disabled gate again.
+  ALREADY_HOLDS="$(printf '%s' "$HELD" | python3 -c '
 import json, sys
 d = json.load(sys.stdin)
 board, ticket = sys.argv[1], sys.argv[2]
@@ -145,28 +173,28 @@ print("yes" if ticket in held else "")
 ' "$SLOT_KEY" "$TICKET")" || die "could not read the slot count reconcile.py printed; refusing to dispatch $NAME.
 This is NOT a failure of ticket $TICKET and must not consume its attempt budget."
 
-if [[ -z "$ALREADY_HOLDS" ]]; then
-  # SAY THAT THIS BOARD WANTS A SLOT, before asking whether it may have one.
-  # `--may-dispatch` reserves a floor only for boards that are asking, so a
-  # board that never records the ask is read as idle and reserves nothing --
-  # it would win its own dispatches and lose every slot it is owed to whichever
-  # board asked most recently.
-  #
-  # Here, and not at the top of the script: a card that ALREADY holds a slot is
-  # not asking for a new one, and stamping for it would keep a board's floor
-  # reserved on the strength of resumes and fix-dispatches alone.
-  #
-  # A failed stamp WARNS rather than dies. It costs this board its share until
-  # the next pass, which is unfairness and not a wrong dispatch, and every
-  # cause of it -- an unwritable FOREMAN_HOME, a boards.toml that will not load
-  # -- makes the two gates below die with a message that names the real fault.
-  # Killing the card here would spend an attempt on a machine fault instead.
-  if ! "$SKILL_DIR/reconcile.py" --wants-slot "$INSTANCE"; then
-    printf 'foreman: could not record that %s wants a slot; it reserves nothing until the next pass\n' \
-      "$INSTANCE" >&2
-  fi
-  # This board's own ceiling first, then the machine's.
-  OWN="$(printf '%s' "$HELD" | python3 -c '
+  if [[ -z "$ALREADY_HOLDS" ]]; then
+    # SAY THAT THIS BOARD WANTS A SLOT, before asking whether it may have one.
+    # `--may-dispatch` reserves a floor only for boards that are asking, so a
+    # board that never records the ask is read as idle and reserves nothing --
+    # it would win its own dispatches and lose every slot it is owed to whichever
+    # board asked most recently.
+    #
+    # Here, and not at the top of the script: a card that ALREADY holds a slot is
+    # not asking for a new one, and stamping for it would keep a board's floor
+    # reserved on the strength of resumes and fix-dispatches alone.
+    #
+    # A failed stamp WARNS rather than dies. It costs this board its share until
+    # the next pass, which is unfairness and not a wrong dispatch, and every
+    # cause of it -- an unwritable FOREMAN_HOME, a boards.toml that will not load
+    # -- makes the two gates below die with a message that names the real fault.
+    # Killing the card here would spend an attempt on a machine fault instead.
+    if ! "$SKILL_DIR/reconcile.py" --wants-slot "$INSTANCE"; then
+      printf 'foreman: could not record that %s wants a slot; it reserves nothing until the next pass\n' \
+        "$INSTANCE" >&2
+    fi
+    # This board's own ceiling first, then the machine's.
+    OWN="$(printf '%s' "$HELD" | python3 -c '
 import json, sys
 d = json.load(sys.stdin)
 board, board_max = sys.argv[1], int(sys.argv[2])
@@ -176,25 +204,27 @@ if len(held) >= board_max:
     print(f"board {board} holds {len(held)} of {board_max} slots: {names}")
 ' "$SLOT_KEY" "$MAX_CONCURRENT")" || die "could not weigh this board against its own ceiling; refusing to dispatch $NAME.
 This is NOT a failure of ticket $TICKET and must not consume its attempt budget."
-  # Refused the same way and for the same reason as `--host-slots` above: this
-  # is the half of the arithmetic that weighs every OTHER board on the machine,
-  # so a failure here is a machine ceiling nobody checked.
-  if ! MACHINE="$(HOST_MAX_CONCURRENT="$HOST_MAX_CONCURRENT" \
-    "$SKILL_DIR/reconcile.py" --may-dispatch "$INSTANCE")"; then
-    die "could not weigh this machine's ceiling; refusing to dispatch $NAME.
+    # Refused the same way and for the same reason as `--host-slots` above: this
+    # is the half of the arithmetic that weighs every OTHER board on the machine,
+    # so a failure here is a machine ceiling nobody checked.
+    if ! MACHINE="$(HOST_MAX_CONCURRENT="$HOST_MAX_CONCURRENT" \
+      "$SKILL_DIR/reconcile.py" --may-dispatch "$INSTANCE")"; then
+      die "could not weigh this machine's ceiling; refusing to dispatch $NAME.
 reconcile.py's own message is above.
 This is NOT a failure of ticket $TICKET and must not consume its attempt budget.
 Repair the machine, then dispatch again at the same attempt number."
-  fi
-  VERDICT="${OWN:-$MACHINE}"
-  if [[ -n "$VERDICT" ]]; then
-    die "at the concurrency ceiling; refusing to dispatch $NAME.
+    fi
+    VERDICT="${OWN:-$MACHINE}"
+    if [[ -n "$VERDICT" ]]; then
+      die "at the concurrency ceiling; refusing to dispatch $NAME.
 $VERDICT
 This is NOT a failure of ticket $TICKET and must not consume its attempt budget.
 Wait for a card to release a slot, or raise the limit deliberately in the
 target's board.toml (MAX_CONCURRENT) or this machine's boards.toml (priority)."
+    fi
   fi
-fi
+}
+check_ceilings
 
 # The model follows the STAGE, not the machine and not a global default. See
 # PLAN_MODEL in config.sh for why the plan gets the strongest model and the
@@ -300,10 +330,49 @@ BUDGET=()
 [[ -z "$MAX_BUDGET_USD" ]] || BUDGET=(--max-budget-usd "$MAX_BUDGET_USD")
 
 if [[ -n "$BOARD_DRY_RUN" ]]; then
+  VERB="spawn"
+  [[ -z "$RESUME" ]] || VERB="resume"
   printf 'DRY RUN: would %s %s (model=%s worktree=%s ref=%s)\n' \
-    "${RESUME:+resume}${RESUME:-spawn}" "$NAME" "$MODEL" "$WORKTREE" "${REF:-origin/main}"
+    "$VERB" "$NAME" "$MODEL" "$WORKTREE" "${REF:-origin/main}"
   exit 0
 fi
+
+# THE MACHINE'S DISPATCH LOCK, held from the second ceiling check through the
+# spawn row, so that check and act are one step. The ceilings are counted from
+# history.jsonl, and a card holds a slot only once its spawn row is written.
+# Two dispatches -- two boards' slices, or the tick and a hand-run dispatch --
+# could otherwise both count N-1 held, both pass, and both spawn, putting the
+# machine one past HOST_MAX_CONCURRENT with every gate reporting success.
+#
+# Machine-wide, under FOREMAN_HOME, because HOST_MAX_CONCURRENT is. Held on fd 8
+# of this shell (withlock.py --fd), so the gate and the spawn keep this
+# script's functions and variables. The hold is seconds: two reconcile.py reads
+# and the adapter's spawn. The worktree cut and the bootstrap, which can take
+# minutes, run before it; the dispatch marker (below) protects that worktree
+# from a sweep meanwhile.
+#
+# Every child that outlives this script closes fd 8 (`8>&-`). A detached agent
+# that inherited it would hold the lock for its whole run, and every later
+# dispatch would wait for it and then refuse.
+DISPATCH_LOCK="$FOREMAN_HOME/dispatch.lock"
+DISPATCH_LOCK_WAIT_SECONDS=120
+LOCK_BUSY=75
+take_dispatch_lock() {
+  local rc=0 err
+  exec 8>>"$DISPATCH_LOCK" || die "cannot open $DISPATCH_LOCK; refusing to dispatch $NAME.
+This is NOT a failure of ticket $TICKET and must not consume its attempt budget."
+  err="$("$SKILL_DIR/withlock.py" --fd 8 "$DISPATCH_LOCK" "$DISPATCH_LOCK_WAIT_SECONDS" 2>&1)" || rc=$?
+  [[ "$rc" -eq 0 ]] && return 0
+  if [[ "$rc" -eq "$LOCK_BUSY" ]]; then
+    die "another dispatch held $DISPATCH_LOCK for ${DISPATCH_LOCK_WAIT_SECONDS}s; refusing to dispatch $NAME.
+This is NOT a failure of ticket $TICKET and must not consume its attempt budget.
+Dispatch again at the same attempt number."
+  fi
+  die "could not lock $DISPATCH_LOCK ($err); refusing to dispatch $NAME.
+This is NOT a failure of ticket $TICKET and must not consume its attempt budget.
+Repair the machine, then dispatch again at the same attempt number."
+}
+release_dispatch_lock() { exec 8>&-; }
 
 # This dispatch's board, pinned in the agent's own settings. A `claude --bg`
 # session is not started from this process: it is handed to a pre-warmed
@@ -341,6 +410,43 @@ if [[ -n "$RESUME" ]]; then
   # agent loses its context but the card keeps moving. See SKILL.md step 2.
   [[ -d "$WORKTREE" ]] || die "worktree $WORKTREE is gone; cannot resume $NAME.
 Dispatch fresh (drop --resume, use the next attempt number) instead."
+  # RESUMED ON THE HARNESS THAT SPAWNED IT. A tier may name a harness, so a
+  # card's agent can run on codex while this installation's default is claude,
+  # and the default adapter has no session of that name to resume -- the resume
+  # refused, and a card that only needed its fix applied went to a fresh
+  # attempt. The spawn row records the harness, and registry.sh's `resume
+  # --harness` goes straight to it. The flag is passed only for a harness other
+  # than the default: without it registry.sh finds the owner in the registry,
+  # which is also the answer for a row written before the harness was recorded.
+  RESUME_HARNESS="$(python3 - "$(card_dir "$TICKET")/history.jsonl" "$NAME" <<'PY'
+import json, sys
+path, name = sys.argv[1:]
+try:
+    lines = open(path).read().splitlines()
+except FileNotFoundError:
+    lines = []
+harness = ""
+for line in lines:
+    try:
+        event = json.loads(line).get("event") or {}
+    except ValueError:
+        continue
+    if event.get("action") == "spawn" and event.get("name") == name:
+        harness = event.get("harness") or ""
+print(harness)
+PY
+)" || die "could not read which harness spawned $NAME; refusing to resume it"
+  RESUME_ON=()
+  case "$RESUME_HARNESS" in
+    "") ;;
+    "$HARNESS") ;;
+    claude|codex|opencode) RESUME_ON=(--harness "$RESUME_HARNESS") ;;
+    *) die "$NAME's spawn row names harness '$RESUME_HARNESS', which is not one foreman knows" ;;
+  esac
+  # A resume can take a slot -- a plan resumed after its card parked and let
+  # its slot go -- so it passes the ceilings under the lock like a spawn.
+  take_dispatch_lock
+  check_ceilings
   # The adapter resolves the session by name and prints it; see its header for
   # the lookup rule (newest startedAt wins). A failed resolve or resume is the
   # adapter's own refusal, so its non-zero exit is this script's non-zero exit.
@@ -348,21 +454,23 @@ Dispatch fresh (drop --resume, use the next attempt number) instead."
   # `--settings` carries AGENT_SETTINGS on the resume path too: a resumed
   # build is a card agent, and a resume is handed to a spare the same way a
   # spawn is. config.sh records why every card agent needs CARD_AGENT_SETTINGS.
-  SESSION="$("${NO_TMPDIR[@]}" "$HARNESS_SH" resume --name "$NAME" --cwd "$WORKTREE" \
+  SESSION="$("${NO_TMPDIR[@]}" "$HARNESS_SH" resume "${RESUME_ON[@]+"${RESUME_ON[@]}"}" \
+    --name "$NAME" --cwd "$WORKTREE" \
     --prompt-file "$PROMPT_FILE" --settings "$AGENT_SETTINGS" \
     "${BUDGET[@]+"${BUDGET[@]}"}" \
-    "${SKIP_PERMISSIONS[@]+"${SKIP_PERMISSIONS[@]}"}")"
-  # A build resume states and logs why: reconcile.py's build_attempts charges a
-  # ci-fix or retry resume and not a fix resume, and it reads that off this
-  # row's own "role" and "reason" fields. A resume of any other role writes the
-  # row it always has -- no role key -- so reconcile.py's plan_rounds keeps
-  # counting only rows with role=plan and never double-counts one of these.
+    "${SKIP_PERMISSIONS[@]+"${SKIP_PERMISSIONS[@]}"}" 8>&-)"
+  # Every resume row names its role, so reconcile.py counts plan rounds from
+  # dispatch.sh's own row (role=plan) and nothing has to hand-write one. A
+  # build resume also states why: build_attempts charges a ci-fix resume and
+  # not a fix or retry one, and reads that off this row's "reason".
   if [[ "$ROLE" == "build" ]]; then
     card_log "$TICKET" "$(printf '{"action":"resume","name":"%s","session":"%s","role":"%s","reason":"%s"}' \
       "$NAME" "$SESSION" "$ROLE" "$REASON")"
   else
-    card_log "$TICKET" "$(printf '{"action":"resume","name":"%s","session":"%s"}' "$NAME" "$SESSION")"
+    card_log "$TICKET" "$(printf '{"action":"resume","name":"%s","session":"%s","role":"%s"}' \
+      "$NAME" "$SESSION" "$ROLE")"
   fi
+  release_dispatch_lock
   printf '%s\n' "$SESSION"
   exit 0
 fi
@@ -372,6 +480,26 @@ fi
 # `git worktree prune` can never reap — so add it explicitly instead.
 [[ "$ROLE" != "review" || -n "$REF" ]] || die "--ref is required for a review agent"
 mkdir -p "$(dirname "$WORKTREE")"
+
+# THE WORKTREE IS THIS DISPATCH'S UNTIL ITS AGENT REGISTERS. sweep.sh reaps a
+# worktree no registered agent is using, and between the cut below and the
+# spawn -- a bootstrap can take minutes -- no agent is registered in this one.
+# A sweep in that window deleted it under the dispatch. This marker names the
+# worktree and carries this script's pid; sweep.sh treats the worktree as live
+# while that pid is. Written BEFORE the worktree exists, and removed however
+# this script exits. A marker left by a SIGKILL names a dead pid, and sweep.sh
+# removes it.
+#
+# Written to a hidden file and renamed into place, so a sweep never reads a
+# marker that exists but holds no pid yet -- it removes one of those as dead.
+MARKER="$(dispatch_marker_for "$WORKTREE")"
+mkdir -p "$(dirname "$MARKER")"
+MARKER_TMP="$(dirname "$MARKER")/.$(basename "$MARKER").$$"
+trap 'rm -f "$MARKER" "$MARKER_TMP"' EXIT
+{ printf '%s\n' "$$" >"$MARKER_TMP" && mv -f "$MARKER_TMP" "$MARKER"; } \
+  || die "cannot write the dispatch marker $MARKER; refusing to dispatch $NAME.
+This is NOT a failure of ticket $TICKET and must not consume its attempt budget."
+
 export REPO TICKET WORKTREE ROLE REF
 # `branch_name` has to be exported as a FUNCTION, not just called before this
 # block and stashed in a variable, because the withlock.py-wrapped script below
@@ -381,8 +509,11 @@ export -f branch_name
 "$SKILL_DIR/withlock.py" "$REPO/.git/board-worktree.lock" 120 -- bash -c '
   set -euo pipefail
   git -C "$REPO" fetch --quiet origin
+  # A failed remove is said, not swallowed: the `worktree add` below then
+  # fails on the directory it left, and this is the line that names why.
   if [[ -d "$WORKTREE" ]]; then
-    git -C "$REPO" worktree remove -f -f "$WORKTREE" 2>/dev/null || true
+    git -C "$REPO" worktree remove -f -f "$WORKTREE" \
+      || printf "foreman: could not remove the old worktree %s\n" "$WORKTREE" >&2
   fi
   git -C "$REPO" worktree prune
   if [[ "$ROLE" == "review" ]]; then
@@ -399,7 +530,9 @@ export -f branch_name
   else
     git -C "$REPO" worktree add --quiet -B "$(branch_name "$TICKET")" "$WORKTREE" origin/main
   fi
-' || die "could not create worktree $WORKTREE (exit $?)"
+' || die "could not create worktree $WORKTREE (exit $?; the reason is above); refusing to dispatch $NAME.
+This is NOT a failure of ticket $TICKET and must not consume its attempt budget.
+Repair the repository or the machine, then dispatch again at the same attempt number."
 
 # The target's own setup step -- `uv sync`, `npm ci`, whatever a fresh checkout
 # needs before its test command can run at all -- against the worktree just cut
@@ -458,10 +591,16 @@ mkdir -p "$(agent_tmp_for "$WORKTREE")"
 # error, not an empty expansion. The `+` form below is the portable way to say
 # "expand only if set", and BUDGET and SKIP_PERMISSIONS are both empty on an
 # ordinary dispatch.
+#
+# The ceilings are asked again here, under the dispatch lock, and the lock is
+# held until the spawn row below is written: that row is what makes this card
+# count as holding a slot. See DISPATCH_LOCK.
+take_dispatch_lock
+check_ceilings
 SESSION="$("${NO_TMPDIR[@]}" "$SPAWN_ADAPTER" spawn --name "$NAME" --cwd "$WORKTREE" --model "$SPAWN_MODEL" \
   --prompt-file "$PROMPT_FILE" --add-dir "$BOARD_HOME" \
   --settings "$AGENT_SETTINGS" "${BUDGET[@]+"${BUDGET[@]}"}" \
-  "${SKIP_PERMISSIONS[@]+"${SKIP_PERMISSIONS[@]}"}")" \
+  "${SKIP_PERMISSIONS[@]+"${SKIP_PERMISSIONS[@]}"}" 8>&-)" \
   || die "spawned $NAME but the adapter never reported a session id"
 
 mkdir -p "$(card_dir "$TICKET")"
@@ -475,4 +614,5 @@ mkdir -p "$(card_dir "$TICKET")"
 # marks the model that was actually refused.
 card_log "$TICKET" "$(printf '{"action":"spawn","name":"%s","session":"%s","worktree":"%s","role":"%s","attempt":"%s","ref":"%s","model":"%s","first_choice":"%s","harness":"%s"}' \
   "$NAME" "$SESSION" "$WORKTREE" "$ROLE" "${ATTEMPT}${SLOT}" "$REF" "$MODEL" "$FIRST_CHOICE_MODEL" "$SPAWN_HARNESS")"
+release_dispatch_lock
 printf '%s\n' "$SESSION"
