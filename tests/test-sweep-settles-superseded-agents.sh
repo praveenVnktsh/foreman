@@ -96,7 +96,8 @@ agent r2 foreman/alpha/ABC-2/review-1  done    5203 "$(wt alpha ABC-2-review-1)"
 # ABC-3, in flight: two slots of one review round. A sibling is not a successor.
 agent a3 foreman/alpha/ABC-3/review-1a done    5301 "$(wt alpha ABC-3-review-1a)" "$t0"
 agent c3 foreman/alpha/ABC-3/review-1b working 5302 "$(wt alpha ABC-3-review-1b)" $(( t0 + 1000 ))
-# ABC-9 is Done, and ticket-mode sweep never ran for it.
+# ABC-9 is out of flight -- Done, or Needs Human waiting on a person -- and
+# ticket-mode sweep never ran for it.
 agent p9 foreman/alpha/ABC-9/plan-1    done    5901 "$(wt alpha ABC-9-plan-1)" "$t0"
 agent b9 foreman/alpha/ABC-9/build-1   done    5902 "$(wt alpha ABC-9)"        $(( t0 + 1000 ))
 agent r9 foreman/alpha/ABC-9/review-1  done    null "$(wt alpha ABC-9-review-1)" $(( t0 + 2000 ))
@@ -105,7 +106,7 @@ agent tk foreman/tick                  done    6001 "$target"                  "
 agent op operator-session              done    6002 "$target"                  "$t0"
 agent bt foreman/beta/ABC-1/plan-1     done    6003 "$(wt beta ABC-1-plan-1)"  "$t0"
 agent cl foreman/alpha/cleanup/cleanup-202609300000 done 6004 "$(wt alpha cleanup)" "$t0"
-mkdir -p "$(wt alpha ABC-1-plan-1)" "$(wt alpha ABC-2)"
+mkdir -p "$(wt alpha ABC-1-plan-1)" "$(wt alpha ABC-2)" "$(wt alpha ABC-9)"
 
 cards="$home/.foreman/instances/alpha/cards"
 mkdir -p "$cards/ABC-1" "$cards/ABC-2" "$cards/ABC-9"
@@ -145,11 +146,11 @@ untouched a3 done 5301 && untouched c3 working 5302 \
   || bad "ABC-3's review-1a was stopped by its sibling slot: $out"
 
 ! listed p9 && ! listed r9 \
-  && ok "a Done card's finished agents are settled without a ticket-mode sweep" \
+  && ok "a card out of flight has its finished agents settled without a ticket-mode sweep" \
   || bad "ABC-9's plan or review is still listed: $out"
-untouched b9 stopped null \
-  && ok "and its build is stopped, its row kept in case the card is picked up again" \
-  || bad "ABC-9's build is not stopped-and-kept: $(cat "$STUB_REGISTRY/b9" 2>/dev/null) $out"
+untouched b9 done 5902 \
+  && ok "but its resumable build is neither stopped nor forgotten: a person may send the card back" \
+  || bad "ABC-9's resumable build was stopped or forgotten: $(cat "$STUB_REGISTRY/b9" 2>/dev/null) $out"
 
 untouched tk done 6001 && ok "the tick is untouched" || bad "the tick was stopped or forgotten: $out"
 untouched op done 6002 && ok "a session foreman did not name is untouched" \
@@ -186,10 +187,13 @@ out="$(sweep --orphans)" || bad "sweep.sh --orphans exited non-zero: $out"
 [[ -d "$(wt alpha ABC-2)" ]] \
   && ok "the orphan pass after it leaves the live card's build worktree" \
   || bad "--orphans reaped ABC-2's build worktree after the settle pass: $out"
+[[ -d "$(wt alpha ABC-9)" ]] \
+  && ok "and the build worktree of a card out of flight" \
+  || bad "--orphans reaped ABC-9's build worktree after the settle pass: $out"
 
 # --- a second pass has nothing to do -----------------------------------------
 out="$(sweep --settle ABC-1 ABC-2 ABC-3)" || bad "a second sweep.sh --settle exited non-zero: $out"
-untouched f2 done 5202 && untouched b9 stopped null && untouched r2 done 5203 \
+untouched f2 done 5202 && untouched b9 done 5902 && untouched r2 done 5203 \
   && ok "a second pass settles nothing new and keeps the resumable builds" \
   || bad "a second pass changed the kept rows: $out"
 

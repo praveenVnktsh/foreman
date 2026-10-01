@@ -577,8 +577,8 @@ stop_round() {
 # supersede.py owns the rule for which rows are settled and how. It reads the
 # registry and prints one line per row: `stop` (idle, settle it), `forget`
 # (exited, and nothing will resume it) or `keep` (its card may still resume
-# it -- a resume needs the row, and on a live card the row must not be
-# `stopped`, or --orphans reaps the tree the resume runs in). Each poll runs
+# it -- a resume needs the row, and the row must not be `stopped`, or
+# --orphans reaps the tree the resume runs in). Each poll runs
 # it again, so a row stopped here turns up as `forget` or `keep` once its stop
 # lands. The stop loop is ticket mode's, bounded the same way.
 #

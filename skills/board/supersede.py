@@ -22,8 +22,8 @@ the in-flight tickets from argv, runs nothing and reads no environment.
               stop    the row is idle: stop it. Once it has exited, a later
                       pass reads it as exited and says forget or keep.
               forget  the row has exited and nothing will resume it.
-              keep    a later build round may resume the row, so it is not
-                      forgotten; on a live card it is not stopped either.
+              keep    a later build round may resume the row, so it is
+                      neither stopped nor forgotten.
                       Printed so the sweep can say why the row stays.
     stderr  one line per card left alone because a row of it is unreadable.
     exit 0  the registry was read. An empty stdout means nothing to settle.
@@ -57,10 +57,12 @@ still resumable. A forgotten row is gone, and resume dies "no agent named N to
 resume". Build rounds (fix, ci-fix, retry, rebuild) resume the build agent
 under the same name. So a build row is RESUMABLE when it is the newest row with
 its name and no build row of its card has a higher attempt: it is never
-forgotten, and on a live card it is not even stopped, because its row is what
-keeps `sweep.sh --orphans` off the worktree that round resumes into. A card
-that is gone has its build stopped and kept. Every other settleable row is
-forgettable:
+forgotten, and never stopped either, whether or not its card is in flight. Its
+unstopped row is what keeps `sweep.sh --orphans` off the worktree that round
+resumes into, and a card out of flight is not necessarily finished: one in
+Needs Human or Canceled waits for a person, who may send it back, and SKILL.md
+never sweeps it. Ticket mode stops the build once its card is truly over.
+Every other settleable row is forgettable:
 
 - an older fork: `--bg --resume` forks a new row under the same name, and the
   older one is never resumed again;
@@ -211,13 +213,14 @@ def resumable(row: Row, card: list[Row]) -> bool:
     return newest_of_name and latest_attempt
 
 
-def action_for(row: Row, card: list[Row], live: bool) -> str:
-    # A live card's resumable build is not stopped either. A stopped row no
+def action_for(row: Row, card: list[Row]) -> str:
+    # A resumable build is never stopped, in flight or not. A stopped row no
     # longer protects its cwd from `sweep.sh --orphans` (live_worktrees spares
-    # anything not `stopped`), so the card's worktree would go on the next
-    # orphan pass and the fix round that resumes into it would find none.
+    # anything not `stopped`), so the card's worktree and branch would go on
+    # the next orphan pass -- including a Needs Human card's, which SKILL.md
+    # leaves for a person -- and the round that resumes into it would find none.
     if resumable(row, card):
-        return KEEP if live or row.kind == EXITED else STOP
+        return KEEP
     return STOP if row.kind == IDLE else FORGET
 
 
@@ -231,7 +234,7 @@ def settle(cards: dict[str, list[Row]], in_flight: set[str]) -> list[str]:
                 continue
             if live and not superseded(row, card):
                 continue
-            lines.append(row.line(action_for(row, card, live)))
+            lines.append(row.line(action_for(row, card)))
     return lines
 
 

@@ -2577,9 +2577,10 @@ agent whose turn a later role or attempt on the same card has superseded (a
 newer fork of the same name counts, a sibling review slot does not), and every
 turn-complete agent of a card no longer in flight. Once a row has exited it is
 forgotten, unless it is the build a fix round would resume. Resuming needs that
-row, and on a card in flight it is not even stopped: a `stopped` row no longer
-spares its worktree from `--orphans`, and the resume runs in that worktree. A
-card no longer in flight has its build stopped and kept. It never
+row, and that build is not even stopped, in flight or not: a `stopped` row no
+longer spares its worktree from `--orphans`, and the resume runs in that
+worktree. A card in `Needs Human` keeps its build for the person who triages
+it; ticket mode settles it once the card is over. It never
 touches a `working` agent, the tick, the scheduled cleanup, or another board's
 agents, and never removes a transcript, a worktree or a slot. It exits non-zero
 when a stop does not land or the agent list cannot be read, so report that on
