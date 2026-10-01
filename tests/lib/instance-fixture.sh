@@ -143,3 +143,23 @@ fixture_add_installation() {
   "$repo_root/bin/installation.py" --write --home "$install_home" \
     --harness "$harness" ${models[@]+"${models[@]}"}
 }
+
+# fixture_link_board_skill <home>
+# Makes the board skill resolve to THIS repository for every harness under
+# <home>, by linking <repo>/skills/board into the directory each adapter's
+# skills-dir verb names for that HOME.
+#
+# supervise.sh's start_agent refuses to start a tick whose board skill does not
+# resolve to the install it runs from, so any test that starts a tick needs
+# this link, or it dies on the check before the stub it meant to drive runs.
+#
+# ln -sfn, so a second call replaces the link instead of nesting inside it.
+fixture_link_board_skill() {
+  local home="$1" repo_root harness dest
+  repo_root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd)"
+  for harness in claude codex opencode; do
+    dest="$(HOME="$home" "$repo_root/skills/board/harness/$harness.sh" skills-dir)"
+    mkdir -p "$dest"
+    ln -sfn "$repo_root/skills/board" "$dest/board"
+  done
+}

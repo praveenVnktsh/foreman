@@ -5,6 +5,7 @@
 #   install-skills.sh             link them into the harness's skill directory
 #   install-skills.sh --uninstall remove only the links this script made
 #   install-skills.sh --force     replace a colliding skill, backing it up first
+#   install-skills.sh --check NAME  exit 0 if NAME resolves to this install
 #
 # WHY THIS EXISTS. A tick agent runs the board skill through whichever harness
 # this foreman declares, and each harness resolves skills by name from its
@@ -26,12 +27,15 @@ set -euo pipefail
 die() { printf 'install-skills: %s\n' "$*" >&2; exit 1; }
 
 MODE="install"
+CHECK_NAME=""
 case "${1:-}" in
+  --check)     MODE="check"; CHECK_NAME="${2:-}"
+               [[ -n "$CHECK_NAME" ]] || die "--check needs a skill name" ;;
   --dry-run)   MODE="dry" ;;
   --uninstall) MODE="uninstall" ;;
   --force)     MODE="force" ;;
   "")          ;;
-  *)           die "unknown argument: $1 (expected --dry-run, --uninstall or --force)" ;;
+  *)           die "unknown argument: $1 (expected --dry-run, --uninstall, --force or --check NAME)" ;;
 esac
 
 HERE="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
@@ -87,6 +91,39 @@ MANIFEST="$FOREMAN_HOME/installed-skills"
 
 [[ -d "$SRC" ]] || die "no skills directory at $SRC"
 
+# Points at this install already? Then it is ours to replace without ceremony.
+ours() {
+  local link="$1" target
+  [[ -L "$link" ]] || return 1
+  target="$(cd -- "$(dirname -- "$link")" && readlink "$link")"
+  case "$target" in "$SRC"/*) return 0 ;; *) return 1 ;; esac
+}
+
+# --check NAME: does NAME resolve to this install right now? Read-only, and run
+# before the skill listing and the manifest, which it needs neither of.
+#
+# `ours` reads the link's text and nothing more, so a link into $SRC whose
+# directory is gone still passes it. That is the dangling link supervise.sh's
+# start_agent refuses a tick over, and this is the check it asks.
+if [[ "$MODE" == "check" ]]; then
+  link="$DEST/$CHECK_NAME"
+  target=""
+  [[ ! -L "$link" ]] || target="$(cd -- "$DEST" && readlink "$link")"
+  if [[ ! -e "$link" && ! -L "$link" ]]; then
+    reason="is missing"
+  elif [[ ! -L "$link" ]]; then
+    reason="is not a link"
+  elif ! ours "$link"; then
+    reason="points at $target, outside this install"
+  elif [[ ! -d "$link" ]]; then
+    reason="points at $target, which is not a directory"
+  else
+    exit 0
+  fi
+  printf 'install-skills: %s %s; expected a link to %s\n' "$link" "$reason" "$SRC/$CHECK_NAME" >&2
+  exit 1
+fi
+
 # `ls` rather than a glob so an empty directory is an error we can name.
 SKILLS="$(cd "$SRC" && ls -1 2>/dev/null || true)"
 [[ -n "$SKILLS" ]] || die "$SRC is empty; nothing to install"
@@ -111,14 +148,6 @@ done <<<"$SKILLS"
 # parser, or anything else that is not installed yet.
 PREVIOUS=""
 if [[ -f "$MANIFEST" ]]; then PREVIOUS="$(cat "$MANIFEST")"; fi
-
-# Points at this install already? Then it is ours to replace without ceremony.
-ours() {
-  local link="$1" target
-  [[ -L "$link" ]] || return 1
-  target="$(cd -- "$(dirname -- "$link")" && readlink "$link")"
-  case "$target" in "$SRC"/*) return 0 ;; *) return 1 ;; esac
-}
 
 # Is <name> one of the newline-separated names in <list>? `case` rather than
 # grep, so a name is never read as a pattern.

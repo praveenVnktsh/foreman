@@ -243,30 +243,50 @@ print(json.dumps({
 #
 # ALIVE IS NOT "NOT STOPPED". Measured 2026-09-14: a row from ten days earlier
 # sat in the registry with `state: working`, no pid, and a transcript silent
-# for 14112 minutes. A restart stopped the real tick, found that row, asked it
-# to stop eight times over 30 seconds, and refused to start a replacement
-# beside "a tick that is still live"; every timer fire after it did the same,
-# and the board ran no tick until an operator archived the row by hand. A stop
-# cannot land on a process that does not exist, so a row like that is a corpse,
-# not a tick, and is neither waited for nor counted.
+# for 14112 minutes. A restart could not stop it, refused to start a
+# replacement beside "a tick that is still live", and the board ran no tick
+# until an operator archived the row by hand. A stop cannot land on a process
+# that does not exist, so a row like that is a corpse, not a tick, and is
+# neither waited for nor counted.
 #
-# The rule is deliberately narrow. sweep.sh records why a bare "no pid" test is
-# dangerous -- the day a live agent is listed without one, that test kills it
-# -- so a row is a corpse only when it has no pid AND its transcript is known
-# and has been silent longer than TICK_DEAD_MINUTES, or is gone and the row is
-# older than that. A row with a pid is alive whatever its transcript says; the
-# wedged branch below handles it, by stopping a process that exists. A row
-# whose transcript cannot be located (no cwd or session id) is alive: nothing
-# is known against it.
+# A ROW WITH NO PID IS A CORPSE ONCE IT IS OLDER THAN TICK_START_TIMEOUT_SECONDS,
+# whatever its transcript says. The rule used to add "and its transcript has
+# been silent longer than TICK_DEAD_MINUTES", and 2026-09-30 is why it no longer
+# does. A tick ran one pass and ended its turn: once it deferred to a stale tick
+# record, once it could not load its skill because the board skill link pointed
+# at a directory that did not exist. `claude agents --json` kept listing it as
+# `working` with `pid: null` while its jobs state.json said `done`. Its
+# transcript was only minutes old, so the silence test called it alive, run
+# mode logged "healthy (state=working idle=13.7m)", and nothing dispatched for
+# about 40 minutes until an operator ran `claude rm` on it.
+#
+# Why dropping the transcript test is still safe. sweep.sh records the danger
+# of a bare "no pid" test -- the day a live agent is listed without one, that
+# test kills it -- and three facts answer it here:
+#
+#   * Every live Claude row measured has a pid. claude.sh's 2026-09-23
+#     measurement found 1 idle row and 1 working row with a pid, and every
+#     other row without one had exited.
+#   * The detached adapters own the pid. They list a dead process as
+#     `stopped` with `pid: null`, so their rows reach this rule only if a
+#     record outlived its process some other way, and then it is a corpse too.
+#   * The grace covers the one live row that has no pid yet: one the harness
+#     has registered but not started. TICK_START_TIMEOUT_SECONDS is how long a
+#     restart already waits for a new tick to appear, so a row older than that
+#     with no process has missed its start.
+#
+# A row with a pid is alive whatever its transcript says; the wedged branch
+# below handles it, by stopping a process that exists.
 #
 # The rows come from the adapter's list, and each transcript path from its
-# transcript verb, for the reason inspect() gives. On codex and opencode a row
-# never reaches the corpse rule: that adapter owns the pid and already lists a
-# row whose process is gone as stopped.
+# transcript verb, for the reason inspect() gives; the transcript only feeds
+# the idle minutes inspect() reports. A row another harness left behind -- an
+# opencode tick from before the switch to claude -- is judged the same way: if
+# its process is gone it is a corpse, not a tick to defer to.
 tick_rows() {
   "$HARNESS_SH" list 2>/dev/null | python3 -c '
 import json,os,subprocess,sys,time
-want, dead_minutes, harness = sys.argv[1], float(sys.argv[2]), sys.argv[3]
+want, start_grace, harness = sys.argv[1], float(sys.argv[2]), sys.argv[3]
 # Exit non-zero on an unreadable registry rather than returning nothing, which
 # the caller cannot tell apart from "no agents are running" -- and which it
 # would answer by starting a second loop agent.
@@ -283,27 +303,23 @@ for a in agents:
     if not isinstance(a,dict) or a.get("name")!=want: continue
     cwd=a.get("cwd") or ""; sid=a.get("sessionId") or ""
     started=a.get("startedAt") or 0
-    idle=None; transcript=None
+    idle=None
     if cwd and sid:
         # The adapter says where this harness keeps the transcript. An answer it
-        # cannot give leaves the transcript unknown, and an unknown transcript is
-        # never evidence of death.
+        # cannot give leaves the idle minutes unknown.
         try:
             p=subprocess.run([harness,"transcript",cwd,sid],capture_output=True,text=True,timeout=15).stdout.strip()
         except (OSError,subprocess.SubprocessError):
             p=""
-        if p:
-            transcript=os.path.exists(p)
-            if transcript: idle=round((now-os.path.getmtime(p))/60,1)
+        if p and os.path.exists(p): idle=round((now-os.path.getmtime(p))/60,1)
     alive=a.get("state")!="stopped"
-    if alive and not a.get("pid") and transcript is not None:
-        silent = idle is not None and idle > dead_minutes
-        gone = not transcript and started and (now-started/1000)/60 > dead_minutes
-        if silent or gone: alive=False
+    # A row with no startedAt has no age to be young by, so it gets no grace.
+    starting = started and (now-started/1000) <= start_grace
+    if alive and not a.get("pid") and not starting: alive=False
     print("%s\t%s\t%s\t%s\t%s\t%s\t%s"%(a.get("id") or "?", a.get("state") or "?",
           "yes" if alive else "no", "None" if idle is None else idle, started, sid,
           a.get("status") or ""))
-' "$TICK_AGENT_NAME" "$TICK_DEAD_MINUTES" "$HARNESS_SH"
+' "$TICK_AGENT_NAME" "$TICK_START_TIMEOUT_SECONDS" "$HARNESS_SH"
 }
 
 # The ids in a listing that are alive, one per line.
@@ -318,9 +334,9 @@ live_tick_ids() { # <tick_rows listing>
 log_corpse_ticks() {
   local rows
   rows="$(tick_rows)" || return 0
-  printf '%s\n' "$rows" | awk -F'\t' '$1 != "" && $2 != "stopped" && $3 == "no" { print $1 "\t" $2 "\t" $4 }' \
-  | while IFS=$'\t' read -r id state idle; do
-      log "ignoring $TICK_AGENT_NAME ($id): the registry says $state, but it has no pid and its transcript is ${idle}m silent or gone; a stop cannot land on a process that does not exist. Archive the row."
+  printf '%s\n' "$rows" | awk -F'\t' '$1 != "" && $2 != "stopped" && $3 == "no" { print $1 "\t" $2 }' \
+  | while IFS=$'\t' read -r id state; do
+      log "ignoring $TICK_AGENT_NAME ($id): the registry says $state, but it has no pid and is older than the ${TICK_START_TIMEOUT_SECONDS}s start grace; a stop cannot land on a process that does not exist. Archive the row."
     done
 }
 
@@ -376,6 +392,17 @@ stop_agent() {
 }
 
 start_agent() {
+  # REFUSE A TICK THAT CANNOT LOAD /board, before anything else, a dry run
+  # included. On 2026-09-30 the board skill link in the harness's skills
+  # directory pointed at an install path that did not exist. The tick started,
+  # could not load its skill, and ended its turn. Its row then read as a working
+  # tick, so the watchdog called it healthy and nothing dispatched for about 40
+  # minutes. Starting one more such tick fixes nothing and hides the fault, so
+  # this dies and names the link instead.
+  local check_err
+  check_err="$("$INSTALL_ROOT/bin/install-skills.sh" --check board 2>&1 >/dev/null)" \
+    || die "the board skill does not resolve to this install: ${check_err:-install-skills.sh --check board failed with no message}. No tick was started. Run $INSTALL_ROOT/bin/install-skills.sh to link it."
+
   # THE LOOP IS THE ADAPTER'S CONCERN. `--loop-minutes` says the tick repeats
   # and how often, and each harness honours it the way it can: Claude loops
   # inside one session, so its adapter ignores the number, and the detached

@@ -121,6 +121,7 @@ mkdir -p "$target"
 git -C "$target" init -q -b main
 fixture_board_toml "$target"
 fixture_add_board "$home" demo "$target"
+fixture_link_board_skill "$home"
 tick_argv="$work/tick-argv"; registry="$work/registry.json"
 printf '[]\n' >"$registry"
 mkdir -p "$home/.local/bin"

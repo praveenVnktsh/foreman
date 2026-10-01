@@ -72,19 +72,18 @@ BOARDS="$(FOREMAN_HOME="$FOREMAN_HOME" "$INSTALL_ROOT/bin/boards.py" --list 2>/d
 # healthy, and does nothing. Worse, if some other project left a skill of the
 # same name at that path, the tick runs THAT instead -- which happened on
 # 2026-09-01, putting a second dispatcher on a live board.
+#
+# Whether it resolves is install-skills.sh --check's answer, the same one
+# supervise.sh asks before it starts a tick. A copy of the rule here read only
+# the link's text, so it passed a link into this install whose directory was
+# gone: the 2026-09-30 tick that could not load /board.
 SKILLS_DIR="$("$HARNESS_SH" skills-dir)"
 [[ -n "$SKILLS_DIR" ]] || die "$HARNESS_SH skills-dir printed nothing"
 BOARD_LINK="$SKILLS_DIR/board"
-board_is_ours() {
-  [[ -L "$BOARD_LINK" ]] || return 1
-  case "$(cd -- "$(dirname -- "$BOARD_LINK")" && readlink "$BOARD_LINK")" in
-    "$INSTALL_ROOT/skills"/*) return 0 ;; *) return 1 ;;
-  esac
-}
-if ! board_is_ours; then
-  if [[ -e "$BOARD_LINK" ]]; then
-    die "$BOARD_LINK exists but is not foreman's board skill.
-A tick started now would run that skill instead of this one. Inspect it, then run
+if ! CHECK_ERR="$("$INSTALL_ROOT/bin/install-skills.sh" --check board 2>&1 >/dev/null)"; then
+  if [[ -e "$BOARD_LINK" || -L "$BOARD_LINK" ]]; then
+    die "$BOARD_LINK exists but is not foreman's board skill ($CHECK_ERR).
+A tick started now would run that skill instead of this one, or none. Inspect it, then run
   $INSTALL_ROOT/bin/install-skills.sh          (refuses to replace it)
   $INSTALL_ROOT/bin/install-skills.sh --force  (replaces it, keeping a backup)"
   fi

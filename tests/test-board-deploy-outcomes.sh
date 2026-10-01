@@ -111,6 +111,7 @@ stub_claude() {
   # since supervise.sh's config.sh load doesn't care what REPO points to
   # either (DRY RUN never reaches it beyond the log line).
   fixture_add_instance "$home" demo "$fixture_repo"
+  fixture_link_board_skill "$home"
   echo "$home"
 }
 
