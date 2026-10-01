@@ -20,6 +20,8 @@ ok()  { printf 'ok   %s\n' "$1"; }
 bad() { printf 'FAIL %s\n' "$1" >&2; fail=1; }
 
 home="$work/home"
+source "$root/tests/lib/instance-fixture.sh"
+fixture_link_board_skill "$home"
 fh="$home/.foreman"
 mkdir -p "$fh/instances" "$work/bin" "$work/alpha" "$work/beta"
 printf 'k\n' > "$fh/linear.key"; chmod 600 "$fh/linear.key"

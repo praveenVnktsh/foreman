@@ -42,6 +42,7 @@ fixture_board_toml "$target"
 
 home="$work/home"
 fixture_add_board "$home" demo "$target"
+fixture_link_board_skill "$home"
 
 registry="$work/registry.json"
 stopped="$work/stopped.log"
@@ -57,13 +58,16 @@ write_registry() { # <tick-state> [extra tick rows, each "<id>:<state>:<age seco
   python3 - "$registry" "$@" <<'PY'
 import json, sys, time
 path, tick_state, extra = sys.argv[1], sys.argv[2], sys.argv[3:]
+# A live row carries a pid, as real ones do: supervise.sh calls a pid-less row a
+# corpse once it is past the start grace, whatever state it claims.
 # Recent timestamps, so no run-mode staleness threshold fires and each case
 # below tests the thing it names. An epoch-millisecond 1000 makes every agent
 # read as 56 years old, which sends every timer fire down the recycle branch.
 now = int(time.time() * 1000)
 agents = [
     {"id": "tick-1", "name": "foreman/tick", "state": tick_state,
-     "startedAt": now - 60_000, "cwd": "", "sessionId": "session-tick-1"},
+     "startedAt": now - 60_000, "cwd": "", "sessionId": "session-tick-1",
+     "pid": 41001},
     {"id": "card-a", "name": "foreman/demo/build/ABC-1-1", "state": "working",
      "startedAt": now - 50_000, "cwd": "", "sessionId": "session-card-a"},
     {"id": "card-b", "name": "foreman/demo/review/ABC-2-1", "state": "working",
@@ -75,7 +79,7 @@ for n, spec in enumerate(extra, start=1):
     tid, state, age_seconds = spec.split(":")
     agents.append({"id": tid, "name": "foreman/tick", "state": state,
                    "startedAt": now - int(age_seconds) * 1000,
-                   "cwd": "", "sessionId": "session-" + tid})
+                   "cwd": "", "sessionId": "session-" + tid, "pid": 41002 + n})
 json.dump(agents, open(path, "w"))
 PY
 }
@@ -152,7 +156,8 @@ path, name = sys.argv[1], sys.argv[2]
 agents = json.load(open(path))
 newest = max([a["startedAt"] for a in agents] + [0])
 agents.append({"id": "tick-2", "name": name, "state": "idle",
-               "startedAt": newest + 1, "cwd": "", "sessionId": "session-tick-2"})
+               "startedAt": newest + 1, "cwd": "", "sessionId": "session-tick-2",
+               "pid": 41099})
 json.dump(agents, open(path, "w"))
 PY
   exit 0

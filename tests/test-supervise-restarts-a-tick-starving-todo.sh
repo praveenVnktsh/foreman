@@ -65,6 +65,7 @@ printf '[limits]\nmax_concurrent = 3\n' >>"$target/board.toml"
 home="$work/home"
 fh="$home/.foreman"
 fixture_add_board "$home" demo "$target"
+fixture_link_board_skill "$home"
 printf 'LINEAR_PROJECT_ID=project-1\nSTATE_TO_PICK_UP=state-todo\n' >"$fh/instances/demo/ids.env"
 
 # One card in review holds a slot, so the board has cards in flight AND free

@@ -43,6 +43,7 @@ fixture_board_toml "$fixture_repo"
 
 home="$work_dir/home"
 fixture_add_instance "$home" demo "$fixture_repo"
+fixture_link_board_skill "$home"
 board_home="$work_dir/board-home"
 
 marker="$work_dir/bg-agent-started"
