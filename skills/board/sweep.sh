@@ -8,8 +8,13 @@
 #   sweep.sh --orphans            # this board's trees with no live agent; the
 #                                 # harness also reaps exited agents' records
 #                                 # older than SWEEP_RETENTION_DAYS
+#   sweep.sh --settle ABC-7 ABC-9 # tickets still in flight; every finished
+#                                 # turn a later round superseded, and every
+#                                 # turn of a card not named, is settled by
+#                                 # supersede.py's rule; no tree, transcript,
+#                                 # history or slot is touched
 #
-# Either way it also reaps `refs/$BOARD_NAME_PREFIX/evidence/<pid>` refs left behind by an
+# The first two modes also reap `refs/$BOARD_NAME_PREFIX/evidence/<pid>` refs left behind by an
 # `evidence.sh` that was killed mid-read. Nothing else in the board touches that
 # namespace, and a leaked ref pins every object its fetch brought with it. A
 # sweep that could not enumerate or could not delete there exits non-zero and
@@ -375,7 +380,9 @@ card_has_live_agent() { # <ticket>
 # whose sessions have no reader left. `--orphans` never stops or forgets a
 # session. A card that is not terminal may still be diagnosed from its
 # transcript (reconcile.py's `death`) or resumed into it. `--orphans` ages
-# exited rows out through reap_agent_records instead.
+# exited rows out through reap_agent_records instead. `--settle` stops and
+# forgets only the rows a later round of a live card superseded, and keeps
+# every transcript (settle_superseded_sessions says why).
 #
 # Scoped by name prefix, so it is this instance's sessions for these tickets
 # and never a sibling board's, the tick's, or ABC-10's when asked about ABC-1.
@@ -459,24 +466,33 @@ forget_session() {
       "$name" "$id" >&2
     transcript=""
   fi
-  if [[ -n "$BOARD_DRY_RUN" ]]; then
-    printf 'DRY RUN: would forget session %s (%s)\n' "$name" "$id"
-  elif "$HARNESS_SH" forget "$id" >/dev/null; then
-    printf 'forgot session %s (%s)\n' "$name" "$id"
-    forgotten_names="$forgotten_names$name"$'\n'
-  else
-    printf 'foreman: could not forget session %s (%s) (see above); its record stays\n' "$name" "$id" >&2
-    forget_status=1
-    return 0
-  fi
+  forget_row "$id" "$name" || return 0
   if [[ -n "$transcript" ]]; then
     remove_transcripts "$name" "$cwd" "$(dirname "$transcript")"
   fi
 }
 
+# forget_row <id> <name> -- remove the session's registry row through its
+# harness, and nothing else. Fails, held in forget_status, when the harness
+# refuses.
+forget_row() {
+  local id="$1" name="$2"
+  if [[ -n "$BOARD_DRY_RUN" ]]; then
+    printf 'DRY RUN: would forget session %s (%s)\n' "$name" "$id"
+    return 0
+  fi
+  if ! "$HARNESS_SH" forget "$id" >/dev/null; then
+    printf 'foreman: could not forget session %s (%s) (see above); its record stays\n' "$name" "$id" >&2
+    forget_status=1
+    return 1
+  fi
+  printf 'forgot session %s (%s)\n' "$name" "$id"
+  forgotten_names="$forgotten_names$name"$'\n'
+}
+
 settle_card_sessions() { # <ticket...>
   local prefixes=() ticket listing kind id name cwd session state pid idle
-  local waited=0 poll_seconds=2 forgetting="" left="" asked=""
+  local waited=0 forgetting="" left=""
   for ticket in "$@"; do prefixes+=("$(card_agents_prefix "$ticket")"); done
   while :; do
     if ! listing="$(card_sessions ${prefixes[@]+"${prefixes[@]}"})"; then
@@ -507,32 +523,121 @@ settle_card_sessions() { # <ticket...>
       esac
     done <<<"$listing"
     [[ -n "$idle" ]] || return 0
-    if [[ -n "$BOARD_DRY_RUN" ]]; then
-      while IFS="$FIELD_SEP" read -r id name; do
-        [[ -n "$id" ]] && printf 'DRY RUN: would stop session %s (%s), then forget it\n' "$name" "$id"
-      done <<<"$idle"
-      return 0
-    fi
-    if [[ "$waited" -ge "$AGENT_STOP_TIMEOUT_SECONDS" ]]; then
-      while IFS="$FIELD_SEP" read -r id name; do
-        [[ -n "$id" ]] && printf 'foreman: leaving session %s (%s) -- the stop did not land in %ss\n' \
-          "$name" "$id" "$AGENT_STOP_TIMEOUT_SECONDS" >&2
-      done <<<"$idle"
-      stop_status=1
-      return 0
-    fi
-    while IFS="$FIELD_SEP" read -r id name; do
-      [[ -n "$id" ]] || continue
-      if ! in_words "$asked" "$id"; then
-        printf 'stopping session %s (%s)\n' "$name" "$id"
-        asked="$asked $id"
-      fi
-      # The registry above decides whether this landed; the exit code cannot.
-      "$HARNESS_SH" stop "$id" >/dev/null 2>&1 || true
-    done <<<"$idle"
-    sleep "$poll_seconds"
-    waited=$((waited + poll_seconds))
+    stop_round "$waited" "$idle" || return 0
+    waited=$((waited + STOP_POLL_SECONDS))
   done
+}
+
+# How often a stop loop re-reads the registry, in seconds.
+STOP_POLL_SECONDS=2
+# The id of every session a stop loop has announced, so each is named once.
+stop_announced=""
+
+# stop_round <seconds waited so far> <rows, one "<id>FIELD_SEP<name>" per line>
+#
+# One poll of a stop loop: stop every row, then sleep STOP_POLL_SECONDS. The
+# stop is re-issued on every poll, because the registry read by the caller, not
+# the exit code, says when it landed. Returns 1 when the loop is over instead:
+# on a dry run, which only names what it would stop, and at the
+# AGENT_STOP_TIMEOUT_SECONDS bound, which names every row still running and
+# holds the failure in stop_status.
+stop_round() {
+  local waited="$1" rows="$2" id name
+  if [[ -n "$BOARD_DRY_RUN" ]]; then
+    while IFS="$FIELD_SEP" read -r id name; do
+      [[ -n "$id" ]] && printf 'DRY RUN: would stop session %s (%s)\n' "$name" "$id"
+    done <<<"$rows"
+    return 1
+  fi
+  if [[ "$waited" -ge "$AGENT_STOP_TIMEOUT_SECONDS" ]]; then
+    while IFS="$FIELD_SEP" read -r id name; do
+      [[ -n "$id" ]] && printf 'foreman: leaving session %s (%s) -- the stop did not land in %ss\n' \
+        "$name" "$id" "$AGENT_STOP_TIMEOUT_SECONDS" >&2
+    done <<<"$rows"
+    stop_status=1
+    return 1
+  fi
+  while IFS="$FIELD_SEP" read -r id name; do
+    [[ -n "$id" ]] || continue
+    if ! in_words "$stop_announced" "$id"; then
+      printf 'stopping session %s (%s)\n' "$name" "$id"
+      stop_announced="$stop_announced $id"
+    fi
+    "$HARNESS_SH" stop "$id" >/dev/null 2>&1 || true
+  done <<<"$rows"
+  sleep "$STOP_POLL_SECONDS"
+}
+
+# Settle the finished turns a live card no longer needs: `--settle` mode.
+#
+# A finished turn idles with its pid and about 300 MB until something stops it,
+# and ticket mode reaches a card only once it is terminal. supersede.py's header
+# has the measurement.
+#
+# supersede.py owns the rule for which rows are settled and how. It reads the
+# registry and prints one line per row: `stop` (idle, settle it), `forget`
+# (exited, and nothing will resume it) or `keep` (its card may still resume
+# it -- a resume needs the row, and the row must not be `stopped`, or
+# --orphans reaps the tree the resume runs in). Each poll runs
+# it again, so a row stopped here turns up as `forget` or `keep` once its stop
+# lands. The stop loop is ticket mode's, bounded the same way.
+#
+# A forget here removes the registry row and NEVER the transcripts. A
+# transcript directory belongs to the worktree, not to one session: build-1 and
+# the fork a `--resume` of it created write to the same one. Removing it with
+# the superseded build-1 row would delete the transcript of the fork the card
+# resumes next. Ticket mode removes transcripts once the whole card is terminal.
+#
+# No worktree, card history or slot is touched. The card is live, so its tree
+# is still in use, and its slot is held by the card, not by one session.
+settle_status=0
+settle_superseded_sessions() { # <in-flight ticket...>
+  local listing action id name stopping
+  local waited=0 handled=""
+  while :; do
+    if ! listing="$(superseded_sessions ${1+"$@"})"; then
+      printf 'foreman: could not read the agent registry or classify its rows; settling no further session\n' >&2
+      settle_status=1
+      return 0
+    fi
+    stopping=""
+    while IFS="$FIELD_SEP" read -r action id name; do
+      [[ -n "$id" ]] || continue
+      case "$action" in
+        stop)
+          stopping="$stopping$id$FIELD_SEP$name"$'\n'
+          ;;
+        forget)
+          # Once, for the reason settle_card_sessions forgets once.
+          in_words "$handled" "$id" && continue
+          handled="$handled $id"
+          forget_row "$id" "$name" || true
+          ;;
+        keep)
+          in_words "$handled" "$id" && continue
+          handled="$handled $id"
+          printf 'keeping session %s (%s) -- its card may still resume it\n' \
+            "$name" "$id"
+          ;;
+        *)
+          printf 'foreman: supersede.py asked to %s session %s (%s); only stop, forget and keep are known\n' \
+            "${action:-(nothing)}" "$name" "$id" >&2
+          settle_status=1
+          return 0
+          ;;
+      esac
+    done <<<"$listing"
+    [[ -n "$stopping" ]] || return 0
+    stop_round "$waited" "$stopping" || return 0
+    waited=$((waited + STOP_POLL_SECONDS))
+  done
+}
+
+# The settleable rows of this board, as supersede.py prints them. Exits
+# non-zero when the registry cannot be read or its rows cannot be classified,
+# which the caller must not confuse with "nothing to settle".
+superseded_sessions() { # <in-flight ticket...>
+  "$HARNESS_SH" list | "$SKILL_DIR/supersede.py" --prefix "$BOARD_NAME_PREFIX/" --in-flight ${1+"$@"}
 }
 
 # Record in the card's history how many of its sessions this sweep forgot.
@@ -579,7 +684,25 @@ remove_transcripts() {
   printf 'removed transcripts %s\n' "$dir"
 }
 
-[[ "${1:-}" == "--orphans" || $# -gt 0 ]] || die "usage: sweep.sh <TICKET...> | --orphans"
+[[ $# -gt 0 ]] || die "usage: sweep.sh <TICKET...> | --orphans | --settle [IN-FLIGHT-TICKET...]"
+
+# Settle mode does its one job and exits here. It reads no live worktrees, since
+# it removes none, and skips the evidence-ref reap, the worktree prune and the
+# review prune: the other two modes run on the same pass and own those. It still
+# runs under the worktree lock above, so it never forgets a row a ticket-mode
+# sweep of the same board is forgetting at the same moment -- the second forget
+# would be refused and read as a failure.
+if [[ "$1" == "--settle" ]]; then
+  shift
+  settle_superseded_sessions ${1+"$@"}
+  [[ "$settle_status" -eq 0 ]] \
+    || die "could not tell which sessions are superseded (see above); some finished turns may still hold their process"
+  [[ "$forget_status" -eq 0 ]] \
+    || die "could not forget every superseded session (see above); a finished session may still be listed"
+  [[ "$stop_status" -eq 0 ]] \
+    || die "a superseded session did not stop (see above); it still holds its process until a later sweep"
+  exit 0
+fi
 
 # Read ONCE, and read the same way, for BOTH modes. This used to be built only
 # under --orphans; ticket mode called remove_tree() straight from the caller's
