@@ -24,6 +24,7 @@ git init -q -b main "$target"
 fixture_board_toml "$target"
 home="$work/home"
 fixture_add_board "$home" demo "$target"
+fixture_link_board_skill "$home"
 registry="$work/registry.json"
 
 write_registry() { # <status, or empty for none>

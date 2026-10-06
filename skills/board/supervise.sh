@@ -391,17 +391,26 @@ stop_agent() {
   log "asked $TICK_AGENT_NAME ($id) to stop"
 }
 
-start_agent() {
-  # REFUSE A TICK THAT CANNOT LOAD /board, before anything else, a dry run
-  # included. On 2026-09-30 the board skill link in the harness's skills
-  # directory pointed at an install path that did not exist. The tick started,
-  # could not load its skill, and ended its turn. Its row then read as a working
-  # tick, so the watchdog called it healthy and nothing dispatched for about 40
-  # minutes. Starting one more such tick fixes nothing and hides the fault, so
-  # this dies and names the link instead.
+# REFUSE A TICK THAT CANNOT LOAD /board, and refuse it BEFORE ANY TICK IS
+# STOPPED. On 2026-09-30 the board skill link pointed at an install path that
+# did not exist: a tick started, could not load its skill, and read as healthy
+# while nothing dispatched for about 40 minutes. The check then ran only here in
+# start_agent, after --restart and the watchdog repair had already stopped every
+# live tick, so a broken link turned a restart into a stopped board. Every
+# caller now asks first, so a refusal leaves the machine with the ticks it had.
+#
+# Prints the refusal and returns non-zero when the link is broken.
+board_skill_resolves() {
   local check_err
-  check_err="$("$INSTALL_ROOT/bin/install-skills.sh" --check board 2>&1 >/dev/null)" \
-    || die "the board skill does not resolve to this install: ${check_err:-install-skills.sh --check board failed with no message}. No tick was started. Run $INSTALL_ROOT/bin/install-skills.sh to link it."
+  check_err="$("$INSTALL_ROOT/bin/install-skills.sh" --check board 2>&1 >/dev/null)" && return 0
+  printf 'the board skill does not resolve to this install: %s. No tick was stopped or started. Run %s to link it.' \
+    "${check_err:-install-skills.sh --check board failed with no message}" "$INSTALL_ROOT/bin/install-skills.sh"
+  return 1
+}
+
+start_agent() {
+  local refusal
+  refusal="$(board_skill_resolves)" || die "$refusal"
 
   # THE LOOP IS THE ADAPTER'S CONCERN. `--loop-minutes` says the tick repeats
   # and how often, and each harness honours it the way it can: Claude loops
@@ -663,7 +672,11 @@ confirm_started() { # <space-separated ids that were stopped>
 # every build this machine has in flight -- the one failure
 # this whole mode exists to avoid.
 restart_tick() {
-  local before_cards after_cards stopped_ids
+  local before_cards after_cards stopped_ids refusal
+
+  # Before the drain and the stop: a replacement that cannot start must not cost
+  # the board the tick it has.
+  refusal="$(board_skill_resolves)" || die "$refusal"
 
   if ! before_cards="$(card_agents)"; then
     # Nothing has been stopped yet, so refusing costs the operator only a retry.
@@ -865,6 +878,13 @@ fi
 # wedged one this branch exists for. What it must never do is start a
 # replacement beside a tick that is still running.
 repair_tick() {
+  # Before the stop, and logged rather than fatal, for the same reason: a
+  # stopped board is worse than the tick being repaired.
+  local refusal
+  if ! refusal="$(board_skill_resolves)"; then
+    log "ERROR: $refusal The next fire asks again."
+    return 0
+  fi
   if stop_ticks; then
     start_agent
     return 0
