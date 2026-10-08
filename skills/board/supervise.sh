@@ -399,18 +399,20 @@ stop_agent() {
 # live tick, so a broken link turned a restart into a stopped board. Every
 # caller now asks first, so a refusal leaves the machine with the ticks it had.
 #
-# Prints the refusal and returns non-zero when the link is broken.
+# Prints the refusal and returns non-zero when the link is broken. What was
+# stopped or started is the caller's to say: run mode's duplicate trim stops
+# ticks over a broken link, so no one sentence is true for every caller.
 board_skill_resolves() {
   local check_err
   check_err="$("$INSTALL_ROOT/bin/install-skills.sh" --check board 2>&1 >/dev/null)" && return 0
-  printf 'the board skill does not resolve to this install: %s. No tick was stopped or started. Run %s to link it.' \
+  printf 'the board skill does not resolve to this install: %s. Run %s to link it.' \
     "${check_err:-install-skills.sh --check board failed with no message}" "$INSTALL_ROOT/bin/install-skills.sh"
   return 1
 }
 
 start_agent() {
   local refusal
-  refusal="$(board_skill_resolves)" || die "$refusal"
+  refusal="$(board_skill_resolves)" || die "$refusal No tick was stopped or started."
 
   # THE LOOP IS THE ADAPTER'S CONCERN. `--loop-minutes` says the tick repeats
   # and how often, and each harness honours it the way it can: Claude loops
@@ -590,17 +592,21 @@ drain_tick() {
 # replacement beside it -- two ticks running this installation's board loop
 # against one machine-wide HOST_MAX_CONCURRENT, which is the double-dispatch this script
 # exists to prevent.
-stop_ticks() {
-  local waited=0 step listing ids id attempted=""
+#
+# Given an id, every live tick BUT that one: repair_tick() keeps the
+# newest when it cannot start a replacement, and success then means it alone is
+# left.
+stop_ticks() { # [id to keep]
+  local keep="${1:-}" waited=0 step listing ids id attempted=""
   if [[ -n "$BOARD_DRY_RUN" ]]; then
-    log "DRY RUN: would stop every live $TICK_AGENT_NAME ($(surviving_tick_ids)) and wait up to ${TICK_STOP_TIMEOUT_SECONDS}s for the registry to agree"
+    log "DRY RUN: would stop every live $TICK_AGENT_NAME ($(surviving_tick_ids))${keep:+ but $keep} and wait up to ${TICK_STOP_TIMEOUT_SECONDS}s for the registry to agree"
     return 0
   fi
   while :; do
     if listing="$(tick_rows)"; then
-      ids="$(live_tick_ids "$listing")"
+      ids="$(live_tick_ids "$listing" | awk -v keep="$keep" '$0 != keep')"
       if [[ -z "${ids//[[:space:]]/}" ]]; then
-        [[ -z "$attempted" ]] || log "confirmed: no $TICK_AGENT_NAME agent is running after ${waited}s"
+        [[ -z "$attempted" ]] || log "confirmed: no $TICK_AGENT_NAME agent${keep:+ but $keep} is running after ${waited}s"
         return 0
       fi
       while IFS= read -r id; do
@@ -676,7 +682,7 @@ restart_tick() {
 
   # Before the drain and the stop: a replacement that cannot start must not cost
   # the board the tick it has.
-  refusal="$(board_skill_resolves)" || die "$refusal"
+  refusal="$(board_skill_resolves)" || die "$refusal No tick was stopped or started."
 
   if ! before_cards="$(card_agents)"; then
     # Nothing has been stopped yet, so refusing costs the operator only a retry.
@@ -877,19 +883,30 @@ fi
 # minutes and fixed nothing -- and the tick whose stop is slowest to land is the
 # wedged one this branch exists for. What it must never do is start a
 # replacement beside a tick that is still running.
-repair_tick() {
+#
+# Given an id, the caller has more than one live tick, and a broken board skill
+# link then TRIMS to that one instead of standing down. The link check protects
+# a replacement, and trimming starts none, so it needs no link. Standing down
+# left two ticks dispatching into one HOST_MAX_CONCURRENT on every fire until an
+# operator ran install-skills.sh. With the link resolving the id is ignored:
+# stop them all, start one.
+repair_tick() { # [id to keep when the link is broken]
+  local keep="${1:-}" refusal
   # Before the stop, and logged rather than fatal, for the same reason: a
   # stopped board is worse than the tick being repaired.
-  local refusal
-  if ! refusal="$(board_skill_resolves)"; then
-    log "ERROR: $refusal The next fire asks again."
+  if refusal="$(board_skill_resolves)"; then
+    keep=""
+  elif [[ -z "$keep" ]]; then
+    log "ERROR: $refusal No tick was stopped or started. The next fire asks again."
+    return 0
+  else
+    log "ERROR: $refusal Stopping every $TICK_AGENT_NAME but the newest ($keep) and starting none; the next fire asks again."
+  fi
+  if stop_ticks "$keep"; then
+    [[ -n "$keep" ]] || start_agent
     return 0
   fi
-  if stop_ticks; then
-    start_agent
-    return 0
-  fi
-  log "ERROR: $TICK_AGENT_NAME is still live as: $(surviving_tick_ids), ${TICK_STOP_TIMEOUT_SECONDS}s after being asked to stop. Starting no replacement beside it; the next fire asks again. Stop it by id if this repeats."
+  log "ERROR: $TICK_AGENT_NAME is still live as: $(surviving_tick_ids), ${TICK_STOP_TIMEOUT_SECONDS}s after asking every one${keep:+ but $keep} to stop. Starting no replacement beside it; the next fire asks again. Stop it by id if this repeats."
 }
 
 # The tick has run longer than TICK_STARVED_MINUTES, so it has had a full window
@@ -959,7 +976,7 @@ find_starved_board() {
 log_corpse_ticks
 if [[ "$LIVE_TICKS" -gt 1 ]]; then
   log "$LIVE_TICKS $TICK_AGENT_NAME agents are live ($(surviving_tick_ids)); one is the only correct number"
-  repair_tick
+  repair_tick "$ID"
 elif [[ -z "$ID" || "$ID" == "None" ]]; then
   log "no $TICK_AGENT_NAME agent exists"
   start_agent
