@@ -596,15 +596,26 @@ drain_tick() {
 # Given an id, every live tick BUT that one: repair_tick() keeps the
 # newest when it cannot start a replacement, and success then means it alone is
 # left.
+#
+# Returns 0 once no tick but the kept one is live, 1 at the timeout, and 2 when
+# the kept id is no longer live. On 2 it asks no further tick to stop. The kept
+# id was read once by inspect(), so the newest tick can exit before the trim.
+# Stopping the rest then leaves ZERO ticks, and a trim never starts one.
 stop_ticks() { # [id to keep]
-  local keep="${1:-}" waited=0 step listing ids id attempted=""
+  local keep="${1:-}" waited=0 step listing live ids id attempted=""
   if [[ -n "$BOARD_DRY_RUN" ]]; then
     log "DRY RUN: would stop every live $TICK_AGENT_NAME ($(surviving_tick_ids))${keep:+ but $keep} and wait up to ${TICK_STOP_TIMEOUT_SECONDS}s for the registry to agree"
     return 0
   fi
   while :; do
     if listing="$(tick_rows)"; then
-      ids="$(live_tick_ids "$listing" | awk -v keep="$keep" '$0 != keep')"
+      live="$(live_tick_ids "$listing")"
+      # Judged on the same listing the stops are chosen from, so no read
+      # between the two can disagree.
+      if [[ -n "$keep" ]] && ! grep -qxF -- "$keep" <<<"$live"; then
+        return 2
+      fi
+      ids="$(printf '%s\n' "$live" | awk -v keep="$keep" '$0 != keep')"
       if [[ -z "${ids//[[:space:]]/}" ]]; then
         [[ -z "$attempted" ]] || log "confirmed: no $TICK_AGENT_NAME agent${keep:+ but $keep} is running after ${waited}s"
         return 0
@@ -891,7 +902,7 @@ fi
 # operator ran install-skills.sh. With the link resolving the id is ignored:
 # stop them all, start one.
 repair_tick() { # [id to keep when the link is broken]
-  local keep="${1:-}" refusal
+  local keep="${1:-}" refusal rc=0
   # Before the stop, and logged rather than fatal, for the same reason: a
   # stopped board is worse than the tick being repaired.
   if refusal="$(board_skill_resolves)"; then
@@ -902,8 +913,20 @@ repair_tick() { # [id to keep when the link is broken]
   else
     log "ERROR: $refusal Stopping every $TICK_AGENT_NAME but the newest ($keep) and starting none; the next fire asks again."
   fi
-  if stop_ticks "$keep"; then
+  stop_ticks "$keep" || rc=$?
+  if [[ "$rc" -eq 0 ]]; then
     [[ -n "$keep" ]] || start_agent
+    return 0
+  fi
+  # The newest exited after inspect() read it. Trimming to it would stop the
+  # older one too, and the broken link starts no replacement, so the board would
+  # have no tick at all. One tick too many is the lesser fault. The line names
+  # what is still live rather than promising the older tick: if the newest
+  # exited mid-wait, the older one was already asked to stop.
+  if [[ "$rc" -eq 2 ]]; then
+    local survivors
+    survivors="$(surviving_tick_ids)"
+    log "ERROR: the newest $TICK_AGENT_NAME ($keep) is no longer live, so trimming to it would leave no tick. Stopping no more ticks and starting none; still live: ${survivors:-none}. The next fire asks again."
     return 0
   fi
   log "ERROR: $TICK_AGENT_NAME is still live as: $(surviving_tick_ids), ${TICK_STOP_TIMEOUT_SECONDS}s after asking every one${keep:+ but $keep} to stop. Starting no replacement beside it; the next fire asks again. Stop it by id if this repeats."
